@@ -1,0 +1,70 @@
+# --- SO / Editores ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
+*.tmp
+*.lock
+*.bak
+*.orig
+
+# VS Code (ajustes locales de usuario)
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+
+# Entornos/secretos (¡no subir claves!)
+.env
+.env.*
+*.key
+*.pem
+
+# --- Carp. de build/coverage comunes ---
+dist/
+build/
+coverage/
+out/
+tmp/
+.cache/
+.next/
+.vercel/
+.svelte-kit/
+.parcel-cache/
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pytest_cache/
+.pytest_cache/
+.venv/
+venv/
+.envrc
+.mypy_cache/
+.ipynb_checkpoints
+
+# --- Herramientas ---
+*.sqlite3
+*.db
+*.tar
+*.zip
+*.tgz
+
+# --- Sistemas de diseño / arte ---
+*.psd
+*.ai
+*.sketch
+*.fig
