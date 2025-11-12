@@ -10,8 +10,11 @@
     "test": "node __tests__/routerChain.test.js"
   },
   "dependencies": {
+    "@langchain/openai": "^1.1.0",
+    "dotenv": "^17.2.3",
     "googleapis": "^118.0.0",
     "langchain": "^0.1.37",
-    "node-telegram-bot-api": "^0.61.0"
+    "node-telegram-bot-api": "^0.61.0",
+    "openai": "^6.8.1"
   }
 }
