@@ -1,0 +1,17 @@
+{
+  "name": "ufc-orchestrator-bot",
+  "version": "1.0.0",
+  "description": "Telegram-based UFC betting orchestrator using LangChain agents and Google Sheets",
+  "type": "module",
+  "main": "src/core/index.js",
+  "scripts": {
+    "start": "node src/core/index.js",
+    "dev": "NODE_OPTIONS=--enable-source-maps node src/core/index.js",
+    "test": "node __tests__/routerChain.test.js"
+  },
+  "dependencies": {
+    "googleapis": "^118.0.0",
+    "langchain": "^0.1.37",
+    "node-telegram-bot-api": "^0.61.0"
+  }
+}
