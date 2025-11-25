@@ -1,93 +1,323 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import OpenAI from 'openai';
 import '../core/env.js';
-import { ChatOpenAI } from 'langchain/chat_models/openai';
-import { HumanMessage, SystemMessage } from 'langchain/schema';
-import { readRange } from '../tools/sheetOpsTool.js';
 
-const DEFAULT_MODEL = 'gpt-3.5-turbo-0125';
+/**
+ * ENV & CONFIG
+ */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
+const KNOWLEDGE_FILE =
+  process.env.KNOWLEDGE_FILE || './Knowledge/ufc_bets_playbook.md';
+const RESOLVED_KNOWLEDGE_PATH = path.resolve(process.cwd(), KNOWLEDGE_FILE);
+const VERIFY_ASSISTANT_ON_BOOT =
+  process.env.VERIFY_ASSISTANT_ON_BOOT !== 'false';
 
-function formatFightsTable(rows) {
-  if (!rows || !rows.length) {
-    return 'No fight data was found in the sheet.';
-  }
+// Polling config (overridable via env)
+const RUN_POLL_INTERVAL_MS = Number(
+  process.env.RUN_POLL_INTERVAL_MS ?? '1500'
+);
+const RUN_MAX_POLLS = Number(process.env.RUN_MAX_POLLS ?? '60');
 
-  const header = ['Date', 'Event', 'Fighter A', 'Fighter B', 'Odds'];
-  const tableRows = rows
-    .map((row) => row.map((value) => (value ? String(value) : '')))
-    .map((row, index) => `${index + 1}. ${row.join(' | ')}`)
-    .join('\n');
+const client = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-  return `${header.join(' | ')}\n${tableRows}`;
+/**
+ * Simple in-memory cache so we don't re-upload the same knowledge file
+ */
+const knowledgeCache = {
+  fileId: null,
+  lastUploadedMtime: null,
+  lastPath: null,
+};
+
+function logConfiguration() {
+  console.log('⚙️ Betting Wizard config', {
+    assistantId: ASSISTANT_ID,
+    knowledgeFile: RESOLVED_KNOWLEDGE_PATH,
+    knowledgeExists: fs.existsSync(RESOLVED_KNOWLEDGE_PATH),
+    hasOpenAIKey: Boolean(OPENAI_API_KEY),
+    runPollIntervalMs: RUN_POLL_INTERVAL_MS,
+    runMaxPolls: RUN_MAX_POLLS,
+  });
 }
 
-export function createBettingWizard({
-  sheetOps = { readRange },
-  fightsScalper,
-  llmOptions = {},
-} = {}) {
-  const llm = new ChatOpenAI({
-    modelName: llmOptions.modelName || DEFAULT_MODEL,
-    temperature: llmOptions.temperature ?? 0.2,
-    openAIApiKey: process.env.OPENAI_API_KEY,
-  });
-
-  async function generateBettingStrategy({
-    message,
-    sheetId = process.env.SHEET_ID,
-    range = 'Fights!A:E',
-  }) {
-    const context = fightsScalper
-      ? await fightsScalper
-          .getFighterHistory({ sheetId, range, message })
-          .catch((error) => {
-            console.error('Failed to retrieve fighter history', error);
-            return null;
-          })
-      : null;
-
-    const rows = context?.rows
-      ? context.rows
-      : await sheetOps.readRange(sheetId, range).catch((error) => {
-          console.error('Failed to read Google Sheet range', error);
-          return [];
-        });
-
-    const fightsTable = formatFightsTable(rows);
-    const fighterSummary = context?.fighters?.length
-      ? `Identified fighters: ${context.fighters.join(', ')}`
-      : 'No specific fighters identified in the request; using full fight history.';
-
-    const systemPrompt =
-      'You are the Betting Wizard, an expert MMA analyst that crafts responsible betting strategies. '
-      + 'Use the provided fight table to ground your insights. If information is missing, state your assumptions.';
-
-    const humanPrompt = `User request: ${message}\n${fighterSummary}\n\nFights Table:\n${fightsTable}`;
-
-    const response = await llm.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(humanPrompt),
-    ]);
-
-    return response?.content || 'The Betting Wizard could not formulate a response at this time.';
+/**
+ * Ensure mandatory configuration is present before we even create the wizard.
+ */
+function ensureConfigured() {
+  if (!OPENAI_API_KEY) {
+    throw new Error(
+      'OPENAI_API_KEY is not configured. Set it in your environment or .env file.'
+    );
   }
 
-  async function refreshAndSummarise(sheetId) {
-    if (!fightsScalper) {
-      return 'Fights scalper tool is not configured.';
+  if (!ASSISTANT_ID) {
+    console.warn(
+      '⚠️ ASSISTANT_ID is not configured. Betting Wizard will not respond.'
+    );
+  }
+}
+
+/**
+ * Optionally validate that the Assistant ID is real and reachable.
+ */
+async function validateAssistantConfiguration() {
+  if (!ASSISTANT_ID) return;
+
+  try {
+    const assistant = await client.beta.assistants.retrieve(ASSISTANT_ID);
+    console.log('🆗 Assistant verificado:', {
+      id: assistant.id,
+      model: assistant.model,
+      tools: assistant.tools?.map((t) => t.type) ?? [],
+    });
+  } catch (error) {
+    console.error('❌ Unable to verify Assistant configuration:', error);
+  }
+}
+
+/**
+ * Upload (or re-use) the local knowledge file.
+ * Returns the fileId or null if not available.
+ */
+async function syncKnowledgeFile() {
+  try {
+    if (!fs.existsSync(RESOLVED_KNOWLEDGE_PATH)) {
+      console.warn(`⚠️ Knowledge file not found: ${RESOLVED_KNOWLEDGE_PATH}`);
+      return null;
     }
 
-    const updateMessage = await fightsScalper.fetchAndStoreUpcomingFights({
-      sheetId,
+    const stats = fs.statSync(RESOLVED_KNOWLEDGE_PATH);
+
+    // Use cache if file hasn't changed
+    if (
+      knowledgeCache.fileId &&
+      knowledgeCache.lastUploadedMtime === stats.mtimeMs &&
+      knowledgeCache.lastPath === RESOLVED_KNOWLEDGE_PATH
+    ) {
+      return knowledgeCache.fileId;
+    }
+
+    const file = await client.files.create({
+      file: fs.createReadStream(RESOLVED_KNOWLEDGE_PATH),
+      purpose: 'assistants',
     });
 
-    return `${updateMessage}\nThe sheet has been refreshed with the latest UFC bouts.`;
-  }
+    knowledgeCache.fileId = file.id;
+    knowledgeCache.lastUploadedMtime = stats.mtimeMs;
+    knowledgeCache.lastPath = RESOLVED_KNOWLEDGE_PATH;
 
-  return {
-    generateBettingStrategy,
-    refreshAndSummarise,
-  };
+    console.log(`📚 Knowledge file uploaded: ${file.id}`);
+    return file.id;
+  } catch (err) {
+    console.error('❌ Failed to sync knowledge file:', err);
+    return null;
+  }
 }
 
-export default {
-  createBettingWizard,
-};
+/**
+ * Polls the run until it reaches a terminal state.
+ * Uses the **correct** signature for the current OpenAI Node SDK:
+ *   client.beta.threads.runs.retrieve(runId, { thread_id })
+ */
+async function waitForRunCompletion(threadId, runId) {
+  if (!threadId || !runId) {
+    throw new Error(
+      `waitForRunCompletion called with invalid IDs (threadId=${threadId}, runId=${runId})`
+    );
+  }
+
+  let polls = 0;
+  let runStatus = null;
+
+  while (true) {
+    runStatus = await client.beta.threads.runs.retrieve(runId, {
+      thread_id: threadId,
+    });
+
+    const status = runStatus.status;
+    console.log(`⏱️ Run status: ${status} (poll #${polls + 1})`);
+
+    // Terminal states
+    if (
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'expired'
+    ) {
+      return runStatus;
+    }
+
+    // We don't implement tools/submitToolOutputs in this agent.
+    // If this ever happens, at least we log it loudly.
+    if (status === 'requires_action') {
+      console.warn(
+        '⚠️ Run entered requires_action, but Betting Wizard does not implement tool handling yet.'
+      );
+      return runStatus;
+    }
+
+    polls += 1;
+    if (polls >= RUN_MAX_POLLS) {
+      console.warn(
+        `⚠️ Aborting polling after ${polls} polls; last status=${status}`
+      );
+      return runStatus;
+    }
+
+    await new Promise((r) => setTimeout(r, RUN_POLL_INTERVAL_MS));
+  }
+}
+
+/**
+ * Extract the assistant's reply text from thread messages.
+ * We prefer the latest assistant message (optionally filtered by runId).
+ */
+async function getAssistantReply(threadId, runId) {
+  const messages = await client.beta.threads.messages.list(threadId);
+
+  if (!messages?.data?.length) {
+    return null;
+  }
+
+  // Filter messages that belong to this run (if available) and role=assistant
+  const assistantMessages = messages.data.filter((msg) => {
+    if (msg.role !== 'assistant') return false;
+    if (!runId) return true;
+    return msg.run_id === runId;
+  });
+
+  if (!assistantMessages.length) {
+    return null;
+  }
+
+  const lastMessage = assistantMessages[0];
+
+  // In many cases they are already ordered, but just in case:
+  assistantMessages.sort((a, b) => b.created_at - a.created_at);
+
+  const msg = assistantMessages[0];
+
+  const firstContent = msg.content?.[0];
+  if (firstContent?.type === 'text') {
+    return firstContent.text?.value ?? null;
+  }
+
+  // Fallback: try to stringify or join any text parts
+  const textParts = msg.content
+    ?.filter((c) => c.type === 'text')
+    .map((c) => c.text?.value)
+    .filter(Boolean);
+
+  if (textParts?.length) {
+    return textParts.join('\n\n');
+  }
+
+  // As a last resort, we just dump the raw content
+  return JSON.stringify(msg.content, null, 2);
+}
+
+/**
+ * Factory to create the Betting Wizard agent.
+ */
+export function createBettingWizard() {
+  ensureConfigured();
+  logConfiguration();
+
+  if (VERIFY_ASSISTANT_ON_BOOT) {
+    validateAssistantConfiguration().catch((e) =>
+      console.error('❌ Assistant verification failed during init:', e)
+    );
+  }
+
+  /**
+   * Main handler that the router calls.
+   */
+  async function handleMessage(message) {
+    if (!ASSISTANT_ID) {
+      return '⚠️ Betting Wizard no está configurado correctamente. Falta ASSISTANT_ID.';
+    }
+
+    let threadId = null;
+    let runId = null;
+
+    try {
+      console.log(`🧠 Betting Wizard (Assistant) recibió: ${message}`);
+      console.log('🔗 Assistant ID:', ASSISTANT_ID);
+      console.log('🔍 SDK sanity check:', Object.keys(client.beta));
+
+      // Optional knowledge file sync
+      const fileId = await syncKnowledgeFile();
+
+      // 1) Create thread
+      const thread = await client.beta.threads.create({
+        // You can add metadata here if you want:
+        // metadata: { source: 'telegram', ts: Date.now().toString() },
+      });
+      threadId = thread.id;
+      console.log('🧵 Thread creado:', threadId);
+
+      // 2) Add user message
+      await client.beta.threads.messages.create(threadId, {
+        role: 'user',
+        content: message,
+      });
+
+      // 3) Create run
+      const run = await client.beta.threads.runs.create(threadId, {
+        assistant_id: ASSISTANT_ID,
+        additional_instructions: fileId
+          ? `Usa este archivo de referencia: ${fileId}.`
+          : 'No hay archivo local disponible.',
+        // If in the future you add retrieval/file tools:
+        // tool_resources: {
+        //   file_search: { file_ids: [fileId] }
+        // }
+      });
+
+      runId = run.id;
+      console.log('🏃 Run iniciado:', runId);
+
+      // 4) Poll until completed / failed / etc. (fixed retrieve signature)
+      const finalRun = await waitForRunCompletion(threadId, runId);
+
+      if (!finalRun) {
+        console.error('❌ Polling returned null run.');
+        return '⚠️ El Betting Wizard tuvo un problema interno.';
+      }
+
+      if (finalRun.status === 'failed') {
+        console.error('💥 Assistant run failed:', finalRun.last_error);
+        return '⚠️ El Betting Wizard tuvo un problema interno.';
+      }
+
+      if (
+        finalRun.status === 'requires_action' ||
+        finalRun.status === 'cancelled' ||
+        finalRun.status === 'expired'
+      ) {
+        console.error('💥 Run ended in non-success state:', {
+          status: finalRun.status,
+          last_error: finalRun.last_error,
+        });
+        return '⚠️ El Betting Wizard no pudo completar la respuesta.';
+      }
+
+      // 5) Fetch the assistant reply from messages
+      const assistantReply = await getAssistantReply(threadId, runId);
+      const reply = assistantReply || 'Sin respuesta del Betting Wizard.';
+
+      console.log('✅ Assistant respondió:', reply);
+      return reply;
+    } catch (err) {
+      console.error('💥 Error en Betting Wizard Assistant:', err);
+      console.error('🧾 Contexto IDs:', { threadId, runId });
+      return '⚠️ Betting Wizard no está disponible ahora.';
+    }
+  }
+
+  return { handleMessage };
+}
+
+export default { createBettingWizard };

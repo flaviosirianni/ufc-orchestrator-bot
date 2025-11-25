@@ -25,6 +25,11 @@ function bootstrap() {
     fightsScalper,
   });
 
+  console.log('[bootstrap] Betting Wizard instance type:', {
+    isPromise: bettingWizard instanceof Promise,
+    hasHandleMessage: typeof bettingWizard?.handleMessage === 'function',
+  });
+
   const router = createRouterChain({
     sheetOps,
     fightsScalper,

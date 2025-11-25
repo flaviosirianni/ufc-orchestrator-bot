@@ -1,42 +1,51 @@
 import assert from 'node:assert/strict';
-import { createRouterChain, determineIntent, ROUTES } from '../src/core/routerChain.js';
-
+import { createRouterChain } from '../src/core/routerChain.js';
 
 async function runTests() {
   const tests = [];
 
   tests.push(async () => {
-    const intent = determineIntent('please update the fights card');
-    assert.equal(intent, ROUTES.UPDATE, 'update intent should be detected');
-  });
-
-  tests.push(async () => {
-    const intent = determineIntent('any bet ideas for the weekend?');
-    assert.equal(intent, ROUTES.BET, 'bet intent should be detected');
-  });
-
-  tests.push(async () => {
-    const calls = [];
-    const bettingWizard = {
-      async generateBettingStrategy(options) {
-        calls.push(options);
-        return 'analysis result';
-      },
-    };
-
+    const invokedWith = [];
     const router = createRouterChain({
-      sheetOps: {},
-      fightsScalper: {},
-      bettingWizard,
+      bettingWizard: {
+        async handleMessage(message) {
+          return `BW:${message}`;
+        },
+      },
+      sheetOps: {
+        async handleMessage() {
+          return 'SheetOps';
+        },
+      },
+      fightsScalper: {
+        async handleMessage() {
+          return 'FightsScalper';
+        },
+      },
+      chain: {
+        async invoke({ input }) {
+          invokedWith.push(input);
+          return { content: 'bettingWizard' };
+        },
+      },
     });
 
-    const response = await router.routeMessage('analyze the main event');
-    assert.equal(response, 'analysis result', 'router should return betting wizard response');
-    assert.deepEqual(calls[0], {
-      message: 'analyze the main event',
-      sheetId: process.env.SHEET_ID,
-      range: 'Fights!A:E',
+    const response = await router.routeMessage('Need fight insights');
+    assert.equal(response, 'BW:Need fight insights');
+    assert.equal(invokedWith[0], 'Need fight insights');
+  });
+
+  tests.push(async () => {
+    const router = createRouterChain({
+      chain: {
+        async invoke() {
+          return { content: 'unknownAgent' };
+        },
+      },
     });
+
+    const response = await router.routeMessage('??');
+    assert.equal(response, "I'm not sure which agent to use for that.");
   });
 
   for (const test of tests) {

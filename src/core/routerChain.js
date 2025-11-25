@@ -1,92 +1,84 @@
-import './env.js';
+import { ChatOpenAI } from '@langchain/openai';
+import { PromptTemplate } from '@langchain/core/prompts';
 
-export const ROUTES = {
-  UPDATE: 'update',
-  ANALYZE: 'analyze',
-  BET: 'bet',
-  HELP: 'help',
-  UNKNOWN: 'unknown',
-};
+const routerPrompt = PromptTemplate.fromTemplate(`
+  You are the UFC Orchestrator.
+  Your job is to decide which agent should handle the user's request.
+  Available agents:
+  - "bettingWizard": Handles fight analysis and betting strategies.
+  - "sheetOps": Handles reading/writing UFC fight data in Google Sheets.
+  - "fightsScalper": Fetches new fight data after events.
 
-export function determineIntent(message = '') {
-  const text = message.toLowerCase();
+  User message: {input}
 
-  if (/(update|refresh|sync)/.test(text)) {
-    return ROUTES.UPDATE;
-  }
-
-  if (/(analy[sz]e|analysis|insight|preview)/.test(text)) {
-    return ROUTES.ANALYZE;
-  }
-
-  if (/(bet|wager|parlay|pick)/.test(text)) {
-    return ROUTES.BET;
-  }
-
-  if (/(help|what can you do|usage)/.test(text)) {
-    return ROUTES.HELP;
-  }
-
-  return ROUTES.UNKNOWN;
-}
-
-function defaultHelpMessage() {
-  return [
-    '👋 Welcome to the UFC Orchestrator Bot!',
-    '• Send "update" to refresh the Google Sheet with the latest fight card.',
-    '• Send "analyze" followed by a question for scouting reports.',
-    '• Ask for "bet" ideas to receive a high-level betting angle.',
-  ].join('\n');
-}
+  Respond with only one of: bettingWizard, sheetOps, fightsScalper.
+`);
 
 export function createRouterChain({
   sheetOps,
   fightsScalper,
   bettingWizard,
+  chain: providedChain,
 } = {}) {
-  const sheetId = process.env.SHEET_ID;
+  const chain =
+    providedChain ??
+    routerPrompt.pipe(
+      new ChatOpenAI({
+        model: 'gpt-4o-mini',
+        temperature: 0.4,
+      })
+    );
 
   async function routeMessage(message = '') {
-    const intent = determineIntent(message);
+    console.log('[routerChain] Incoming message:', message);
+    console.log('[routerChain] Agent availability snapshot:', {
+      bettingWizardType: bettingWizard && typeof bettingWizard,
+      bettingWizardHasHandler: typeof bettingWizard?.handleMessage === 'function',
+      sheetOpsHasHandler: typeof sheetOps?.handleMessage === 'function',
+      fightsScalperHasHandler: typeof fightsScalper?.handleMessage === 'function',
+    });
 
-    switch (intent) {
-      case ROUTES.UPDATE:
-        if (!fightsScalper?.fetchAndStoreUpcomingFights) {
-          return 'Update route is not available because the fights scalper tool is missing.';
-        }
-        return fightsScalper.fetchAndStoreUpcomingFights({
-          sheetId,
-        });
-      case ROUTES.ANALYZE:
-      case ROUTES.BET:
-        if (!bettingWizard?.generateBettingStrategy) {
-          return 'Betting Wizard is not configured yet. Please check the server logs.';
-        }
-        return bettingWizard.generateBettingStrategy({
-          message,
-          sheetId,
-          range: 'Fights!A:E',
-        });
-      case ROUTES.HELP:
-        return defaultHelpMessage();
-      case ROUTES.UNKNOWN:
-      default:
-        return [
-          "I wasn't sure what you needed.",
-          'Try commands like "update fights", "analyze the main event", or "bet ideas".',
-        ].join(' ');
+    let target = 'unknown';
+
+    try {
+      const response = await chain.invoke({ input: message });
+      target = response.content?.trim().toLowerCase() || 'unknown';
+    } catch (error) {
+      console.error('❌ Router failed to invoke the language model.', error);
+      return 'No pude decidir qué agente usar por un error interno.';
+    }
+
+    console.log(`🤖 Router decided: ${target}`);
+
+    try {
+      switch (target) {
+        case 'bettingwizard':
+          if (!bettingWizard?.handleMessage) {
+            console.error('❌ Betting Wizard agent missing or invalid.', bettingWizard);
+            return 'Betting Wizard agent is unavailable.';
+          }
+          return await bettingWizard.handleMessage(message);
+        case 'sheetops':
+          if (!sheetOps?.handleMessage) {
+            console.error('❌ SheetOps agent missing or invalid.', sheetOps);
+            return 'Sheet Ops agent is unavailable.';
+          }
+          return await sheetOps.handleMessage(message);
+        case 'fightsscalper':
+          if (!fightsScalper?.handleMessage) {
+            console.error('❌ FightsScalper agent missing or invalid.', fightsScalper);
+            return 'Fights Scalper agent is unavailable.';
+          }
+          return await fightsScalper.handleMessage(message);
+        default:
+          console.warn('⚠️ Router could not determine target agent.');
+          return "I'm not sure which agent to use for that.";
+      }
+    } catch (error) {
+      console.error(`❌ Agent "${target}" threw an error.`, error);
+      return 'El agente seleccionado falló al procesar tu solicitud.';
     }
   }
 
-  return {
-    routeMessage,
-    determineIntent,
-    sheetOps,
-  };
+  return { routeMessage };
 }
-
-export default {
-  createRouterChain,
-  determineIntent,
-  ROUTES,
-};
