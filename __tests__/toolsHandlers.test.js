@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { handleMessage as handleSheetMessage } from '../src/tools/sheetOpsTool.js';
-import { handleMessage as handleFightsMessage } from '../src/tools/fightsScalperTool.js';
+import {
+  handleMessage as handleFightsMessage,
+  extractFighterNamesFromMessage,
+} from '../src/tools/fightsScalperTool.js';
 
 export async function runToolsHandlersTests() {
   const tests = [];
@@ -42,6 +45,19 @@ export async function runToolsHandlersTests() {
     ]);
     assert.equal(captured.opts.append, true);
     assert.match(response, /Agregué 2 fila\(s\)/);
+  });
+
+  tests.push(async () => {
+    const names = extractFighterNamesFromMessage('Hola amiguito, como estas?');
+    assert.deepEqual(names, []);
+  });
+
+  tests.push(async () => {
+    const names = extractFighterNamesFromMessage(
+      'me gustaria saber que opinas de la pelea de bautista vs oliveira'
+    );
+
+    assert.deepEqual(names, ['Bautista', 'Oliveira']);
   });
 
   tests.push(async () => {

@@ -105,7 +105,9 @@ export function parseDateFromMessage(message = '', { referenceDate = new Date() 
 export function isMainCardLookupRequest(message = '') {
   const text = normalizeString(message);
   return (
-    /\b(main card|cartelera principal|evento|ufc)\b/.test(text) &&
+    /\b(main card|cartelera principal|cartelera|evento|ufc|quien pelea|quienes pelean)\b/.test(
+      text
+    ) &&
     /\b(\d{1,2}[\/-]\d{1,2}|20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\s+de\s+[a-zñ]+)\b/.test(
       text
     )
@@ -259,7 +261,9 @@ function buildEventLookupQueries(targetDate) {
 
   return [
     `UFC ${monthName} ${day} ${year} main card`,
+    `UFC ${monthName} ${day} ${year} who fights`,
     `UFC ${iso} main card`,
+    `UFC ${iso} who fights`,
     `UFC Fight Night ${monthName} ${day} ${year}`,
   ];
 }

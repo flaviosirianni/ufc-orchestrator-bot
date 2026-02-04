@@ -14,6 +14,45 @@ const routerPrompt = PromptTemplate.fromTemplate(`
   Respond with only one of: bettingWizard, sheetOps, fightsScalper.
 `);
 
+function classifyWithRules(message = '') {
+  const text = String(message || '').toLowerCase();
+  const hasDateHint =
+    /\b(\d{1,2}[\/-]\d{1,2}|20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\s+de\s+[a-zñ]+)\b/.test(
+      text
+    );
+
+  if (!text.trim()) {
+    return null;
+  }
+
+  // Deterministic routing for common intents; avoids misroutes from LLM.
+  if (
+    /\b(write|append|update|set|sheet|google sheets|leer|read|escrib|agrega|agregar)\b/.test(
+      text
+    )
+  ) {
+    return 'sheetops';
+  }
+
+  if (/\b(historial|fight history|record|records|vs|versus|\bv\b)\b/.test(text)) {
+    return 'fightsscalper';
+  }
+
+  if (
+    /\b(main card|main event|evento|analiz|predic|pronost|quien gana|opina|estrategia|apuesta)\b/.test(
+      text
+    )
+  ) {
+    return 'bettingwizard';
+  }
+
+  if (hasDateHint && /\b(main|cartelera|evento|quien pelea)\b/.test(text)) {
+    return 'bettingwizard';
+  }
+
+  return null;
+}
+
 export function createRouterChain({
   sheetOps,
   fightsScalper,
@@ -38,14 +77,16 @@ export function createRouterChain({
       fightsScalperHasHandler: typeof fightsScalper?.handleMessage === 'function',
     });
 
-    let target = 'unknown';
+    let target = classifyWithRules(message) || 'unknown';
 
-    try {
-      const response = await chain.invoke({ input: message });
-      target = response.content?.trim().toLowerCase() || 'unknown';
-    } catch (error) {
-      console.error('❌ Router failed to invoke the language model.', error);
-      return 'No pude decidir qué agente usar por un error interno.';
+    if (target === 'unknown') {
+      try {
+        const response = await chain.invoke({ input: message });
+        target = response.content?.trim().toLowerCase() || 'unknown';
+      } catch (error) {
+        console.error('❌ Router failed to invoke the language model.', error);
+        return 'No pude decidir qué agente usar por un error interno.';
+      }
     }
 
     console.log(`🤖 Router decided: ${target}`);

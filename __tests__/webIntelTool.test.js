@@ -43,6 +43,10 @@ export async function runWebIntelToolTests() {
       isMainCardLookupRequest('podes analizar el main card del 7 de febrero?'),
       true
     );
+    assert.equal(
+      isMainCardLookupRequest('hola, quiero saber quien pelea el 7 de febrero'),
+      true
+    );
     assert.equal(isMainCardLookupRequest('quiero una estrategia conservadora'), false);
   });
 

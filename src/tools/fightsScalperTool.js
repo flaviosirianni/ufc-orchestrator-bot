@@ -9,6 +9,73 @@ const MAX_HISTORY_ROWS = 12;
 const DEFAULT_SYNC_INTERVAL_MS = Number(
   process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'
 );
+const NAME_STOPWORDS = new Set([
+  'a',
+  'al',
+  'ante',
+  'con',
+  'contra',
+  'de',
+  'del',
+  'el',
+  'en',
+  'fight',
+  'la',
+  'las',
+  'los',
+  'lucha',
+  'mi',
+  'pelea',
+  'por',
+  'que',
+  'su',
+  'sobre',
+  'the',
+  'vs',
+  'v',
+  'versus',
+]);
+const SEARCH_STOPWORDS = new Set([
+  ...NAME_STOPWORDS,
+  'analiza',
+  'analizar',
+  'analicemos',
+  'apuesta',
+  'apuestas',
+  'bot',
+  'card',
+  'cartelera',
+  'como',
+  'cual',
+  'cuales',
+  'dame',
+  'datos',
+  'evento',
+  'gustaria',
+  'historial',
+  'hoy',
+  'main',
+  'me',
+  'opinas',
+  'opinion',
+  'pelea',
+  'pelea',
+  'peleador',
+  'peleadores',
+  'prediccion',
+  'quotes',
+  'quiero',
+  'respecto',
+  'saber',
+  'semana',
+  'sin',
+  'sobre',
+  'todavia',
+  'ufc',
+  'una',
+  'uno',
+  'ver',
+]);
 const CACHE_DIR = path.resolve(
   process.cwd(),
   process.env.FIGHT_HISTORY_CACHE_DIR || 'data'
@@ -21,6 +88,121 @@ let syncInFlight = null;
 
 function normalise(value) {
   return value ? String(value).toLowerCase() : '';
+}
+
+function normaliseWord(word = '') {
+  return word
+    .replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function toTitleCase(words = []) {
+  return words
+    .map((part) => {
+      const lower = normaliseWord(part);
+      return `${lower.charAt(0).toUpperCase()}${lower.slice(1)}`;
+    })
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+function splitWords(message = '') {
+  return message
+    .replace(/[^\p{L}\s'.-]/gu, ' ')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+function isVsToken(word = '') {
+  return /^(vs|versus|v)$/i.test(word.replace('.', ''));
+}
+
+function extractNamesAroundVs(words = []) {
+  const names = [];
+
+  for (let i = 0; i < words.length; i += 1) {
+    if (!isVsToken(words[i])) continue;
+
+    const left = [];
+    for (let li = i - 1; li >= 0 && left.length < 1; li -= 1) {
+      const token = normaliseWord(words[li]);
+      if (!token || NAME_STOPWORDS.has(token)) continue;
+      left.unshift(words[li]);
+    }
+
+    const right = [];
+    for (let ri = i + 1; ri < words.length && right.length < 1; ri += 1) {
+      const token = normaliseWord(words[ri]);
+      if (!token || NAME_STOPWORDS.has(token)) continue;
+      right.push(words[ri]);
+    }
+
+    if (left.length) {
+      names.push(toTitleCase(left));
+    }
+    if (right.length) {
+      names.push(toTitleCase(right));
+    }
+  }
+
+  return names;
+}
+
+function extractCapitalizedNames(words = []) {
+  const names = [];
+  let buffer = [];
+
+  for (const rawWord of words) {
+    const word = rawWord.replace(/[.'-]/g, '');
+    const isCapitalised = word[0] === word[0]?.toUpperCase();
+
+    if (isCapitalised) {
+      buffer.push(rawWord);
+      if (buffer.length === 2) {
+        names.push(toTitleCase(buffer));
+        buffer = [];
+      }
+      continue;
+    }
+
+    if (buffer.length >= 2) {
+      names.push(toTitleCase(buffer));
+    }
+    buffer = [];
+  }
+
+  if (buffer.length >= 2) {
+    names.push(toTitleCase(buffer));
+  }
+
+  return names;
+}
+
+function extractSearchTokens(message = '', fighters = []) {
+  const tokenSet = new Set();
+
+  for (const fighter of fighters) {
+    for (const part of fighter.split(/\s+/)) {
+      const token = normaliseWord(part);
+      if (token && token.length >= 3 && !SEARCH_STOPWORDS.has(token)) {
+        tokenSet.add(token);
+      }
+    }
+  }
+
+  for (const part of splitWords(message)) {
+    const token = normaliseWord(part);
+    if (token && token.length >= 4 && !SEARCH_STOPWORDS.has(token)) {
+      tokenSet.add(token);
+    }
+  }
+
+  return Array.from(tokenSet);
 }
 
 function ensureCacheDir() {
@@ -52,65 +234,14 @@ function computeRowsHash(rows) {
     .digest('hex');
 }
 
-function extractFighterNamesFromMessage(message = '') {
-  const cleaned = message.replace(/[^a-zA-Z\s]/g, ' ');
-  const words = cleaned.split(/\s+/).filter(Boolean);
+export function extractFighterNamesFromMessage(message = '') {
+  const words = splitWords(message);
+  const names = new Set([
+    ...extractNamesAroundVs(words),
+    ...extractCapitalizedNames(words),
+  ]);
 
-  const names = new Set();
-  let buffer = [];
-
-  for (const word of words) {
-    const isCapitalised = word[0] === word[0]?.toUpperCase();
-
-    if (isCapitalised) {
-      buffer.push(word);
-      if (buffer.length === 2) {
-        names.add(buffer.join(' '));
-        buffer = [];
-      }
-      continue;
-    }
-
-    if (/^vs$/i.test(word) || /^versus$/i.test(word) || /^v$/i.test(word)) {
-      if (buffer.length) {
-        names.add(buffer.join(' '));
-      }
-      buffer = [];
-      continue;
-    }
-
-    if (buffer.length) {
-      names.add(buffer.join(' '));
-      buffer = [];
-    }
-  }
-
-  if (buffer.length) {
-    names.add(buffer.join(' '));
-  }
-
-  if (!names.size && words.includes('vs')) {
-    const [left, right] = message.split(/vs|versus|v/gi);
-    const normaliseName = (segment = '') =>
-      segment
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-        .join(' ');
-
-    const leftName = normaliseName(left);
-    const rightName = normaliseName(right);
-
-    if (leftName) {
-      names.add(leftName);
-    }
-    if (rightName) {
-      names.add(rightName);
-    }
-  }
-
-  return Array.from(names).filter(Boolean);
+  return Array.from(names).filter(Boolean).slice(0, 6);
 }
 
 function isCacheStale(meta, maxAgeMs) {
@@ -280,24 +411,44 @@ export async function getFighterHistory({
   message = '',
   readRangeImpl = readRange,
 } = {}) {
-  const fighters = extractFighterNamesFromMessage(message);
-
-  if (!fighters.length) {
-    return { fighters: [], rows: [] };
-  }
+  let fighters = extractFighterNamesFromMessage(message);
 
   const values = await loadHistoryRows({
     sheetId,
     range,
     readRangeImpl,
   });
-  const lowerNames = fighters.map((name) => normalise(name));
-  const filteredRows = values.filter((row) => {
-    const rowValues = row.map(normalise);
-    return lowerNames.some((name) => rowValues.some((value) => value.includes(name)));
-  });
 
-  return { fighters, rows: filteredRows };
+  let filteredRows = [];
+  if (fighters.length) {
+    const lowerNames = fighters.map((name) => normalise(name));
+    filteredRows = values.filter((row) => {
+      const rowValues = row.map(normalise);
+      return lowerNames.some((name) => rowValues.some((value) => value.includes(name)));
+    });
+  }
+
+  // Fallback for noisy queries when fighter tokens exist (e.g. lowercase surnames)
+  if (fighters.length && !filteredRows.length) {
+    const tokens = extractSearchTokens(message, fighters);
+    if (tokens.length) {
+      filteredRows = values.filter((row) => {
+        const rowJoined = row.map(normalise).join(' ');
+        return tokens.some((token) => rowJoined.includes(token));
+      });
+    }
+  }
+
+  const dedupedRows = [];
+  const seen = new Set();
+  for (const row of filteredRows) {
+    const key = JSON.stringify(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dedupedRows.push(row);
+  }
+
+  return { fighters, rows: dedupedRows };
 }
 
 export async function fetchAndStoreUpcomingFights() {

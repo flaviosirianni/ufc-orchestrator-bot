@@ -22,6 +22,7 @@ const RUN_MAX_POLLS = Number(process.env.RUN_MAX_POLLS ?? '60');
 const MAX_HISTORY_CONTEXT_ROWS = Number(
   process.env.MAX_HISTORY_CONTEXT_ROWS ?? '18'
 );
+const FALLBACK_MODEL = process.env.BETTING_WIZARD_FALLBACK_MODEL || 'gpt-4o-mini';
 
 const client = new OpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -219,12 +220,32 @@ async function getAssistantReply(threadId, runId) {
   return JSON.stringify(msg.content, null, 2);
 }
 
+async function generateFallbackReply({
+  message,
+  additionalInstructions,
+}) {
+  const response = await client.chat.completions.create({
+    model: FALLBACK_MODEL,
+    temperature: 0.3,
+    messages: [
+      {
+        role: 'system',
+        content: `Eres un analista de UFC pragmático. ${additionalInstructions}`,
+      },
+      { role: 'user', content: message },
+    ],
+  });
+
+  return response.choices?.[0]?.message?.content?.trim() || null;
+}
+
 function buildAdditionalInstructions(fileId) {
   const parts = [
     'IMPORTANTE: Ya tienes datos historicos de peleadores disponibles desde el sistema.',
     'NO pidas al usuario estadisticas historicas ni historial de peleadores.',
     'NO pidas al usuario nombres de peleadores para resolver la cartelera; debes inferirla desde [WEB_CONTEXT] y dejar supuestos explicitos si falta algun cruce.',
     'Si [WEB_CONTEXT] incluye una cartelera principal, usala directamente.',
+    'NUNCA digas que no tienes datos historicos; usa [HISTORICAL_CONTEXT] y, si es incompleto, aclara la limitacion concreta.',
     'Si faltan datos de mercado en tiempo real, solo pide cuotas/lineas actuales (por ejemplo Bet365).',
     'Si no hay suficiente informacion, responde con supuestos explicitos y una estrategia conservadora.',
   ];
@@ -363,14 +384,24 @@ export function createBettingWizard({ fightsScalper, webIntel } = {}) {
       });
 
       // 3) Create run
-      const run = await client.beta.threads.runs.create(threadId, {
-        assistant_id: ASSISTANT_ID,
-        additional_instructions: additionalInstructions,
-        // If in the future you add retrieval/file tools:
-        // tool_resources: {
-        //   file_search: { file_ids: [fileId] }
-        // }
-      });
+      let run;
+      try {
+        run = await client.beta.threads.runs.create(threadId, {
+          assistant_id: ASSISTANT_ID,
+          additional_instructions: additionalInstructions,
+          tool_choice: 'none',
+          // If in the future you add retrieval/file tools:
+          // tool_resources: {
+          //   file_search: { file_ids: [fileId] }
+          // }
+        });
+      } catch (runCreateError) {
+        console.warn('⚠️ Run create with tool_choice=none failed, retrying without override.');
+        run = await client.beta.threads.runs.create(threadId, {
+          assistant_id: ASSISTANT_ID,
+          additional_instructions: additionalInstructions,
+        });
+      }
 
       runId = run.id;
       console.log('🏃 Run iniciado:', runId);
@@ -393,10 +424,23 @@ export function createBettingWizard({ fightsScalper, webIntel } = {}) {
         finalRun.status === 'cancelled' ||
         finalRun.status === 'expired'
       ) {
-        console.error('💥 Run ended in non-success state:', {
+        console.warn('⚠️ Assistant run ended in non-success state. Trying fallback:', {
           status: finalRun.status,
           last_error: finalRun.last_error,
         });
+
+        try {
+          const fallbackReply = await generateFallbackReply({
+            message: enrichedMessage,
+            additionalInstructions,
+          });
+          if (fallbackReply) {
+            return fallbackReply;
+          }
+        } catch (fallbackError) {
+          console.error('❌ Fallback completion failed:', fallbackError);
+        }
+
         return '⚠️ El Betting Wizard no pudo completar la respuesta.';
       }
 

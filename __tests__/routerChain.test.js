@@ -36,6 +36,34 @@ export async function runRouterChainTests() {
   });
 
   tests.push(async () => {
+    let invoked = 0;
+    const router = createRouterChain({
+      bettingWizard: {
+        async handleMessage(message) {
+          return `BW:${message}`;
+        },
+      },
+      sheetOps: { async handleMessage() { return 'SO'; } },
+      fightsScalper: { async handleMessage() { return 'FS'; } },
+      chain: {
+        async invoke() {
+          invoked += 1;
+          return { content: 'fightsScalper' };
+        },
+      },
+    });
+
+    const response = await router.routeMessage(
+      'hola amiguito, como andas? quiero saber quien pelea el 7 de febrero'
+    );
+    assert.equal(
+      response,
+      'BW:hola amiguito, como andas? quiero saber quien pelea el 7 de febrero'
+    );
+    assert.equal(invoked, 0);
+  });
+
+  tests.push(async () => {
     const router = createRouterChain({
       bettingWizard: { async handleMessage() { return 'BW'; } },
       sheetOps: {
