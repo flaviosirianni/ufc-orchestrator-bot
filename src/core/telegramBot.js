@@ -12,7 +12,19 @@ export function startTelegramBot(router) {
 
     console.log(`📩 Mensaje recibido: ${userMessage}`);
 
-    const reply = await router.routeMessage(userMessage);
+    if (!userMessage.trim()) {
+      await bot.sendMessage(
+        chatId,
+        'Por ahora puedo procesar texto. Si querés, mandame tu consulta por mensaje.'
+      );
+      return;
+    }
+
+    const reply = await router.routeMessage({
+      chatId: String(chatId),
+      message: userMessage,
+      telegramMessageId: msg.message_id,
+    });
     bot.sendMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
   });
 

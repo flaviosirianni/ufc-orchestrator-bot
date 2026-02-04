@@ -7,56 +7,112 @@ const routerPrompt = PromptTemplate.fromTemplate(`
   Available agents:
   - "bettingWizard": Handles fight analysis and betting strategies.
   - "sheetOps": Handles reading/writing UFC fight data in Google Sheets.
-  - "fightsScalper": Fetches new fight data after events.
+  - "fightsScalper": Handles explicit requests for raw historical rows.
 
   User message: {input}
 
   Respond with only one of: bettingWizard, sheetOps, fightsScalper.
 `);
 
-function classifyWithRules(message = '') {
-  const text = String(message || '').toLowerCase();
-  const hasDateHint =
-    /\b(\d{1,2}[\/-]\d{1,2}|20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}\s+de\s+[a-zñ]+)\b/.test(
-      text
-    );
+const ENABLE_LLM_ROUTER = process.env.ENABLE_LLM_ROUTER === 'true';
 
-  if (!text.trim()) {
-    return null;
+function parseRouteInput(input) {
+  if (typeof input === 'string') {
+    return {
+      chatId: 'default',
+      message: input,
+      metadata: {},
+    };
   }
 
-  // Deterministic routing for common intents; avoids misroutes from LLM.
-  if (
+  if (input && typeof input === 'object') {
+    return {
+      chatId: String(input.chatId ?? 'default'),
+      message: String(input.message ?? ''),
+      metadata: input,
+    };
+  }
+
+  return {
+    chatId: 'default',
+    message: '',
+    metadata: {},
+  };
+}
+
+function classifyIntent(message = '') {
+  const text = String(message || '').toLowerCase();
+
+  if (!text.trim()) {
+    return 'bettingwizard';
+  }
+
+  const isSheetCommand =
     /\b(write|append|update|set|sheet|google sheets|leer|read|escrib|agrega|agregar)\b/.test(
       text
-    )
-  ) {
+    );
+  if (isSheetCommand) {
     return 'sheetops';
   }
 
-  if (/\b(historial|fight history|record|records|vs|versus|\bv\b)\b/.test(text)) {
+  const asksForRawHistory =
+    /\b(historial|history|record|records|filas|rows|tabla|raw data|mostrar historial)\b/.test(
+      text
+    );
+  const asksForAnalysis =
+    /\b(main|main card|evento|pelea|analiz|opina|quien|gana|pick|predic|pronost|estrateg|apuesta|vs|versus)\b/.test(
+      text
+    );
+
+  if (asksForRawHistory && !asksForAnalysis) {
     return 'fightsscalper';
   }
 
-  if (
-    /\b(main card|main event|evento|analiz|predic|pronost|quien gana|opina|estrategia|apuesta)\b/.test(
-      text
-    )
-  ) {
-    return 'bettingwizard';
+  return 'bettingwizard';
+}
+
+function normaliseTarget(target = '') {
+  const value = String(target || '').trim().toLowerCase();
+  if (value === 'sheetops' || value === 'fightscalper' || value === 'bettingwizard') {
+    return value;
+  }
+  if (value === 'fightsscalper') {
+    return 'fightscalper';
+  }
+  return 'bettingwizard';
+}
+
+function unpackAgentResult(result) {
+  if (typeof result === 'string') {
+    return { text: result, metadata: {} };
   }
 
-  if (hasDateHint && /\b(main|cartelera|evento|quien pelea)\b/.test(text)) {
-    return 'bettingwizard';
+  if (result && typeof result === 'object') {
+    if (typeof result.reply === 'string') {
+      return {
+        text: result.reply,
+        metadata: result.metadata || {},
+      };
+    }
+    if (typeof result.text === 'string') {
+      return {
+        text: result.text,
+        metadata: result.metadata || {},
+      };
+    }
   }
 
-  return null;
+  return {
+    text: String(result ?? ''),
+    metadata: {},
+  };
 }
 
 export function createRouterChain({
   sheetOps,
   fightsScalper,
   bettingWizard,
+  conversationStore,
   chain: providedChain,
 } = {}) {
   const chain =
@@ -64,62 +120,116 @@ export function createRouterChain({
     routerPrompt.pipe(
       new ChatOpenAI({
         model: 'gpt-4o-mini',
-        temperature: 0.4,
+        temperature: 0.2,
       })
     );
 
-  async function routeMessage(message = '') {
-    console.log('[routerChain] Incoming message:', message);
+  async function routeMessage(input = '') {
+    const { chatId, message, metadata } = parseRouteInput(input);
+    const originalMessage = String(message || '');
+
+    console.log('[routerChain] Incoming message:', originalMessage);
     console.log('[routerChain] Agent availability snapshot:', {
       bettingWizardType: bettingWizard && typeof bettingWizard,
       bettingWizardHasHandler: typeof bettingWizard?.handleMessage === 'function',
       sheetOpsHasHandler: typeof sheetOps?.handleMessage === 'function',
       fightsScalperHasHandler: typeof fightsScalper?.handleMessage === 'function',
+      chatId,
     });
 
-    let target = classifyWithRules(message) || 'unknown';
+    const resolution = conversationStore?.resolveMessage
+      ? conversationStore.resolveMessage(chatId, originalMessage)
+      : {
+          originalMessage,
+          resolvedMessage: originalMessage,
+          resolvedFight: null,
+          source: null,
+        };
+    const messageForAgent = resolution?.resolvedMessage || originalMessage;
 
-    if (target === 'unknown') {
+    let target = normaliseTarget(classifyIntent(originalMessage));
+
+    if (ENABLE_LLM_ROUTER) {
       try {
-        const response = await chain.invoke({ input: message });
-        target = response.content?.trim().toLowerCase() || 'unknown';
+        const response = await chain.invoke({ input: originalMessage });
+        target = normaliseTarget(response.content);
       } catch (error) {
         console.error('❌ Router failed to invoke the language model.', error);
-        return 'No pude decidir qué agente usar por un error interno.';
       }
     }
 
     console.log(`🤖 Router decided: ${target}`);
+
+    let rawResult = null;
 
     try {
       switch (target) {
         case 'bettingwizard':
           if (!bettingWizard?.handleMessage) {
             console.error('❌ Betting Wizard agent missing or invalid.', bettingWizard);
-            return 'Betting Wizard agent is unavailable.';
+            rawResult = 'Betting Wizard agent is unavailable.';
+            break;
           }
-          return await bettingWizard.handleMessage(message);
+          rawResult = await bettingWizard.handleMessage(messageForAgent, {
+            chatId,
+            originalMessage,
+            resolution,
+            metadata,
+          });
+          break;
         case 'sheetops':
           if (!sheetOps?.handleMessage) {
             console.error('❌ SheetOps agent missing or invalid.', sheetOps);
-            return 'Sheet Ops agent is unavailable.';
+            rawResult = 'Sheet Ops agent is unavailable.';
+            break;
           }
-          return await sheetOps.handleMessage(message);
-        case 'fightsscalper':
+          rawResult = await sheetOps.handleMessage(originalMessage, {
+            chatId,
+            metadata,
+          });
+          break;
+        case 'fightscalper':
           if (!fightsScalper?.handleMessage) {
             console.error('❌ FightsScalper agent missing or invalid.', fightsScalper);
-            return 'Fights Scalper agent is unavailable.';
+            rawResult = 'Fights Scalper agent is unavailable.';
+            break;
           }
-          return await fightsScalper.handleMessage(message);
+          rawResult = await fightsScalper.handleMessage(originalMessage, {
+            chatId,
+            metadata,
+          });
+          break;
         default:
-          console.warn('⚠️ Router could not determine target agent.');
-          return "I'm not sure which agent to use for that.";
+          rawResult = "I'm not sure which agent to use for that.";
       }
     } catch (error) {
       console.error(`❌ Agent "${target}" threw an error.`, error);
-      return 'El agente seleccionado falló al procesar tu solicitud.';
+      rawResult = 'El agente seleccionado falló al procesar tu solicitud.';
     }
+
+    const { text, metadata: agentMetadata } = unpackAgentResult(rawResult);
+
+    if (conversationStore?.appendTurn) {
+      conversationStore.appendTurn(chatId, 'user', originalMessage);
+      conversationStore.appendTurn(chatId, 'assistant', text);
+    }
+
+    if (conversationStore?.setLastResolvedFight && agentMetadata?.resolvedFight) {
+      conversationStore.setLastResolvedFight(chatId, agentMetadata.resolvedFight);
+    }
+
+    if (conversationStore?.setLastCard && agentMetadata?.webContext?.fights?.length) {
+      conversationStore.setLastCard(chatId, {
+        eventName: agentMetadata.webContext.eventName,
+        date: agentMetadata.webContext.date,
+        fights: agentMetadata.webContext.fights,
+      });
+    }
+
+    return text;
   }
 
   return { routeMessage };
 }
+
+export default { createRouterChain };

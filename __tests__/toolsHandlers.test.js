@@ -3,6 +3,7 @@ import { handleMessage as handleSheetMessage } from '../src/tools/sheetOpsTool.j
 import {
   handleMessage as handleFightsMessage,
   extractFighterNamesFromMessage,
+  getFighterHistory,
 } from '../src/tools/fightsScalperTool.js';
 
 export async function runToolsHandlersTests() {
@@ -78,6 +79,21 @@ export async function runToolsHandlersTests() {
 
     assert.match(response, /Encontré 2 fila\(s\)/);
     assert.match(response, /Alex Pereira \| Win \| KO \| Round 2/);
+  });
+
+  tests.push(async () => {
+    const result = await getFighterHistory({
+      sheetId: 'sheet-test',
+      fighters: ['Vinicius Oliveira'],
+      strict: true,
+      readRangeImpl: async () => [
+        ['2025-07-19', 'UFC 318', 'Vinicius Oliveira', 'Kyler Phillips'],
+        ['2024-05-18', 'UFC FN', 'Adrian Yanez', 'Vinicius Salvador'],
+      ],
+    });
+
+    assert.equal(result.rows.length, 1);
+    assert.match(result.rows[0][2], /Vinicius Oliveira/);
   });
 
   tests.push(async () => {

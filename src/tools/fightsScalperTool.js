@@ -20,14 +20,26 @@ const NAME_STOPWORDS = new Set([
   'el',
   'en',
   'fight',
+  'genial',
+  'gustaria',
+  'haces',
+  'hola',
+  'king',
   'la',
   'las',
   'los',
   'lucha',
+  'me',
+  'necesito',
   'mi',
+  'numero',
+  'opina',
+  'opinas',
   'pelea',
   'por',
   'que',
+  'quiero',
+  'saber',
   'su',
   'sobre',
   'the',
@@ -122,35 +134,31 @@ function isVsToken(word = '') {
   return /^(vs|versus|v)$/i.test(word.replace('.', ''));
 }
 
-function extractNamesAroundVs(words = []) {
-  const names = [];
+function extractNameFromSegment(segment = '', { fromLeft = true } = {}) {
+  const tokens = splitWords(segment)
+    .map(normaliseWord)
+    .filter((token) => token && !NAME_STOPWORDS.has(token));
 
-  for (let i = 0; i < words.length; i += 1) {
-    if (!isVsToken(words[i])) continue;
-
-    const left = [];
-    for (let li = i - 1; li >= 0 && left.length < 1; li -= 1) {
-      const token = normaliseWord(words[li]);
-      if (!token || NAME_STOPWORDS.has(token)) continue;
-      left.unshift(words[li]);
-    }
-
-    const right = [];
-    for (let ri = i + 1; ri < words.length && right.length < 1; ri += 1) {
-      const token = normaliseWord(words[ri]);
-      if (!token || NAME_STOPWORDS.has(token)) continue;
-      right.push(words[ri]);
-    }
-
-    if (left.length) {
-      names.push(toTitleCase(left));
-    }
-    if (right.length) {
-      names.push(toTitleCase(right));
-    }
+  if (!tokens.length) {
+    return null;
   }
 
-  return names;
+  const selected = fromLeft
+    ? tokens.slice(Math.max(tokens.length - 2, 0))
+    : tokens.slice(0, 2);
+  return toTitleCase(selected);
+}
+
+function extractNamesAroundVs(message = '') {
+  const match = String(message || '').match(/([\s\S]*?)\b(?:vs|versus|v\.?)\b([\s\S]*)/i);
+  if (!match) {
+    return [];
+  }
+
+  const leftName = extractNameFromSegment(match[1], { fromLeft: true });
+  const rightName = extractNameFromSegment(match[2], { fromLeft: false });
+
+  return [leftName, rightName].filter(Boolean);
 }
 
 function extractCapitalizedNames(words = []) {
@@ -236,12 +244,31 @@ function computeRowsHash(rows) {
 
 export function extractFighterNamesFromMessage(message = '') {
   const words = splitWords(message);
-  const names = new Set([
-    ...extractNamesAroundVs(words),
-    ...extractCapitalizedNames(words),
-  ]);
+  const aroundVs = extractNamesAroundVs(message);
+  const names = new Set(
+    aroundVs.length ? aroundVs : extractCapitalizedNames(words)
+  );
 
   return Array.from(names).filter(Boolean).slice(0, 6);
+}
+
+function rowMatchesFighter(row = [], fighter = '', { strict = false } = {}) {
+  const rowText = row.map(normalise).join(' ');
+  const fighterNorm = normalise(fighter).trim();
+  if (!fighterNorm) {
+    return false;
+  }
+
+  const tokens = fighterNorm.split(/\s+/).filter(Boolean);
+  if (strict && tokens.length >= 2) {
+    return rowText.includes(fighterNorm);
+  }
+
+  if (tokens.length >= 2 && rowText.includes(fighterNorm)) {
+    return true;
+  }
+
+  return tokens.some((token) => token.length >= 3 && rowText.includes(token));
 }
 
 function isCacheStale(meta, maxAgeMs) {
@@ -338,8 +365,10 @@ async function loadHistoryRows({
 } = {}) {
   const cached = loadFightHistoryCache();
   const meta = getFightHistoryCacheStatus();
+  const cacheMatchesRequest =
+    meta?.sheetId === sheetId && meta?.range === range;
 
-  if (cached?.rows?.length) {
+  if (cacheMatchesRequest && cached?.rows?.length) {
     if (isCacheStale(meta, maxAgeMs)) {
       syncFightHistoryCache({ sheetId, range, readRangeImpl }).catch((error) =>
         console.error('❌ Background cache refresh failed:', error)
@@ -409,9 +438,13 @@ export async function getFighterHistory({
   sheetId = process.env.SHEET_ID,
   range = DEFAULT_RANGE,
   message = '',
+  fighters: providedFighters = null,
+  strict = false,
   readRangeImpl = readRange,
 } = {}) {
-  let fighters = extractFighterNamesFromMessage(message);
+  let fighters = Array.isArray(providedFighters) && providedFighters.length
+    ? providedFighters
+    : extractFighterNamesFromMessage(message);
 
   const values = await loadHistoryRows({
     sheetId,
@@ -421,15 +454,15 @@ export async function getFighterHistory({
 
   let filteredRows = [];
   if (fighters.length) {
-    const lowerNames = fighters.map((name) => normalise(name));
     filteredRows = values.filter((row) => {
-      const rowValues = row.map(normalise);
-      return lowerNames.some((name) => rowValues.some((value) => value.includes(name)));
+      return fighters.some((fighter) =>
+        rowMatchesFighter(row, fighter, { strict })
+      );
     });
   }
 
   // Fallback for noisy queries when fighter tokens exist (e.g. lowercase surnames)
-  if (fighters.length && !filteredRows.length) {
+  if (!strict && fighters.length && !filteredRows.length) {
     const tokens = extractSearchTokens(message, fighters);
     if (tokens.length) {
       filteredRows = values.filter((row) => {

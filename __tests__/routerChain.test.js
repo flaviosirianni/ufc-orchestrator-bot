@@ -1,42 +1,11 @@
 import assert from 'node:assert/strict';
 import { createRouterChain } from '../src/core/routerChain.js';
+import { createConversationStore } from '../src/core/conversationStore.js';
 
 export async function runRouterChainTests() {
   const tests = [];
 
   tests.push(async () => {
-    const invokedWith = [];
-    const router = createRouterChain({
-      bettingWizard: {
-        async handleMessage(message) {
-          return `BW:${message}`;
-        },
-      },
-      sheetOps: {
-        async handleMessage() {
-          return 'SheetOps';
-        },
-      },
-      fightsScalper: {
-        async handleMessage() {
-          return 'FightsScalper';
-        },
-      },
-      chain: {
-        async invoke({ input }) {
-          invokedWith.push(input);
-          return { content: 'bettingWizard' };
-        },
-      },
-    });
-
-    const response = await router.routeMessage('Need fight insights');
-    assert.equal(response, 'BW:Need fight insights');
-    assert.equal(invokedWith[0], 'Need fight insights');
-  });
-
-  tests.push(async () => {
-    let invoked = 0;
     const router = createRouterChain({
       bettingWizard: {
         async handleMessage(message) {
@@ -47,20 +16,13 @@ export async function runRouterChainTests() {
       fightsScalper: { async handleMessage() { return 'FS'; } },
       chain: {
         async invoke() {
-          invoked += 1;
-          return { content: 'fightsScalper' };
+          return { content: 'sheetOps' };
         },
       },
     });
 
-    const response = await router.routeMessage(
-      'hola amiguito, como andas? quiero saber quien pelea el 7 de febrero'
-    );
-    assert.equal(
-      response,
-      'BW:hola amiguito, como andas? quiero saber quien pelea el 7 de febrero'
-    );
-    assert.equal(invoked, 0);
+    const response = await router.routeMessage('Need fight insights');
+    assert.equal(response, 'BW:Need fight insights');
   });
 
   tests.push(async () => {
@@ -72,15 +34,10 @@ export async function runRouterChainTests() {
         },
       },
       fightsScalper: { async handleMessage() { return 'FS'; } },
-      chain: {
-        async invoke() {
-          return { content: 'sheetOps' };
-        },
-      },
     });
 
-    const response = await router.routeMessage('read Fights!A:E');
-    assert.equal(response, 'SO:read Fights!A:E');
+    const response = await router.routeMessage('read Fight History!A:E');
+    assert.equal(response, 'SO:read Fight History!A:E');
   });
 
   tests.push(async () => {
@@ -92,28 +49,63 @@ export async function runRouterChainTests() {
           return `FS:${message}`;
         },
       },
-      chain: {
-        async invoke() {
-          return { content: 'fightsScalper' };
-        },
-      },
     });
 
-    const response = await router.routeMessage('Pereira vs Ankalaev');
-    assert.equal(response, 'FS:Pereira vs Ankalaev');
+    const response = await router.routeMessage('mostrame historial de Bautista');
+    assert.equal(response, 'FS:mostrame historial de Bautista');
   });
 
   tests.push(async () => {
-    const router = createRouterChain({
-      chain: {
-        async invoke() {
-          return { content: 'unknownAgent' };
-        },
-      },
+    const conversationStore = createConversationStore();
+    conversationStore.setLastCard('chat-1', {
+      eventName: 'UFC 312',
+      date: '2026-02-07',
+      fights: [
+        { fighterA: 'Mario Bautista', fighterB: 'Vinicius Oliveira' },
+        { fighterA: 'Fighter C', fighterB: 'Fighter D' },
+      ],
     });
 
-    const response = await router.routeMessage('??');
-    assert.equal(response, "I'm not sure which agent to use for that.");
+    let receivedMessage = null;
+    const router = createRouterChain({
+      conversationStore,
+      bettingWizard: {
+        async handleMessage(message, context) {
+          receivedMessage = message;
+          return { reply: 'ok', metadata: { resolvedFight: context.resolution.resolvedFight } };
+        },
+      },
+      sheetOps: { async handleMessage() { return 'SO'; } },
+      fightsScalper: { async handleMessage() { return 'FS'; } },
+    });
+
+    const response = await router.routeMessage({
+      chatId: 'chat-1',
+      message: 'que opinas de la pelea numero 1?',
+    });
+
+    assert.equal(response, 'ok');
+    assert.match(receivedMessage, /Mario Bautista vs Vinicius Oliveira/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const router = createRouterChain({
+      conversationStore,
+      bettingWizard: {
+        async handleMessage(message) {
+          return `BW:${message}`;
+        },
+      },
+      sheetOps: { async handleMessage() { return 'SO'; } },
+      fightsScalper: { async handleMessage() { return 'FS'; } },
+    });
+
+    await router.routeMessage({ chatId: 'chat-2', message: 'hola, quien pelea el 7 de febrero' });
+    const turns = conversationStore.getRecentTurns('chat-2', 2);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0].role, 'user');
+    assert.equal(turns[1].role, 'assistant');
   });
 
   for (const test of tests) {

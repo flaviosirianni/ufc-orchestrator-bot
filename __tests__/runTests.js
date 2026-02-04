@@ -1,11 +1,15 @@
 import { runRouterChainTests } from './routerChain.test.js';
 import { runToolsHandlersTests } from './toolsHandlers.test.js';
 import { runWebIntelToolTests } from './webIntelTool.test.js';
+import { runConversationStoreTests } from './conversationStore.test.js';
+import { runBettingWizardTests } from './bettingWizard.test.js';
 
 async function main() {
   await runRouterChainTests();
+  await runConversationStoreTests();
   await runToolsHandlersTests();
   await runWebIntelToolTests();
+  await runBettingWizardTests();
   console.log('All test suites passed.');
 }
 

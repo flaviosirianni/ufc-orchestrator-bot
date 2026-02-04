@@ -1,18 +1,19 @@
 # UFC Orchestrator Bot
 
-UFC Orchestrator Bot is a Telegram automation system that coordinates LangChain agents and Google Sheets to streamline UFC betting research. The orchestrator exposes a conversational assistant that can surface fighter history from a curated sheet and route requests to a LangChain-powered analyst.
+UFC Orchestrator Bot is a Telegram automation system that combines OpenAI chat reasoning, Google Sheets data, and web signals to streamline UFC betting research. The assistant preserves chat context per user so follow-up questions like "pelea 1" stay coherent.
 
 ## Architecture Overview
 
 ```
-User → Telegram Bot → LangChain Router → Betting Wizard Agent → Sheet Ops Tool / Fights Data Tool → Google Sheet → Response back to Telegram
+User → Telegram Bot → Router (intent + context) → Betting Wizard Agent → Fight History Cache + Web Intel + Google Sheets → Response back to Telegram
 ```
 
 ### Core Components
 
 - **Telegram Bot** – Polling client built with `node-telegram-bot-api` that forwards user messages to the orchestrator router.
-- **Router Chain** – Intent detector that selects between sheet checks and betting analysis.
-- **Betting Wizard Agent** – A LangChain-powered reasoning agent that uses the Sheet Ops and Fights Data tools to craft insights and betting angles.
+- **Router Chain** – Intent detector with deterministic defaults so analysis stays in a single conversational flow.
+- **Conversation Store** – In-memory per-chat memory (card, selected fight, recent turns) for follow-up coherence.
+- **Betting Wizard Agent** – Chat-completions analyst that merges conversational memory, web context, and historical stats.
 - **Sheet Ops Tool** – Google Sheets integration backed by the official `googleapis` client and service account credentials.
 - **Fights Data Tool** – Reads the Google Sheet and extracts fighter history relevant to the user’s query (no external scraping).
 
@@ -23,10 +24,11 @@ User → Telegram Bot → LangChain Router → Betting Wizard Agent → Sheet Op
   /core
     index.js             # Entry point that wires everything together
     routerChain.js       # Message intent detection and orchestration
+    conversationStore.js # Per-chat memory and fight reference resolver
     telegramBot.js       # Telegram bot configuration and polling loop
     env.js               # Tiny .env loader (no third-party dependency)
   /agents
-    bettingWizard.js     # LangChain agent that generates betting strategies
+    bettingWizard.js     # Conversational UFC analyst (OpenAI chat completions)
   /tools
     sheetOpsTool.js      # Google Sheets helpers using the official SDK
     fightsScalperTool.js # Fighter history extractor built on top of the sheet tool
@@ -55,12 +57,18 @@ Create a `.env` file based on `.env.example`:
 
 ```
 OPENAI_API_KEY=sk-...
-ASSISTANT_ID=asst_...
 TELEGRAM_BOT_TOKEN=...
 SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+BETTING_MODEL=gpt-4o-mini
+BETTING_TEMPERATURE=0.35
+BETTING_MAX_RECENT_TURNS=8
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
+KNOWLEDGE_MAX_CHARS=9000
+CONVERSATION_TTL_MS=86400000
+CONVERSATION_MAX_TURNS=20
+CONVERSATION_MAX_TURN_CHARS=1600
 FIGHT_HISTORY_RANGE=Fight History!A:Z
 FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
 FIGHT_HISTORY_CACHE_DIR=./data
@@ -88,6 +96,12 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - A background sync runs every 6 hours by default (`FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000`).
 - Betting Wizard receives historical context from this local cache automatically before analysis.
 
+### Conversational Memory
+
+- The bot keeps per-chat memory (recent turns, detected event card, and selected fight references).
+- Follow-up inputs like `que opinas de la pelea 1` are auto-resolved to fighter names from the last card in context.
+- Memory expiration is configurable with `CONVERSATION_TTL_MS`.
+
 ### Web Enrichment Before Analysis
 
 - When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from Google News sources.
@@ -100,7 +114,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 npm test
 ```
 
-This executes Node-based assertions for the router and tool handlers.
+This executes Node-based assertions for router, memory, tools, web intel, and betting wizard orchestration.
 
 ## Quick Telegram Smoke Test
 

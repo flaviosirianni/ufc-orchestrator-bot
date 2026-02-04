@@ -239,6 +239,27 @@ function dedupeFights(fights = []) {
   return out;
 }
 
+async function fetchFightCandidatesFromQueries({
+  queries = [],
+  days,
+  fetchImpl,
+}) {
+  if (!queries.length) {
+    return [];
+  }
+
+  const batches = await Promise.all(
+    queries.map((query) =>
+      fetchGoogleNewsRss({ query, days, fetchImpl }).catch(() => [])
+    )
+  );
+
+  const headlines = dedupeHeadlines(batches.flat());
+  return dedupeFights(
+    headlines.flatMap((item) => extractFightPairsFromTitle(item.title))
+  );
+}
+
 function buildNewsSummary(headlines = []) {
   if (!headlines.length) {
     return 'No encontré titulares relevantes de última hora.';
@@ -318,9 +339,26 @@ export async function buildWebContextForMessage(
     lookupHeadlines.map((item) => extractEventNameFromTitle(item.title))
   );
 
-  const fightCandidates = dedupeFights(
+  let fightCandidates = dedupeFights(
     lookupHeadlines.flatMap((item) => extractFightPairsFromTitle(item.title))
-  ).slice(0, MAIN_CARD_FIGHTS_COUNT);
+  );
+
+  if (fightCandidates.length < MAIN_CARD_FIGHTS_COUNT) {
+    const supplementalQueries = [
+      `${eventName || `UFC ${date}`} main card fights`,
+      `${eventName || `UFC ${date}`} full fight card`,
+      `${eventName || `UFC ${date}`} matchup breakdown`,
+    ];
+
+    const supplementalCandidates = await fetchFightCandidatesFromQueries({
+      queries: supplementalQueries,
+      days: WEB_EVENT_LOOKUP_DAYS,
+      fetchImpl,
+    });
+    fightCandidates = dedupeFights([...fightCandidates, ...supplementalCandidates]);
+  }
+
+  fightCandidates = fightCandidates.slice(0, MAIN_CARD_FIGHTS_COUNT);
 
   const recentNewsQuery = eventName || `UFC ${date}`;
   const recentHeadlines = dedupeHeadlines(
@@ -351,6 +389,7 @@ export async function buildWebContextForMessage(
     eventName,
     fights: fightCandidates,
     headlines: recentHeadlines,
+    confidence: fightCandidates.length >= MAIN_CARD_FIGHTS_COUNT ? 'medium' : 'low',
     contextText,
   };
 }
