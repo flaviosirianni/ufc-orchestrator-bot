@@ -4,6 +4,7 @@ import { startTelegramBot } from './telegramBot.js';
 import { createRouterChain } from './routerChain.js';
 import * as sheetOps from '../tools/sheetOpsTool.js';
 import * as fightsScalper from '../tools/fightsScalperTool.js';
+import * as webIntel from '../tools/webIntelTool.js';
 import { createBettingWizard } from '../agents/bettingWizard.js';
 
 function createHealthServer(port) {
@@ -20,9 +21,14 @@ function createHealthServer(port) {
 }
 
 function bootstrap() {
+  fightsScalper.startFightHistorySync({
+    intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
+  });
+
   const bettingWizard = createBettingWizard({
     sheetOps,
     fightsScalper,
+    webIntel,
   });
 
   console.log('[bootstrap] Betting Wizard instance type:', {

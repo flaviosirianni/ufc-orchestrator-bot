@@ -61,6 +61,12 @@ SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
+FIGHT_HISTORY_RANGE=Fight History!A:Z
+FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
+FIGHT_HISTORY_CACHE_DIR=./data
+MAIN_CARD_FIGHTS_COUNT=5
+WEB_NEWS_DAYS=3
+WEB_NEWS_MAX_ITEMS=6
 PORT=3000
 ```
 
@@ -74,6 +80,18 @@ npm run start
 ```
 
 The `start` script launches the Telegram bot with polling enabled. Keep the process running and send messages to your bot from Telegram to interact with the orchestrator.
+
+### Local Fight History Cache
+
+- On startup, `fightsScalper` syncs `Fight History` from Google Sheets into `data/fight_history.json`.
+- A background sync runs every 6 hours by default (`FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000`).
+- Betting Wizard receives historical context from this local cache automatically before analysis.
+
+### Web Enrichment Before Analysis
+
+- When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from UFC Stats.
+- It also fetches recent headlines from Google News RSS to catch late replacements/injury signals.
+- This web context is injected into the Betting Wizard prompt so it stops asking for fighter names when the event can be resolved online.
 
 ### Running Tests
 
@@ -89,7 +107,7 @@ This executes Node-based assertions for the router and tool handlers.
 2. Open Telegram, find your bot, and send `/start`.
 3. Send one message for each flow:
    - Betting Wizard: `Analizame Pereira vs Ankalaev y dame una estrategia conservadora.`
-   - Sheet Ops: `leer Fights!A1:E10`
+   - Sheet Ops: `leer Fight History!A1:E10`
    - Fights Scalper: `historial de Pereira vs Ankalaev`
 4. Confirm you get responses in chat and check local logs for router decisions.
 

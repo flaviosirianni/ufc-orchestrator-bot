@@ -67,6 +67,20 @@ export async function runToolsHandlersTests() {
   tests.push(async () => {
     const response = await handleFightsMessage('actualizar cartelera', {
       sheetId: 'sheet-test',
+      syncFightHistoryCacheImpl: async ({ sheetId, range }) => {
+        assert.equal(sheetId, 'sheet-test');
+        assert.equal(range, 'Fight History!A:Z');
+        return { rowCount: 128, updated: true };
+      },
+    });
+
+    assert.match(response, /Sync de Fight History completado/);
+    assert.match(response, /Cache actualizado/);
+  });
+
+  tests.push(async () => {
+    const response = await handleFightsMessage('actualizar upcoming fights', {
+      sheetId: 'sheet-test',
       fetchAndStoreUpcomingFightsImpl: async () => 'refresh ok',
     });
 

@@ -6,6 +6,14 @@ let sheetsClient;
 const DEFAULT_RANGE = 'Fights!A:E';
 const MAX_PREVIEW_ROWS = 15;
 
+function normalisePrivateKey(rawValue = '') {
+  let value = String(rawValue).trim();
+
+  // Tolerates malformed quoting from .env (e.g. ending with "")
+  value = value.replace(/^['"]+|['"]+$/g, '');
+  return value.replace(/\\n/g, '\n');
+}
+
 function getCredentials() {
   const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const privateKey = process.env.GOOGLE_PRIVATE_KEY;
@@ -18,7 +26,7 @@ function getCredentials() {
 
   return {
     client_email: clientEmail,
-    private_key: privateKey.replace(/\\n/g, '\n'),
+    private_key: normalisePrivateKey(privateKey),
   };
 }
 

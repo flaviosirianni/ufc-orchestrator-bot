@@ -19,6 +19,9 @@ const RUN_POLL_INTERVAL_MS = Number(
   process.env.RUN_POLL_INTERVAL_MS ?? '1500'
 );
 const RUN_MAX_POLLS = Number(process.env.RUN_MAX_POLLS ?? '60');
+const MAX_HISTORY_CONTEXT_ROWS = Number(
+  process.env.MAX_HISTORY_CONTEXT_ROWS ?? '18'
+);
 
 const client = new OpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -192,8 +195,6 @@ async function getAssistantReply(threadId, runId) {
     return null;
   }
 
-  const lastMessage = assistantMessages[0];
-
   // In many cases they are already ordered, but just in case:
   assistantMessages.sort((a, b) => b.created_at - a.created_at);
 
@@ -218,10 +219,96 @@ async function getAssistantReply(threadId, runId) {
   return JSON.stringify(msg.content, null, 2);
 }
 
+function buildAdditionalInstructions(fileId) {
+  const parts = [
+    'IMPORTANTE: Ya tienes datos historicos de peleadores disponibles desde el sistema.',
+    'NO pidas al usuario estadisticas historicas ni historial de peleadores.',
+    'Si [WEB_CONTEXT] incluye una cartelera principal, usala directamente sin pedir nombres de peleadores.',
+    'Si faltan datos de mercado en tiempo real, solo pide cuotas/lineas actuales (por ejemplo Bet365).',
+    'Si no hay suficiente informacion, responde con supuestos explicitos y una estrategia conservadora.',
+  ];
+
+  if (fileId) {
+    parts.push(`Usa tambien el playbook local cargado con file_id=${fileId}.`);
+  } else {
+    parts.push('No hay playbook local cargado en esta ejecucion.');
+  }
+
+  return parts.join(' ');
+}
+
+function buildHistoryContextText(result, cacheStatus) {
+  if (!result?.fighters?.length) {
+    if (cacheStatus?.rowCount) {
+      return `No se detectaron nombres de peleadores en el mensaje. El cache local de Fight History tiene ${cacheStatus.rowCount} filas (ultimo sync: ${cacheStatus.lastSyncAt || 'desconocido'}).`;
+    }
+    return 'No se detectaron nombres de peleadores en el mensaje.';
+  }
+
+  if (!result.rows?.length) {
+    return `Se detectaron peleadores (${result.fighters.join(' vs ')}) pero no hubo filas historicas coincidentes en la base local.`;
+  }
+
+  const previewRows = result.rows.slice(0, MAX_HISTORY_CONTEXT_ROWS);
+  const lines = previewRows.map((row) => `- ${row.join(' | ')}`);
+  const moreCount = result.rows.length - previewRows.length;
+
+  return [
+    `Peleadores detectados: ${result.fighters.join(' vs ')}`,
+    `Filas historicas encontradas: ${result.rows.length}`,
+    ...lines,
+    moreCount > 0 ? `- ... ${moreCount} filas adicionales omitidas` : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function buildEnrichedPrompt(message, fightsScalper, webIntel) {
+  if (!fightsScalper?.getFighterHistory) {
+    return { enrichedMessage: message, historyRows: 0, webContext: null };
+  }
+
+  try {
+    let webContext = null;
+    if (webIntel?.buildWebContextForMessage) {
+      try {
+        webContext = await webIntel.buildWebContextForMessage(message);
+      } catch (error) {
+        console.error('❌ Failed to fetch web context:', error);
+      }
+    }
+
+    const historySeedMessage =
+      webContext?.fights?.length
+        ? `${message}\n${webContext.fights
+            .map((fight) => `${fight.fighterA} vs ${fight.fighterB}`)
+            .join('\n')}`
+        : message;
+
+    const historyResult = await fightsScalper.getFighterHistory({
+      message: historySeedMessage,
+    });
+    const cacheStatus = fightsScalper.getFightHistoryCacheStatus?.() ?? null;
+    const context = buildHistoryContextText(historyResult, cacheStatus);
+    const webContextText = webContext?.contextText
+      ? `\n\n[WEB_CONTEXT]\n${webContext.contextText}`
+      : '';
+
+    return {
+      enrichedMessage: `${message}${webContextText}\n\n[HISTORICAL_CONTEXT]\n${context}`,
+      historyRows: historyResult?.rows?.length || 0,
+      webContext,
+    };
+  } catch (error) {
+    console.error('❌ Failed to build historical context for Betting Wizard:', error);
+    return { enrichedMessage: message, historyRows: 0, webContext: null };
+  }
+}
+
 /**
  * Factory to create the Betting Wizard agent.
  */
-export function createBettingWizard() {
+export function createBettingWizard({ fightsScalper, webIntel } = {}) {
   ensureConfigured();
   logConfiguration();
 
@@ -249,6 +336,16 @@ export function createBettingWizard() {
 
       // Optional knowledge file sync
       const fileId = await syncKnowledgeFile();
+      const additionalInstructions = buildAdditionalInstructions(fileId);
+      const { enrichedMessage, historyRows, webContext } = await buildEnrichedPrompt(
+        message,
+        fightsScalper,
+        webIntel
+      );
+      console.log('📊 Historical context rows sent to assistant:', historyRows);
+      if (webContext?.eventName) {
+        console.log('🌐 Web context event detected:', webContext.eventName);
+      }
 
       // 1) Create thread
       const thread = await client.beta.threads.create({
@@ -261,15 +358,13 @@ export function createBettingWizard() {
       // 2) Add user message
       await client.beta.threads.messages.create(threadId, {
         role: 'user',
-        content: message,
+        content: enrichedMessage,
       });
 
       // 3) Create run
       const run = await client.beta.threads.runs.create(threadId, {
         assistant_id: ASSISTANT_ID,
-        additional_instructions: fileId
-          ? `Usa este archivo de referencia: ${fileId}.`
-          : 'No hay archivo local disponible.',
+        additional_instructions: additionalInstructions,
         // If in the future you add retrieval/file tools:
         // tool_resources: {
         //   file_search: { file_ids: [fileId] }
