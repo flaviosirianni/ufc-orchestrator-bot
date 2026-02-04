@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRouterChain } from '../src/core/routerChain.js';
 
-async function runTests() {
+export async function runRouterChainTests() {
   const tests = [];
 
   tests.push(async () => {
@@ -37,6 +37,46 @@ async function runTests() {
 
   tests.push(async () => {
     const router = createRouterChain({
+      bettingWizard: { async handleMessage() { return 'BW'; } },
+      sheetOps: {
+        async handleMessage(message) {
+          return `SO:${message}`;
+        },
+      },
+      fightsScalper: { async handleMessage() { return 'FS'; } },
+      chain: {
+        async invoke() {
+          return { content: 'sheetOps' };
+        },
+      },
+    });
+
+    const response = await router.routeMessage('read Fights!A:E');
+    assert.equal(response, 'SO:read Fights!A:E');
+  });
+
+  tests.push(async () => {
+    const router = createRouterChain({
+      bettingWizard: { async handleMessage() { return 'BW'; } },
+      sheetOps: { async handleMessage() { return 'SO'; } },
+      fightsScalper: {
+        async handleMessage(message) {
+          return `FS:${message}`;
+        },
+      },
+      chain: {
+        async invoke() {
+          return { content: 'fightsScalper' };
+        },
+      },
+    });
+
+    const response = await router.routeMessage('Pereira vs Ankalaev');
+    assert.equal(response, 'FS:Pereira vs Ankalaev');
+  });
+
+  tests.push(async () => {
+    const router = createRouterChain({
       chain: {
         async invoke() {
           return { content: 'unknownAgent' };
@@ -55,7 +95,9 @@ async function runTests() {
   console.log('All routerChain tests passed.');
 }
 
-runTests().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runRouterChainTests().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

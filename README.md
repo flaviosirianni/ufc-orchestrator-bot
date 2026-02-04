@@ -55,10 +55,12 @@ Create a `.env` file based on `.env.example`:
 
 ```
 OPENAI_API_KEY=sk-...
+ASSISTANT_ID=asst_...
 TELEGRAM_BOT_TOKEN=...
 SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
 PORT=3000
 ```
 
@@ -79,7 +81,17 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 npm test
 ```
 
-This executes a small Node-based assertion suite that validates router behaviour.
+This executes Node-based assertions for the router and tool handlers.
+
+## Quick Telegram Smoke Test
+
+1. Run `npm run start` and keep the process alive.
+2. Open Telegram, find your bot, and send `/start`.
+3. Send one message for each flow:
+   - Betting Wizard: `Analizame Pereira vs Ankalaev y dame una estrategia conservadora.`
+   - Sheet Ops: `leer Fights!A1:E10`
+   - Fights Scalper: `historial de Pereira vs Ankalaev`
+4. Confirm you get responses in chat and check local logs for router decisions.
 
 ## Running on Replit
 
