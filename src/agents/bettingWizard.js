@@ -223,7 +223,8 @@ function buildAdditionalInstructions(fileId) {
   const parts = [
     'IMPORTANTE: Ya tienes datos historicos de peleadores disponibles desde el sistema.',
     'NO pidas al usuario estadisticas historicas ni historial de peleadores.',
-    'Si [WEB_CONTEXT] incluye una cartelera principal, usala directamente sin pedir nombres de peleadores.',
+    'NO pidas al usuario nombres de peleadores para resolver la cartelera; debes inferirla desde [WEB_CONTEXT] y dejar supuestos explicitos si falta algun cruce.',
+    'Si [WEB_CONTEXT] incluye una cartelera principal, usala directamente.',
     'Si faltan datos de mercado en tiempo real, solo pide cuotas/lineas actuales (por ejemplo Bet365).',
     'Si no hay suficiente informacion, responde con supuestos explicitos y una estrategia conservadora.',
   ];

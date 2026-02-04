@@ -66,6 +66,7 @@ FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
 FIGHT_HISTORY_CACHE_DIR=./data
 MAIN_CARD_FIGHTS_COUNT=5
 WEB_NEWS_DAYS=3
+WEB_EVENT_LOOKUP_DAYS=120
 WEB_NEWS_MAX_ITEMS=6
 PORT=3000
 ```
@@ -89,7 +90,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 
 ### Web Enrichment Before Analysis
 
-- When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from UFC Stats.
+- When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from Google News sources.
 - It also fetches recent headlines from Google News RSS to catch late replacements/injury signals.
 - This web context is injected into the Betting Wizard prompt so it stops asking for fighter names when the event can be resolved online.
 

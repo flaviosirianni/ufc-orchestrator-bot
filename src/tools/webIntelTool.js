@@ -1,8 +1,8 @@
 import '../core/env.js';
 
-const UPCOMING_EVENTS_URL = 'http://ufcstats.com/statistics/events/upcoming';
 const MAIN_CARD_FIGHTS_COUNT = Number(process.env.MAIN_CARD_FIGHTS_COUNT ?? '5');
 const WEB_NEWS_DAYS = Number(process.env.WEB_NEWS_DAYS ?? '3');
+const WEB_EVENT_LOOKUP_DAYS = Number(process.env.WEB_EVENT_LOOKUP_DAYS ?? '120');
 const WEB_NEWS_MAX_ITEMS = Number(process.env.WEB_NEWS_MAX_ITEMS ?? '6');
 
 const MONTHS_ES = {
@@ -20,6 +20,21 @@ const MONTHS_ES = {
   noviembre: 11,
   diciembre: 12,
 };
+
+const MONTHS_EN = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 function pad2(value) {
   return String(value).padStart(2, '0');
@@ -101,83 +116,6 @@ function stripHtmlTags(value = '') {
   return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-export function parseUpcomingEventsHtml(html = '') {
-  const rows = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
-  const events = [];
-
-  for (const row of rows) {
-    const urlMatch = row.match(/href="(http:\/\/ufcstats\.com\/event-details\/[^"]+)"/i);
-    if (!urlMatch) continue;
-
-    const link = urlMatch[1];
-    const anchors = Array.from(
-      row.matchAll(
-        /<a[^>]*href="http:\/\/ufcstats\.com\/event-details\/[^"]+"[^>]*>([\s\S]*?)<\/a>/gi
-      )
-    );
-    const name = stripHtmlTags(anchors[0]?.[1] || '');
-
-    const dateMatch = row.match(
-      /([A-Za-z]+)\s+(\d{1,2}),\s*(20\d{2})/
-    );
-    const dateRaw = dateMatch
-      ? `${dateMatch[1]} ${dateMatch[2]}, ${dateMatch[3]}`
-      : '';
-    const parsedDate = dateRaw ? new Date(`${dateRaw} UTC`) : null;
-
-    if (!name || !parsedDate || Number.isNaN(parsedDate.getTime())) {
-      continue;
-    }
-
-    events.push({
-      name,
-      link,
-      date: formatDate(parsedDate),
-    });
-  }
-
-  return events;
-}
-
-export function parseEventFightsHtml(html = '') {
-  const fighterAnchors = Array.from(
-    html.matchAll(
-      /<a[^>]*href="http:\/\/ufcstats\.com\/fighter-details\/[^"]+"[^>]*>([\s\S]*?)<\/a>/gi
-    )
-  )
-    .map((match) => stripHtmlTags(match[1]))
-    .filter(Boolean);
-
-  const fights = [];
-  for (let index = 0; index + 1 < fighterAnchors.length; index += 2) {
-    fights.push({
-      fighterA: fighterAnchors[index],
-      fighterB: fighterAnchors[index + 1],
-    });
-  }
-
-  return fights;
-}
-
-function pickMainCardFights(fights = [], count = MAIN_CARD_FIGHTS_COUNT) {
-  return fights.slice(0, count);
-}
-
-async function fetchText(url, fetchImpl = fetch) {
-  const response = await fetchImpl(url, {
-    headers: {
-      'User-Agent': 'ufc-orchestrator-bot/1.0',
-      Accept: 'text/html,application/xml,text/xml;q=0.9,*/*;q=0.8',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Request failed (${response.status}) for ${url}`);
-  }
-
-  return response.text();
-}
-
 function getSourceFromLink(link = '') {
   try {
     const url = new URL(link);
@@ -215,34 +153,6 @@ function parseRssItems(xml = '') {
   return items;
 }
 
-async function fetchRecentNews({
-  query,
-  days = WEB_NEWS_DAYS,
-  maxItems = WEB_NEWS_MAX_ITEMS,
-  fetchImpl = fetch,
-}) {
-  const url =
-    'https://news.google.com/rss/search?q=' +
-    encodeURIComponent(`${query} when:${days}d`) +
-    '&hl=en-US&gl=US&ceid=US:en';
-
-  const xml = await fetchText(url, fetchImpl);
-  return parseRssItems(xml).slice(0, maxItems);
-}
-
-function buildNewsSummary(headlines = []) {
-  if (!headlines.length) {
-    return 'No encontré titulares relevantes de última hora.';
-  }
-
-  return headlines
-    .map((item) => {
-      const ts = item.publishedAt ? item.publishedAt.slice(0, 10) : 'unknown-date';
-      return `- [${ts}] ${item.title} (${item.source}) ${item.link}`;
-    })
-    .join('\n');
-}
-
 function dedupeHeadlines(items = []) {
   const seen = new Set();
   const deduped = [];
@@ -258,6 +168,121 @@ function dedupeHeadlines(items = []) {
   return deduped;
 }
 
+async function fetchText(url, fetchImpl = fetch) {
+  const response = await fetchImpl(url, {
+    headers: {
+      'User-Agent': 'ufc-orchestrator-bot/1.0',
+      Accept: 'application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed (${response.status}) for ${url}`);
+  }
+
+  return response.text();
+}
+
+async function fetchGoogleNewsRss({ query, days, fetchImpl = fetch }) {
+  const url =
+    'https://news.google.com/rss/search?q=' +
+    encodeURIComponent(`${query} when:${days}d`) +
+    '&hl=en-US&gl=US&ceid=US:en';
+
+  const xml = await fetchText(url, fetchImpl);
+  return parseRssItems(xml);
+}
+
+function extractEventNameFromTitle(title = '') {
+  const eventMatch = title.match(
+    /(UFC\s\d{2,3}|UFC Fight Night[^:|\-–]*|UFC on [A-Za-z0-9\s]+)/i
+  );
+  return eventMatch ? eventMatch[0].trim() : null;
+}
+
+function normalizeFighterName(name = '') {
+  return name
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\b([a-z])/g, (m) => m.toUpperCase());
+}
+
+function extractFightPairsFromTitle(title = '') {
+  const regex =
+    /([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})\s(?:vs\.?|v\.?)\s([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})/g;
+  const fights = [];
+  let match = regex.exec(title);
+  while (match) {
+    fights.push({
+      fighterA: normalizeFighterName(match[1]),
+      fighterB: normalizeFighterName(match[2]),
+    });
+    match = regex.exec(title);
+  }
+  return fights;
+}
+
+function dedupeFights(fights = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const fight of fights) {
+    const key = `${fight.fighterA.toLowerCase()}::${fight.fighterB.toLowerCase()}`;
+    const rev = `${fight.fighterB.toLowerCase()}::${fight.fighterA.toLowerCase()}`;
+    if (seen.has(key) || seen.has(rev)) continue;
+    seen.add(key);
+    out.push(fight);
+  }
+
+  return out;
+}
+
+function buildNewsSummary(headlines = []) {
+  if (!headlines.length) {
+    return 'No encontré titulares relevantes de última hora.';
+  }
+
+  return headlines
+    .map((item) => {
+      const ts = item.publishedAt ? item.publishedAt.slice(0, 10) : 'unknown-date';
+      return `- [${ts}] ${item.title} (${item.source}) ${item.link}`;
+    })
+    .join('\n');
+}
+
+function buildEventLookupQueries(targetDate) {
+  const year = targetDate.getUTCFullYear();
+  const month = targetDate.getUTCMonth();
+  const day = targetDate.getUTCDate();
+  const monthName = MONTHS_EN[month];
+  const iso = formatDate(targetDate);
+
+  return [
+    `UFC ${monthName} ${day} ${year} main card`,
+    `UFC ${iso} main card`,
+    `UFC Fight Night ${monthName} ${day} ${year}`,
+  ];
+}
+
+function mostFrequent(values = []) {
+  const counts = new Map();
+  for (const value of values) {
+    if (!value) continue;
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+
+  let winner = null;
+  let winnerCount = -1;
+  for (const [value, count] of counts.entries()) {
+    if (count > winnerCount) {
+      winner = value;
+      winnerCount = count;
+    }
+  }
+
+  return winner;
+}
+
 export async function buildWebContextForMessage(
   message = '',
   { fetchImpl = fetch, referenceDate = new Date() } = {}
@@ -271,62 +296,63 @@ export async function buildWebContextForMessage(
     return null;
   }
 
-  const normalizedDate = formatDate(targetDate);
-  const upcomingHtml = await fetchText(UPCOMING_EVENTS_URL, fetchImpl);
-  const events = parseUpcomingEventsHtml(upcomingHtml);
-  const event = events.find((item) => item.date === normalizedDate);
+  const date = formatDate(targetDate);
+  const queries = buildEventLookupQueries(targetDate);
 
-  if (!event) {
-    return {
-      date: normalizedDate,
-      eventName: null,
-      fights: [],
-      headlines: [],
-      contextText: `No encontré un evento UFC para ${normalizedDate} en UFC Stats.`,
-    };
-  }
-
-  const eventHtml = await fetchText(event.link, fetchImpl);
-  const fights = pickMainCardFights(parseEventFightsHtml(eventHtml));
-
-  const headlineQueries = [event.name];
-  for (const fight of fights.slice(0, 2)) {
-    headlineQueries.push(`${fight.fighterA} ${fight.fighterB} UFC`);
-  }
-
-  const newsBatches = await Promise.all(
-    headlineQueries.map((query) =>
-      fetchRecentNews({ query, fetchImpl }).catch(() => [])
+  const lookupBatches = await Promise.all(
+    queries.map((query) =>
+      fetchGoogleNewsRss({
+        query,
+        days: WEB_EVENT_LOOKUP_DAYS,
+        fetchImpl,
+      }).catch(() => [])
     )
   );
-  const headlines = dedupeHeadlines(newsBatches.flat()).slice(0, WEB_NEWS_MAX_ITEMS);
 
-  const fightsText = fights.length
-    ? fights.map((fight, index) => `${index + 1}. ${fight.fighterA} vs ${fight.fighterB}`).join('\n')
-    : 'No pude extraer peleas del evento.';
+  const lookupHeadlines = dedupeHeadlines(lookupBatches.flat());
+  const eventName = mostFrequent(
+    lookupHeadlines.map((item) => extractEventNameFromTitle(item.title))
+  );
+
+  const fightCandidates = dedupeFights(
+    lookupHeadlines.flatMap((item) => extractFightPairsFromTitle(item.title))
+  ).slice(0, MAIN_CARD_FIGHTS_COUNT);
+
+  const recentNewsQuery = eventName || `UFC ${date}`;
+  const recentHeadlines = dedupeHeadlines(
+    await fetchGoogleNewsRss({
+      query: `${recentNewsQuery} injuries replacement weigh-in`,
+      days: WEB_NEWS_DAYS,
+      fetchImpl,
+    }).catch(() => [])
+  ).slice(0, WEB_NEWS_MAX_ITEMS);
+
+  const fightsText = fightCandidates.length
+    ? fightCandidates
+        .map((fight, index) => `${index + 1}. ${fight.fighterA} vs ${fight.fighterB}`)
+        .join('\n')
+    : 'No pude inferir cruces exactos desde titulares; usar supuestos y aclararlo.';
 
   const contextText = [
-    `Evento detectado: ${event.name}`,
-    `Fecha: ${normalizedDate}`,
-    'Main card estimada:',
+    `Fecha solicitada: ${date}`,
+    `Evento estimado (fuentes web): ${eventName || 'No identificado con certeza'}`,
+    'Main card estimada desde fuentes web:',
     fightsText,
-    'Noticias recientes para validar cambios de último momento:',
-    buildNewsSummary(headlines),
+    'Titulares recientes para validar cambios de último momento:',
+    buildNewsSummary(recentHeadlines),
   ].join('\n');
 
   return {
-    date: normalizedDate,
-    eventName: event.name,
-    fights,
-    headlines,
+    date,
+    eventName,
+    fights: fightCandidates,
+    headlines: recentHeadlines,
     contextText,
   };
 }
 
 export default {
   parseDateFromMessage,
-  parseUpcomingEventsHtml,
-  parseEventFightsHtml,
-  buildWebContextForMessage,
   isMainCardLookupRequest,
+  buildWebContextForMessage,
 };
