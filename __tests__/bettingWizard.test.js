@@ -8,52 +8,79 @@ function createSequentialFakeClient(responses = []) {
 
   return {
     calls,
-    chat: {
-      completions: {
-        async create(payload) {
-          calls.push(JSON.parse(JSON.stringify(payload)));
-          const next = responses[index] ?? responses[responses.length - 1];
-          index += 1;
-          return next;
-        },
+    responses: {
+      async create(payload) {
+        calls.push(JSON.parse(JSON.stringify(payload)));
+        const next = responses[index] ?? responses[responses.length - 1];
+        index += 1;
+        return next;
       },
     },
   };
 }
 
-function toolCall(name, args, id = 'call_1') {
+function responseWithFunctionCall(name, args, callId = 'call_1') {
   return {
-    id,
-    type: 'function',
-    function: {
-      name,
-      arguments: JSON.stringify(args || {}),
-    },
-  };
-}
-
-function completionWithTool(name, args) {
-  return {
-    choices: [
+    id: `resp_${callId}`,
+    output_text: '',
+    output: [
       {
-        message: {
-          content: '',
-          tool_calls: [toolCall(name, args)],
-        },
+        type: 'function_call',
+        name,
+        call_id: callId,
+        arguments: JSON.stringify(args || {}),
       },
     ],
   };
 }
 
-function completionWithText(text) {
-  return {
-    choices: [
+function responseWithText(text, { includeWebSearch = false, withCitation = false } = {}) {
+  const message = {
+    type: 'message',
+    role: 'assistant',
+    content: [
       {
-        message: {
-          content: text,
-        },
+        type: 'output_text',
+        text,
+        annotations: withCitation
+          ? [
+              {
+                type: 'url_citation',
+                title: 'UFC Events',
+                url: 'https://www.ufc.com/events',
+              },
+            ]
+          : [],
       },
     ],
+  };
+
+  const output = includeWebSearch
+    ? [
+        {
+          type: 'web_search_call',
+          id: 'ws_1',
+          status: 'completed',
+          action: {
+            type: 'search',
+            query: 'ufc next event',
+            sources: [
+              {
+                type: 'url',
+                title: 'UFC Events',
+                url: 'https://www.ufc.com/events',
+              },
+            ],
+          },
+        },
+        message,
+      ]
+    : [message];
+
+  return {
+    id: 'resp_text',
+    output_text: text,
+    output,
   };
 }
 
@@ -69,11 +96,11 @@ export async function runBettingWizardTests() {
     });
 
     const fakeClient = createSequentialFakeClient([
-      completionWithTool('get_fighter_history', {
+      responseWithFunctionCall('get_fighter_history', {
         fighters: ['Mario Bautista', 'Vinicius Oliveira'],
         strict: true,
       }),
-      completionWithText('Pick preliminar: Mario Bautista por decision.'),
+      responseWithText('Pick preliminar: Mario Bautista por decision.'),
     ]);
 
     let capturedHistoryArgs = null;
@@ -96,11 +123,6 @@ export async function runBettingWizardTests() {
           return { rowCount: 400 };
         },
       },
-      webIntel: {
-        async buildWebContextForMessage() {
-          return null;
-        },
-      },
     });
 
     const resolution = conversationStore.resolveMessage(
@@ -114,26 +136,31 @@ export async function runBettingWizardTests() {
       resolution,
     });
 
-    assert.equal(result.reply, 'Pick preliminar: Mario Bautista por decision.');
+    assert.match(result.reply, /Pick preliminar/);
     assert.deepEqual(capturedHistoryArgs.fighters, [
       'Mario Bautista',
       'Vinicius Oliveira',
     ]);
     assert.equal(capturedHistoryArgs.strict, true);
     assert.equal(fakeClient.calls.length, 2);
-    assert.match(
-      fakeClient.calls[0].messages[fakeClient.calls[0].messages.length - 1].content,
-      /CONVERSATION_CONTEXT/
-    );
+    assert.match(fakeClient.calls[0].input, /CONVERSATION_CONTEXT/);
   });
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
-      completionWithTool('resolve_event_card', {
-        query: 'quien pelea en el evento que viene de la ufc',
+      responseWithFunctionCall('set_event_card', {
+        eventName: 'UFC 312',
+        date: '2026-02-07',
+        fights: [
+          { fighterA: 'Mario Bautista', fighterB: 'Vinicius Oliveira' },
+          { fighterA: 'Umar Nurmagomedov', fighterB: 'Mike Davis' },
+        ],
+      }, 'call_card'),
+      responseWithText('El proximo evento es UFC 312.', {
+        includeWebSearch: true,
+        withCitation: true,
       }),
-      completionWithText('El proximo evento es UFC 312 y el main incluye Bautista vs Oliveira.'),
     ]);
 
     const wizard = createBettingWizard({
@@ -145,21 +172,6 @@ export async function runBettingWizardTests() {
         },
         getFightHistoryCacheStatus() {
           return { rowCount: 100 };
-        },
-      },
-      webIntel: {
-        async buildWebContextForMessage() {
-          return {
-            date: '2026-02-07',
-            eventName: 'UFC 312',
-            fights: [
-              { fighterA: 'Mario Bautista', fighterB: 'Vinicius Oliveira' },
-              { fighterA: 'Umar Nurmagomedov', fighterB: 'Mike Davis' },
-            ],
-            headlines: [],
-            confidence: 'medium',
-            contextText: 'Main card estimada...',
-          };
         },
       },
     });
@@ -172,10 +184,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.equal(
-      result.reply,
-      'El proximo evento es UFC 312 y el main incluye Bautista vs Oliveira.'
-    );
+    assert.match(result.reply, /El proximo evento es UFC 312/);
+    assert.doesNotMatch(result.reply, /Fuentes:/);
     const session = conversationStore.getSession('chat-2');
     assert.equal(session.lastCardFights.length, 2);
     assert.equal(session.lastEvent.eventName, 'UFC 312');
@@ -184,7 +194,10 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
-      completionWithText('El proximo evento es UFC 295...'),
+      responseWithText('El proximo evento es UFC 312.', {
+        includeWebSearch: true,
+        withCitation: true,
+      }),
     ]);
 
     const wizard = createBettingWizard({
@@ -198,9 +211,38 @@ export async function runBettingWizardTests() {
           return { rowCount: 100 };
         },
       },
-      webIntel: {
-        async buildWebContextForMessage() {
-          return null;
+    });
+
+    const result = await wizard.handleMessage(
+      'cual es el proximo evento de ufc? pasame las fuentes',
+      {
+        chatId: 'chat-2b',
+        originalMessage: 'cual es el proximo evento de ufc? pasame las fuentes',
+        resolution: {
+          resolvedMessage: 'cual es el proximo evento de ufc? pasame las fuentes',
+        },
+      }
+    );
+
+    assert.match(result.reply, /El proximo evento es UFC 312/);
+    assert.match(result.reply, /Fuentes:/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('El proximo evento es UFC 295...'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+        getFightHistoryCacheStatus() {
+          return { rowCount: 100 };
         },
       },
     });

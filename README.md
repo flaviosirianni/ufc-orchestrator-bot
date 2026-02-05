@@ -13,7 +13,7 @@ User → Telegram Bot → Router (intent + context) → Betting Wizard Agent →
 - **Telegram Bot** – Polling client built with `node-telegram-bot-api` that forwards user messages to the orchestrator router.
 - **Router Chain** – Lightweight intent gate: defaults to Betting Wizard and only routes explicit sheet/raw-history commands.
 - **Conversation Store** – In-memory per-chat memory (card, selected fight, recent turns) for follow-up coherence.
-- **Betting Wizard Agent** – Tool-calling analyst that decides when to query web intel, fight history cache, and user profile memory.
+- **Betting Wizard Agent** – Responses API agent with built-in `web_search` plus function tools for fight history and user memory.
 - **Sheet Ops Tool** – Google Sheets integration backed by the official `googleapis` client and service account credentials.
 - **Fights Data Tool** – Reads the Google Sheet and extracts fighter history relevant to the user’s query (no external scraping).
 
@@ -105,10 +105,9 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 
 ### Web Enrichment Before Analysis
 
-- When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from Google News sources.
-- Source priority is enforced for event lookup: official UFC domain (`ufc.com`) first, then ESPN (`espn.com`), and only then open web fallback.
-- It also fetches recent headlines from Google News RSS to catch late replacements/injury signals.
-- Betting Wizard can call `resolve_event_card` before answering calendar/card questions, and then store the detected fights in conversation memory.
+- Betting Wizard uses OpenAI `web_search` via the Responses API for live event/card validation.
+- For schedule queries, prompts instruct source priority (`ufc.com` → `espn.com` → other sources) and require live verification before answering.
+- By default the bot does not show citations unless the user asks for sources explicitly (`fuentes`, `links`, etc.).
 
 ### Running Tests
 

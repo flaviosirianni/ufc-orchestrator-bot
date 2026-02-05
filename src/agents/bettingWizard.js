@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 import '../core/env.js';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const MODEL = process.env.BETTING_MODEL || 'gpt-4o-mini';
+const MODEL = process.env.BETTING_MODEL || 'gpt-4.1-mini';
 const TEMPERATURE = Number(process.env.BETTING_TEMPERATURE ?? '0.35');
 const KNOWLEDGE_FILE =
   process.env.KNOWLEDGE_FILE || './Knowledge/ufc_bets_playbook.md';
@@ -13,107 +13,120 @@ const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS ?? '9000');
 const MAX_RECENT_TURNS = Number(process.env.BETTING_MAX_RECENT_TURNS ?? '8');
 const MAX_TOOL_ROUNDS = Number(process.env.BETTING_MAX_TOOL_ROUNDS ?? '4');
 const MAX_HISTORY_PREVIEW_ROWS = Number(process.env.BETTING_HISTORY_PREVIEW_ROWS ?? '12');
+const WEB_SEARCH_CONTEXT_SIZE = process.env.WEB_SEARCH_CONTEXT_SIZE || 'medium';
+const WEB_SEARCH_COUNTRY = process.env.WEB_SEARCH_COUNTRY || 'US';
+const WEB_SEARCH_REGION = process.env.WEB_SEARCH_REGION || null;
+const WEB_SEARCH_CITY = process.env.WEB_SEARCH_CITY || null;
+const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || null;
+const SHOW_SOURCES_BY_DEFAULT = process.env.SHOW_SOURCES_BY_DEFAULT === 'true';
 
-const TOOL_DEFINITIONS = [
+const INCLUDE_FIELDS = ['web_search_call.action.sources'];
+
+const FUNCTION_TOOLS = [
   {
     type: 'function',
-    function: {
-      name: 'resolve_event_card',
-      description:
-        'Busca en web el evento UFC mas relevante para la consulta y devuelve cartelera estimada + titulares recientes.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Consulta del usuario (fecha, evento o pregunta en lenguaje natural).',
-          },
+    name: 'get_fighter_history',
+    description:
+      'Obtiene historial local de peleas desde cache sincronizado del Google Sheet (Fight History).',
+    parameters: {
+      type: 'object',
+      properties: {
+        fighters: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Nombres de peleadores a filtrar. Opcional.',
         },
-        required: ['query'],
-        additionalProperties: false,
+        query: {
+          type: 'string',
+          description: 'Texto de referencia para extraer peleadores o tokens de busqueda.',
+        },
+        strict: {
+          type: 'boolean',
+          description: 'Si true, exige match mas estricto por nombre completo.',
+        },
       },
+      additionalProperties: false,
     },
+    strict: false,
   },
   {
     type: 'function',
-    function: {
-      name: 'get_fighter_history',
-      description:
-        'Obtiene historial local de peleas desde cache sincronizado del Google Sheet (Fight History).',
-      parameters: {
-        type: 'object',
-        properties: {
-          fighters: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Nombres de peleadores a filtrar. Opcional.',
-          },
-          query: {
-            type: 'string',
-            description: 'Texto de referencia para extraer peleadores o tokens de busqueda.',
-          },
-          strict: {
-            type: 'boolean',
-            description: 'Si true, exige match mas estricto por nombre completo.',
-          },
-        },
-        additionalProperties: false,
-      },
+    name: 'get_user_profile',
+    description:
+      'Lee el perfil de usuario guardado en memoria conversacional (bankroll, unidad, perfil de riesgo, notas, apuestas previas).',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
     },
+    strict: false,
   },
   {
     type: 'function',
-    function: {
-      name: 'get_user_profile',
-      description:
-        'Lee el perfil de usuario guardado en memoria conversacional (bankroll, unidad, perfil de riesgo, notas, apuestas previas).',
-      parameters: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
+    name: 'update_user_profile',
+    description:
+      'Actualiza el perfil del usuario cuando provee datos operativos (bankroll, unidad, riesgo, notas).',
+    parameters: {
+      type: 'object',
+      properties: {
+        bankroll: { type: 'number' },
+        unitSize: { type: 'number' },
+        riskProfile: { type: 'string' },
+        currency: { type: 'string' },
+        notes: { type: 'string' },
       },
+      additionalProperties: false,
     },
+    strict: false,
   },
   {
     type: 'function',
-    function: {
-      name: 'update_user_profile',
-      description:
-        'Actualiza el perfil del usuario cuando provee datos operativos (bankroll, unidad, riesgo, notas).',
-      parameters: {
-        type: 'object',
-        properties: {
-          bankroll: { type: 'number' },
-          unitSize: { type: 'number' },
-          riskProfile: { type: 'string' },
-          currency: { type: 'string' },
-          notes: { type: 'string' },
-        },
-        additionalProperties: false,
+    name: 'record_user_bet',
+    description:
+      'Guarda una apuesta previa del usuario para memoria de seguimiento (no ejecuta apuestas).',
+    parameters: {
+      type: 'object',
+      properties: {
+        eventName: { type: 'string' },
+        fight: { type: 'string' },
+        pick: { type: 'string' },
+        odds: { type: 'number' },
+        stake: { type: 'number' },
+        units: { type: 'number' },
+        result: { type: 'string' },
+        notes: { type: 'string' },
       },
+      additionalProperties: false,
     },
+    strict: false,
   },
   {
     type: 'function',
-    function: {
-      name: 'record_user_bet',
-      description:
-        'Guarda una apuesta previa del usuario para memoria de seguimiento (no ejecuta apuestas).',
-      parameters: {
-        type: 'object',
-        properties: {
-          eventName: { type: 'string' },
-          fight: { type: 'string' },
-          pick: { type: 'string' },
-          odds: { type: 'number' },
-          stake: { type: 'number' },
-          units: { type: 'number' },
-          result: { type: 'string' },
-          notes: { type: 'string' },
+    name: 'set_event_card',
+    description:
+      'Guarda en memoria conversacional el evento y sus peleas para resolver referencias como pelea 1 en turnos siguientes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        eventName: { type: 'string' },
+        date: { type: 'string', description: 'Formato ISO YYYY-MM-DD si se conoce.' },
+        fights: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              fighterA: { type: 'string' },
+              fighterB: { type: 'string' },
+            },
+            required: ['fighterA', 'fighterB'],
+            additionalProperties: false,
+          },
         },
-        additionalProperties: false,
       },
+      required: ['fights'],
+      additionalProperties: false,
     },
+    strict: false,
   },
 ];
 
@@ -130,11 +143,24 @@ function normalise(value = '') {
     .toLowerCase();
 }
 
+function isCalendarQuestion(message = '') {
+  const text = normalise(message);
+  const hasEventWords =
+    /\b(ufc|evento|cartelera|main card|main event|quien pelea|quienes pelean)\b/.test(
+      text
+    );
+  const hasDateOrTimeWords =
+    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana)\b/.test(text) ||
+    /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/.test(
+      text
+    );
+  return hasEventWords && hasDateOrTimeWords;
+}
+
 function toNumberOrNull(value) {
   if (value === null || value === undefined || value === '') {
     return null;
   }
-
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -145,20 +171,6 @@ function truncateText(value = '', maxChars = 900) {
     return text;
   }
   return `${text.slice(0, maxChars - 3)}...`;
-}
-
-function isCalendarQuestion(message = '') {
-  const text = normalise(message);
-  const hasEventWords =
-    /\b(ufc|evento|cartelera|main card|main event|quien pelea|quienes pelean)\b/.test(
-      text
-    );
-  const hasDateOrTimeWords =
-    /\b(proximo|proxima|next|upcoming|que viene|siguiente)\b/.test(text) ||
-    /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/.test(
-      text
-    );
-  return hasEventWords && hasDateOrTimeWords;
 }
 
 function parseToolArgs(rawArguments = '{}') {
@@ -181,6 +193,8 @@ function logConfiguration() {
     hasOpenAIKey: Boolean(OPENAI_API_KEY),
     maxRecentTurns: MAX_RECENT_TURNS,
     maxToolRounds: MAX_TOOL_ROUNDS,
+    usesResponsesAPI: true,
+    webSearchContextSize: WEB_SEARCH_CONTEXT_SIZE,
   });
 }
 
@@ -228,15 +242,6 @@ function loadKnowledgeSnippet() {
     console.error('❌ Failed to load knowledge snippet:', error);
     return '';
   }
-}
-
-function mapTurnsToMessages(turns = []) {
-  return turns
-    .filter((turn) => turn?.role && turn?.content)
-    .map((turn) => ({
-      role: turn.role,
-      content: turn.content,
-    }));
 }
 
 function summariseProfile(profile = {}) {
@@ -316,13 +321,14 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Sos un analista UFC conversacional en espanol, natural y concreto.',
     `Fecha de referencia actual: ${today}.`,
     'Objetivo principal: dar respuestas coherentes entre turnos y aprovechar herramientas antes de pedir datos al usuario.',
-    'Si la pregunta es de calendario/evento/cartelera (fecha o proximo evento), SIEMPRE usa resolve_event_card antes de responder.',
+    'Para preguntas de calendario/evento/cartelera (por fecha o proximo evento), SIEMPRE usa web_search antes de responder.',
+    'Si hay conflicto entre fuentes, prioriza ufc.com, luego espn.com, luego otras.',
+    'No inventes eventos ni fechas. Si no logras confirmar con web_search, dilo explicitamente.',
+    'Cuando listes una cartelera, cita fuentes y llama set_event_card para guardar evento+peleas en memoria.',
     'Si piden analisis de una pelea concreta, usa get_fighter_history para sustentar pick tecnico con historial local.',
-    'No inventes eventos ni fechas. Si herramientas no devuelven datos, dilo explicitamente y sugiere reintento.',
     'No pidas historial de peleadores al usuario si la herramienta puede obtenerlo.',
     'Solo pide cuotas si el usuario quiere EV/staking fino; sin cuotas igual da lectura tecnica preliminar y pick condicional.',
-    'Usa la memoria conversacional para referencias como "pelea 1", "esa pelea", bankroll y apuestas previas.',
-    'Evita respuestas roboticas: prioriza contexto del chat actual, luego memoria, luego herramientas.',
+    'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
   ].join(' ');
@@ -334,11 +340,22 @@ function buildSystemPrompt(knowledgeSnippet = '') {
   return `${rules}\n\n[PLAYBOOK_SNIPPET]\n${knowledgeSnippet}`;
 }
 
+function buildRecentTurnsText(turns = []) {
+  if (!turns.length) {
+    return 'Sin turnos previos.';
+  }
+
+  return turns
+    .map((turn) => `${turn.role === 'assistant' ? 'Assistant' : 'User'}: ${turn.content}`)
+    .join('\n');
+}
+
 function buildUserPayload({
   originalMessage,
   resolvedMessage,
   resolution,
   sessionMemory,
+  recentTurns,
 }) {
   const sections = ['[USER_MESSAGE]', originalMessage];
 
@@ -353,6 +370,8 @@ function buildUserPayload({
   if (sessionMemory) {
     sections.push('', '[SESSION_MEMORY]', sessionMemory);
   }
+
+  sections.push('', '[RECENT_TURNS]', buildRecentTurnsText(recentTurns));
 
   if (resolvedMessage && resolvedMessage !== originalMessage) {
     sections.push('', '[RESOLVED_MESSAGE_FOR_REASONING]', resolvedMessage);
@@ -471,43 +490,185 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   };
 }
 
-async function runModelWithTools({
+function buildResponsesTools() {
+  const tools = [
+    {
+      type: 'web_search',
+      search_context_size: WEB_SEARCH_CONTEXT_SIZE,
+      user_location: {
+        type: 'approximate',
+        country: WEB_SEARCH_COUNTRY,
+        ...(WEB_SEARCH_REGION ? { region: WEB_SEARCH_REGION } : {}),
+        ...(WEB_SEARCH_CITY ? { city: WEB_SEARCH_CITY } : {}),
+        ...(WEB_SEARCH_TIMEZONE ? { timezone: WEB_SEARCH_TIMEZONE } : {}),
+      },
+    },
+    ...FUNCTION_TOOLS,
+  ];
+
+  return tools;
+}
+
+function extractFunctionCalls(response) {
+  const output = Array.isArray(response?.output) ? response.output : [];
+  return output.filter((item) => item?.type === 'function_call');
+}
+
+function extractResponseText(response) {
+  const direct = String(response?.output_text || '').trim();
+  if (direct) {
+    return direct;
+  }
+
+  const output = Array.isArray(response?.output) ? response.output : [];
+  for (const item of output) {
+    if (item?.type !== 'message' || !Array.isArray(item.content)) {
+      continue;
+    }
+
+    for (const content of item.content) {
+      if (content?.type === 'output_text' && String(content.text || '').trim()) {
+        return String(content.text).trim();
+      }
+    }
+  }
+
+  return '';
+}
+
+function extractCitationsFromResponse(response) {
+  const output = Array.isArray(response?.output) ? response.output : [];
+  const citations = [];
+  const seen = new Set();
+
+  for (const item of output) {
+    if (item?.type === 'message' && Array.isArray(item.content)) {
+      for (const content of item.content) {
+        if (content?.type !== 'output_text' || !Array.isArray(content.annotations)) {
+          continue;
+        }
+
+        for (const annotation of content.annotations) {
+          if (annotation?.type !== 'url_citation' || !annotation.url) {
+            continue;
+          }
+
+          const key = String(annotation.url).trim();
+          if (!key || seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          citations.push({
+            title: annotation.title || annotation.url,
+            url: annotation.url,
+          });
+        }
+      }
+    }
+
+    if (item?.type === 'web_search_call' && item.action?.type === 'search') {
+      const sources = Array.isArray(item.action.sources) ? item.action.sources : [];
+      for (const source of sources) {
+        if (!source?.url) {
+          continue;
+        }
+        const key = String(source.url).trim();
+        if (!key || seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        citations.push({
+          title: source.title || source.url,
+          url: source.url,
+        });
+      }
+    }
+  }
+
+  return citations;
+}
+
+function hasWebSearchCall(response) {
+  const output = Array.isArray(response?.output) ? response.output : [];
+  return output.some((item) => item?.type === 'web_search_call');
+}
+
+function sanitizeCardFights(rawFights = []) {
+  if (!Array.isArray(rawFights)) {
+    return [];
+  }
+
+  return rawFights
+    .map((fight) => ({
+      fighterA: String(fight?.fighterA || '').trim(),
+      fighterB: String(fight?.fighterB || '').trim(),
+    }))
+    .filter((fight) => fight.fighterA && fight.fighterB)
+    .slice(0, 12)
+    .map((fight, idx) => ({
+      ...fight,
+      cardIndex: idx + 1,
+    }));
+}
+
+function formatCitationsFooter(citations = []) {
+  if (!citations.length) {
+    return '';
+  }
+
+  const lines = citations.slice(0, 4).map((item, idx) => {
+    return `${idx + 1}. ${item.title} - ${item.url}`;
+  });
+
+  return `\n\nFuentes:\n${lines.join('\n')}`;
+}
+
+function shouldShowCitations(userMessage = '') {
+  if (SHOW_SOURCES_BY_DEFAULT) {
+    return true;
+  }
+
+  const text = normalise(userMessage);
+  return /\b(fuente|fuentes|source|sources|cita|citas|citation|citations|referencia|referencias|link|links|url|urls)\b/.test(
+    text
+  );
+}
+
+async function runResponsesWithTools({
   client,
-  messages,
+  tools,
+  instructions,
+  input,
   executeTool,
 }) {
+  let response = await client.responses.create({
+    model: MODEL,
+    temperature: TEMPERATURE,
+    instructions,
+    input,
+    tools,
+    include: INCLUDE_FIELDS,
+    tool_choice: 'auto',
+  });
+
+  let usedWebSearch = hasWebSearchCall(response);
+  const citationMap = new Map();
+  for (const citation of extractCitationsFromResponse(response)) {
+    citationMap.set(citation.url, citation);
+  }
+
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round += 1) {
-    const completion = await client.chat.completions.create({
-      model: MODEL,
-      temperature: TEMPERATURE,
-      messages,
-      tools: TOOL_DEFINITIONS,
-      tool_choice: 'auto',
-    });
-
-    const message = completion.choices?.[0]?.message;
-    if (!message) {
-      return '';
+    const functionCalls = extractFunctionCalls(response);
+    if (!functionCalls.length) {
+      break;
     }
 
-    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    messages.push({
-      role: 'assistant',
-      content: message.content ?? '',
-      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
-    });
-
-    if (!toolCalls.length) {
-      return String(message.content || '').trim();
-    }
-
-    for (const toolCall of toolCalls) {
-      const name = toolCall.function?.name || 'unknown_tool';
-      console.log(`🛠️ Betting Wizard tool call: ${name}`);
-
+    const outputs = [];
+    for (const call of functionCalls) {
+      console.log(`🛠️ Betting Wizard tool call: ${call.name}`);
       let toolResult;
       try {
-        toolResult = await executeTool(toolCall);
+        toolResult = await executeTool(call);
       } catch (error) {
         toolResult = {
           ok: false,
@@ -515,32 +676,39 @@ async function runModelWithTools({
         };
       }
 
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: JSON.stringify(toolResult),
+      outputs.push({
+        type: 'function_call_output',
+        call_id: call.call_id,
+        output: JSON.stringify(toolResult),
       });
+    }
+
+    response = await client.responses.create({
+      model: MODEL,
+      temperature: TEMPERATURE,
+      instructions,
+      previous_response_id: response.id,
+      input: outputs,
+      tools,
+      include: INCLUDE_FIELDS,
+      tool_choice: 'auto',
+    });
+
+    usedWebSearch = usedWebSearch || hasWebSearchCall(response);
+    for (const citation of extractCitationsFromResponse(response)) {
+      citationMap.set(citation.url, citation);
     }
   }
 
-  return '';
-}
-
-function buildEventCardMetadata(webContext = null) {
-  if (!webContext?.fights?.length) {
-    return null;
-  }
-
   return {
-    eventName: webContext.eventName || null,
-    date: webContext.date || null,
-    fights: webContext.fights,
+    reply: extractResponseText(response),
+    usedWebSearch,
+    citations: Array.from(citationMap.values()),
   };
 }
 
 export function createBettingWizard({
   fightsScalper,
-  webIntel,
   conversationStore,
   client: providedClient,
 } = {}) {
@@ -562,81 +730,14 @@ export function createBettingWizard({
 
     const runtimeState = {
       resolvedFight: resolution?.resolvedFight || null,
-      webContext: null,
+      eventCard: null,
     };
 
-    const executeTool = async (toolCall) => {
-      const name = toolCall.function?.name || '';
-      const args = parseToolArgs(toolCall.function?.arguments || '{}');
+    const executeTool = async (call) => {
+      const name = call.name || '';
+      const args = parseToolArgs(call.arguments || '{}');
 
       switch (name) {
-        case 'resolve_event_card': {
-          if (!webIntel?.buildWebContextForMessage) {
-            return {
-              ok: false,
-              error: 'webIntelTool no esta disponible.',
-            };
-          }
-
-          const userGroundedQuery = String(resolvedMessage || originalMessage || '').trim();
-          const modelSuggestedQuery = String(args.query || '').trim();
-          const hasExplicitDate =
-            /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/i.test(
-              userGroundedQuery
-            );
-          const query = hasExplicitDate
-            ? userGroundedQuery
-            : modelSuggestedQuery || userGroundedQuery;
-
-          if (!query) {
-            return {
-              ok: false,
-              error: 'query vacia para resolve_event_card.',
-            };
-          }
-
-          const webContext = await webIntel.buildWebContextForMessage(query, {
-            force: true,
-          });
-
-          if (!webContext) {
-            return {
-              ok: false,
-              error: 'No se encontro contexto web confiable para esa consulta.',
-            };
-          }
-
-          const fights = (webContext.fights || []).map((fight, index) => ({
-            ...fight,
-            cardIndex: index + 1,
-          }));
-
-          runtimeState.webContext = {
-            ...webContext,
-            fights,
-          };
-
-          if (fights.length && conversationStore?.setLastCard) {
-            conversationStore.setLastCard(chatId, {
-              eventName: webContext.eventName,
-              date: webContext.date,
-              fights,
-            });
-            runtimeState.resolvedFight = fights[0];
-          }
-
-          return {
-            ok: true,
-            queryUsed: query,
-            eventName: webContext.eventName || null,
-            date: webContext.date || null,
-            confidence: webContext.confidence || 'low',
-            fights,
-            headlines: (webContext.headlines || []).slice(0, 6),
-            contextText: webContext.contextText,
-          };
-        }
-
         case 'get_fighter_history': {
           if (!fightsScalper?.getFighterHistory) {
             return {
@@ -754,6 +855,38 @@ export function createBettingWizard({
           };
         }
 
+        case 'set_event_card': {
+          if (!conversationStore?.setLastCard) {
+            return {
+              ok: false,
+              error: 'conversationStore no soporta setLastCard.',
+            };
+          }
+
+          const fights = sanitizeCardFights(args.fights || []);
+          if (!fights.length) {
+            return {
+              ok: false,
+              error: 'No se detectaron peleas validas para guardar.',
+            };
+          }
+
+          const card = {
+            eventName: args.eventName ? String(args.eventName).trim() : null,
+            date: args.date ? String(args.date).trim() : null,
+            fights,
+          };
+
+          conversationStore.setLastCard(chatId, card);
+          runtimeState.eventCard = card;
+          runtimeState.resolvedFight = fights[0];
+
+          return {
+            ok: true,
+            eventCard: card,
+          };
+        }
+
         default:
           return {
             ok: false,
@@ -779,47 +912,51 @@ export function createBettingWizard({
         resolvedMessage,
         resolution,
         sessionMemory,
+        recentTurns,
       });
 
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        ...mapTurnsToMessages(recentTurns),
-        { role: 'user', content: userPayload },
-      ];
+      const tools = buildResponsesTools();
 
-      const reply = await runModelWithTools({
+      const result = await runResponsesWithTools({
         client,
-        messages,
+        tools,
+        instructions: systemPrompt,
+        input: userPayload,
         executeTool,
       });
 
-      if (isCalendarQuestion(originalMessage) && !runtimeState.webContext) {
+      if (isCalendarQuestion(originalMessage) && !result.usedWebSearch) {
         return {
           reply:
-            'No pude validar en vivo la cartelera/calendario ahora mismo. Si queres, pedime el evento con fecha exacta y lo reintento.',
+            'No pude validar en vivo la cartelera/calendario ahora mismo. Si queres, reformulalo con fecha exacta y lo reintento.',
           metadata: {
             resolvedFight: runtimeState.resolvedFight,
-            eventCard: null,
+            eventCard: runtimeState.eventCard,
           },
         };
       }
 
+      const reply = result.reply?.trim();
       if (!reply) {
         return {
           reply:
             'No pude terminar el analisis en este turno. Si queres, reformulalo en una frase y lo reintento.',
           metadata: {
             resolvedFight: runtimeState.resolvedFight,
-            eventCard: buildEventCardMetadata(runtimeState.webContext),
+            eventCard: runtimeState.eventCard,
           },
         };
       }
 
+      const citationFooter = shouldShowCitations(originalMessage)
+        ? formatCitationsFooter(result.citations)
+        : '';
+
       return {
-        reply,
+        reply: `${reply}${citationFooter}`,
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
-          eventCard: buildEventCardMetadata(runtimeState.webContext),
+          eventCard: runtimeState.eventCard,
         },
       };
     } catch (error) {
@@ -828,7 +965,7 @@ export function createBettingWizard({
         reply: '⚠️ Betting Wizard no esta disponible ahora.',
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
-          eventCard: buildEventCardMetadata(runtimeState.webContext),
+          eventCard: runtimeState.eventCard,
         },
       };
     }
