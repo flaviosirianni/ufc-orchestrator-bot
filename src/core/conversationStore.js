@@ -31,6 +31,14 @@ function createSession(chatId, ttlMs) {
     lastCardFights: [],
     lastEvent: null,
     lastResolvedFight: null,
+    userProfile: {
+      bankroll: null,
+      unitSize: null,
+      riskProfile: null,
+      currency: null,
+      notes: '',
+    },
+    betHistory: [],
   };
 }
 
@@ -166,6 +174,44 @@ export class ConversationStore {
       return;
     }
     this.patch(chatId, { lastResolvedFight: fight });
+  }
+
+  getUserProfile(chatId) {
+    const session = this.getSession(chatId);
+    return {
+      ...session.userProfile,
+    };
+  }
+
+  updateUserProfile(chatId, updates = {}) {
+    const session = this.getSession(chatId);
+    session.userProfile = {
+      ...session.userProfile,
+      ...updates,
+    };
+    session.updatedAt = nowMs();
+    session.expiresAt = session.updatedAt + this.ttlMs;
+    return session.userProfile;
+  }
+
+  addBetRecord(chatId, record = {}) {
+    const session = this.getSession(chatId);
+    session.betHistory.push({
+      ...record,
+      recordedAt: nowMs(),
+    });
+    session.betHistory = trimTurns(session.betHistory, 50);
+    session.updatedAt = nowMs();
+    session.expiresAt = session.updatedAt + this.ttlMs;
+    return session.betHistory[session.betHistory.length - 1];
+  }
+
+  getBetHistory(chatId, limit = 20) {
+    const session = this.getSession(chatId);
+    if (limit <= 0) {
+      return [];
+    }
+    return session.betHistory.slice(Math.max(0, session.betHistory.length - limit));
   }
 
   resolveMessage(chatId, message = '') {

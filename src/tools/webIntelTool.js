@@ -3,7 +3,19 @@ import '../core/env.js';
 const MAIN_CARD_FIGHTS_COUNT = Number(process.env.MAIN_CARD_FIGHTS_COUNT ?? '5');
 const WEB_NEWS_DAYS = Number(process.env.WEB_NEWS_DAYS ?? '3');
 const WEB_EVENT_LOOKUP_DAYS = Number(process.env.WEB_EVENT_LOOKUP_DAYS ?? '120');
+const WEB_NEXT_EVENT_LOOKUP_DAYS = Number(
+  process.env.WEB_NEXT_EVENT_LOOKUP_DAYS ?? '45'
+);
 const WEB_NEWS_MAX_ITEMS = Number(process.env.WEB_NEWS_MAX_ITEMS ?? '6');
+const TARGET_DATE_TOLERANCE_DAYS = Number(
+  process.env.WEB_TARGET_DATE_TOLERANCE_DAYS ?? '14'
+);
+
+const SOURCE_PRIORITY = [
+  { id: 'ufc', label: 'ufc.com', siteDomain: 'ufc.com' },
+  { id: 'espn', label: 'espn.com', siteDomain: 'espn.com' },
+  { id: 'open_web', label: 'open-web', siteDomain: null },
+];
 
 const MONTHS_ES = {
   enero: 1,
@@ -36,6 +48,33 @@ const MONTHS_EN = [
   'December',
 ];
 
+const MONTH_ALIASES_EN = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -52,6 +91,34 @@ function normalizeString(value = '') {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function toDateIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return formatDate(date);
+}
+
+function dateDiffDays(isoA, isoB) {
+  if (!isoA || !isoB) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const msA = Date.parse(`${isoA}T00:00:00Z`);
+  const msB = Date.parse(`${isoB}T00:00:00Z`);
+  if (Number.isNaN(msA) || Number.isNaN(msB)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.round((msA - msB) / 86400000);
 }
 
 function inferYear(month, day, referenceDate, explicitYear) {
@@ -112,6 +179,18 @@ export function isMainCardLookupRequest(message = '') {
       text
     )
   );
+}
+
+export function isUpcomingEventLookupRequest(message = '') {
+  const text = normalizeString(message);
+  return (
+    /\b(ufc|evento|cartelera|main card|main event|quien pelea|quienes pelean)\b/.test(text) &&
+    /\b(proximo|proxima|que viene|next|upcoming|siguiente)\b/.test(text)
+  );
+}
+
+export function isCalendarLookupRequest(message = '') {
+  return isMainCardLookupRequest(message) || isUpcomingEventLookupRequest(message);
 }
 
 function stripHtmlTags(value = '') {
@@ -229,10 +308,27 @@ function dedupeFights(fights = []) {
   const out = [];
 
   for (const fight of fights) {
-    const key = `${fight.fighterA.toLowerCase()}::${fight.fighterB.toLowerCase()}`;
-    const rev = `${fight.fighterB.toLowerCase()}::${fight.fighterA.toLowerCase()}`;
-    if (seen.has(key) || seen.has(rev)) continue;
+    const fighterA = normalizeString(fight.fighterA);
+    const fighterB = normalizeString(fight.fighterB);
+    const key = `${fighterA}::${fighterB}`;
+    const rev = `${fighterB}::${fighterA}`;
+
+    const aLast = fighterA.split(/\s+/).filter(Boolean).slice(-1)[0] || fighterA;
+    const bLast = fighterB.split(/\s+/).filter(Boolean).slice(-1)[0] || fighterB;
+    const surnameKey = `${aLast}::${bLast}`;
+    const surnameRev = `${bLast}::${aLast}`;
+
+    if (
+      seen.has(key) ||
+      seen.has(rev) ||
+      seen.has(surnameKey) ||
+      seen.has(surnameRev)
+    ) {
+      continue;
+    }
+
     seen.add(key);
+    seen.add(surnameKey);
     out.push(fight);
   }
 
@@ -241,6 +337,7 @@ function dedupeFights(fights = []) {
 
 async function fetchFightCandidatesFromQueries({
   queries = [],
+  source = null,
   days,
   fetchImpl,
 }) {
@@ -248,13 +345,12 @@ async function fetchFightCandidatesFromQueries({
     return [];
   }
 
-  const batches = await Promise.all(
-    queries.map((query) =>
-      fetchGoogleNewsRss({ query, days, fetchImpl }).catch(() => [])
-    )
-  );
-
-  const headlines = dedupeHeadlines(batches.flat());
+  const headlines = await fetchHeadlinesForQueries({
+    queries,
+    source,
+    days,
+    fetchImpl,
+  });
   return dedupeFights(
     headlines.flatMap((item) => extractFightPairsFromTitle(item.title))
   );
@@ -289,6 +385,250 @@ function buildEventLookupQueries(targetDate) {
   ];
 }
 
+function buildUpcomingEventQueries(referenceDate) {
+  const year = referenceDate.getUTCFullYear();
+  const month = MONTHS_EN[referenceDate.getUTCMonth()];
+  return [
+    'next UFC event main card',
+    'upcoming UFC event main card',
+    'UFC next event who fights',
+    `UFC ${year} next event`,
+    `UFC ${month} ${year} upcoming card`,
+  ];
+}
+
+function buildGenericEventQueries(query = '', referenceDate = new Date()) {
+  const cleaned = String(query || '').trim();
+  const queries = [];
+
+  if (cleaned) {
+    queries.push(`${cleaned} UFC main card`);
+    queries.push(`${cleaned} UFC fight card`);
+    queries.push(`${cleaned} UFC who fights`);
+  }
+
+  return [...queries, ...buildUpcomingEventQueries(referenceDate)];
+}
+
+function applySourceScope(query = '', source = {}) {
+  if (!source?.siteDomain) {
+    return query;
+  }
+  return `${query} site:${source.siteDomain}`;
+}
+
+async function fetchHeadlinesForQueries({
+  queries = [],
+  source,
+  days,
+  fetchImpl,
+}) {
+  if (!queries.length) {
+    return [];
+  }
+
+  const scopedQueries = queries.map((query) => applySourceScope(query, source));
+  const batches = await Promise.all(
+    scopedQueries.map((query) =>
+      fetchGoogleNewsRss({
+        query,
+        days,
+        fetchImpl,
+      }).catch(() => [])
+    )
+  );
+
+  return dedupeHeadlines(batches.flat());
+}
+
+function collectEventCandidates(headlines = [], referenceDate = new Date()) {
+  const map = new Map();
+
+  for (const item of headlines) {
+    const eventName = extractEventNameFromTitle(item.title);
+    if (!eventName) {
+      continue;
+    }
+
+    const key = normalizeString(eventName);
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        eventName,
+        count: 0,
+        dates: [],
+        headlines: [],
+      });
+    }
+
+    const candidate = map.get(key);
+    candidate.count += 1;
+    candidate.headlines.push(item);
+
+    const date = parseEventDateFromText(item.title, referenceDate);
+    if (date) {
+      candidate.dates.push(date);
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+function sortIsoAsc(values = []) {
+  return values.slice().sort((a, b) => a.localeCompare(b));
+}
+
+function pickEventForDate(candidates = [], targetDateIso) {
+  if (!candidates.length) {
+    return null;
+  }
+
+  const withDates = candidates
+    .map((candidate) => {
+      const sorted = sortIsoAsc(candidate.dates);
+      if (!sorted.length) {
+        return null;
+      }
+
+      let best = sorted[0];
+      let bestDiff = Math.abs(dateDiffDays(best, targetDateIso));
+      for (const date of sorted.slice(1)) {
+        const diff = Math.abs(dateDiffDays(date, targetDateIso));
+        if (diff < bestDiff) {
+          best = date;
+          bestDiff = diff;
+        }
+      }
+
+      return {
+        ...candidate,
+        selectedDate: best,
+        selectedDiffDays: bestDiff,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.selectedDiffDays !== b.selectedDiffDays) {
+        return a.selectedDiffDays - b.selectedDiffDays;
+      }
+      if (a.count !== b.count) {
+        return b.count - a.count;
+      }
+      return a.eventName.localeCompare(b.eventName);
+    });
+
+  if (withDates.length) {
+    return withDates[0];
+  }
+
+  return null;
+}
+
+function pickUpcomingEvent(candidates = [], referenceDateIso) {
+  if (!candidates.length) {
+    return null;
+  }
+
+  const future = candidates
+    .flatMap((candidate) =>
+      candidate.dates
+        .filter((date) => date >= referenceDateIso)
+        .map((date) => ({
+          ...candidate,
+          selectedDate: date,
+          selectedDiffDays: Math.abs(dateDiffDays(date, referenceDateIso)),
+        }))
+    )
+    .sort((a, b) => {
+      if (a.selectedDate !== b.selectedDate) {
+        return a.selectedDate.localeCompare(b.selectedDate);
+      }
+      if (a.count !== b.count) {
+        return b.count - a.count;
+      }
+      return a.eventName.localeCompare(b.eventName);
+    });
+
+  if (future.length) {
+    return future[0];
+  }
+
+  return candidates
+    .slice()
+    .sort((a, b) => {
+      if (a.count !== b.count) {
+        return b.count - a.count;
+      }
+      return a.eventName.localeCompare(b.eventName);
+    })[0];
+}
+
+function pickEventCandidate({
+  candidates = [],
+  targetDateIso = null,
+  referenceDateIso,
+}) {
+  if (targetDateIso) {
+    return pickEventForDate(candidates, targetDateIso);
+  }
+  return pickUpcomingEvent(candidates, referenceDateIso);
+}
+
+function isCandidateAcceptable({
+  candidate,
+  targetDateIso = null,
+  referenceDateIso,
+}) {
+  if (!candidate) {
+    return false;
+  }
+
+  if (targetDateIso) {
+    if (!candidate.selectedDate) {
+      return false;
+    }
+    return Math.abs(dateDiffDays(candidate.selectedDate, targetDateIso)) <= TARGET_DATE_TOLERANCE_DAYS;
+  }
+
+  if (!targetDateIso && candidate.selectedDate) {
+    return candidate.selectedDate >= referenceDateIso;
+  }
+
+  return true;
+}
+
+function parseEventDateFromText(text = '', referenceDate = new Date()) {
+  const normalized = String(text || '').replace(/\./g, '');
+  const monthPattern =
+    /\b([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s*(20\d{2}))?\b/i;
+  const monthMatch = normalized.match(monthPattern);
+  if (monthMatch) {
+    const monthRaw = normalizeString(monthMatch[1]);
+    const month = MONTH_ALIASES_EN[monthRaw];
+    if (month) {
+      const day = Number(monthMatch[2]);
+      const explicitYear = Number(monthMatch[3] || 0);
+      const year = explicitYear || inferYear(month, day, referenceDate, 0);
+      return formatDate(new Date(Date.UTC(year, month - 1, day)));
+    }
+  }
+
+  const slashMatch = text.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](20\d{2}))?\b/);
+  if (slashMatch) {
+    const day = Number(slashMatch[1]);
+    const month = Number(slashMatch[2]);
+    const year = inferYear(
+      month,
+      day,
+      referenceDate,
+      Number(slashMatch[3] || 0)
+    );
+    return formatDate(new Date(Date.UTC(year, month - 1, day)));
+  }
+
+  return null;
+}
+
 function mostFrequent(values = []) {
   const counts = new Map();
   for (const value of values) {
@@ -308,51 +648,135 @@ function mostFrequent(values = []) {
   return winner;
 }
 
+function findSourceById(sourceId = '') {
+  return SOURCE_PRIORITY.find((source) => source.id === sourceId) || null;
+}
+
+function buildEventCardFromHeadlines(headlines = []) {
+  return dedupeFights(
+    headlines.flatMap((item) => extractFightPairsFromTitle(item.title))
+  );
+}
+
+function pickSourceResult({
+  source,
+  headlines,
+  targetDateIso = null,
+  referenceDateIso,
+  referenceDate,
+}) {
+  if (!headlines.length) {
+    return null;
+  }
+
+  const candidates = collectEventCandidates(headlines, referenceDate);
+  const selected = pickEventCandidate({
+    candidates,
+    targetDateIso,
+    referenceDateIso,
+  });
+
+  if (!isCandidateAcceptable({ candidate: selected, targetDateIso, referenceDateIso })) {
+    return null;
+  }
+
+  const selectedHeadlines =
+    selected?.headlines?.length ? selected.headlines : headlines;
+
+  const eventName =
+    selected?.eventName ||
+    mostFrequent(headlines.map((item) => extractEventNameFromTitle(item.title)));
+  const eventDate =
+    selected?.selectedDate ||
+    mostFrequent(
+      headlines.map((item) => parseEventDateFromText(item.title, referenceDate))
+    ) ||
+    targetDateIso;
+
+  return {
+    source,
+    headlines,
+    selectedHeadlines,
+    eventName,
+    eventDate,
+  };
+}
+
 export async function buildWebContextForMessage(
   message = '',
-  { fetchImpl = fetch, referenceDate = new Date() } = {}
+  { fetchImpl = fetch, referenceDate = new Date(), force = false } = {}
 ) {
-  if (!isMainCardLookupRequest(message)) {
+  const isDateLookup = isMainCardLookupRequest(message);
+  const isUpcomingLookup = isUpcomingEventLookupRequest(message);
+
+  if (!force && !isDateLookup && !isUpcomingLookup) {
     return null;
   }
 
-  const targetDate = parseDateFromMessage(message, { referenceDate });
-  if (!targetDate) {
+  const targetDate = isDateLookup
+    ? parseDateFromMessage(message, { referenceDate })
+    : null;
+  const targetDateIso = toDateIso(targetDate);
+  const referenceDateIso = formatDate(referenceDate);
+  const queries = targetDate
+    ? buildEventLookupQueries(targetDate)
+    : isUpcomingLookup
+      ? buildUpcomingEventQueries(referenceDate)
+      : buildGenericEventQueries(message, referenceDate);
+  const lookupDays = targetDate ? WEB_EVENT_LOOKUP_DAYS : WEB_NEXT_EVENT_LOOKUP_DAYS;
+
+  let selectedResult = null;
+  for (const source of SOURCE_PRIORITY) {
+    const headlines = await fetchHeadlinesForQueries({
+      queries,
+      source,
+      days: lookupDays,
+      fetchImpl,
+    });
+    if (!headlines.length) {
+      continue;
+    }
+
+    const sourceResult = pickSourceResult({
+      source,
+      headlines,
+      targetDateIso,
+      referenceDateIso,
+      referenceDate,
+    });
+    if (!sourceResult) {
+      continue;
+    }
+
+    selectedResult = sourceResult;
+    break;
+  }
+
+  if (!selectedResult) {
     return null;
   }
 
-  const date = formatDate(targetDate);
-  const queries = buildEventLookupQueries(targetDate);
+  const {
+    source,
+    headlines: lookupHeadlines,
+    selectedHeadlines,
+    eventName,
+    eventDate,
+  } = selectedResult;
 
-  const lookupBatches = await Promise.all(
-    queries.map((query) =>
-      fetchGoogleNewsRss({
-        query,
-        days: WEB_EVENT_LOOKUP_DAYS,
-        fetchImpl,
-      }).catch(() => [])
-    )
-  );
-
-  const lookupHeadlines = dedupeHeadlines(lookupBatches.flat());
-  const eventName = mostFrequent(
-    lookupHeadlines.map((item) => extractEventNameFromTitle(item.title))
-  );
-
-  let fightCandidates = dedupeFights(
-    lookupHeadlines.flatMap((item) => extractFightPairsFromTitle(item.title))
-  );
+  let fightCandidates = buildEventCardFromHeadlines(selectedHeadlines);
 
   if (fightCandidates.length < MAIN_CARD_FIGHTS_COUNT) {
     const supplementalQueries = [
-      `${eventName || `UFC ${date}`} main card fights`,
-      `${eventName || `UFC ${date}`} full fight card`,
-      `${eventName || `UFC ${date}`} matchup breakdown`,
+      `${eventName || `UFC ${eventDate || targetDateIso || referenceDateIso}`} main card fights`,
+      `${eventName || `UFC ${eventDate || targetDateIso || referenceDateIso}`} full fight card`,
+      `${eventName || `UFC ${eventDate || targetDateIso || referenceDateIso}`} matchup breakdown`,
     ];
 
     const supplementalCandidates = await fetchFightCandidatesFromQueries({
       queries: supplementalQueries,
-      days: WEB_EVENT_LOOKUP_DAYS,
+      source: findSourceById(source.id) || source,
+      days: lookupDays,
       fetchImpl,
     });
     fightCandidates = dedupeFights([...fightCandidates, ...supplementalCandidates]);
@@ -360,7 +784,7 @@ export async function buildWebContextForMessage(
 
   fightCandidates = fightCandidates.slice(0, MAIN_CARD_FIGHTS_COUNT);
 
-  const recentNewsQuery = eventName || `UFC ${date}`;
+  const recentNewsQuery = eventName || (eventDate ? `UFC ${eventDate}` : 'UFC next event');
   const recentHeadlines = dedupeHeadlines(
     await fetchGoogleNewsRss({
       query: `${recentNewsQuery} injuries replacement weigh-in`,
@@ -376,8 +800,12 @@ export async function buildWebContextForMessage(
     : 'No pude inferir cruces exactos desde titulares; usar supuestos y aclararlo.';
 
   const contextText = [
-    `Fecha solicitada: ${date}`,
+    targetDate
+      ? `Fecha solicitada: ${targetDateIso}`
+      : `Solicitud: próximo evento UFC desde ${formatDate(referenceDate)}`,
+    `Fecha estimada del evento: ${eventDate || 'No identificada con certeza'}`,
     `Evento estimado (fuentes web): ${eventName || 'No identificado con certeza'}`,
+    `Fuente prioritaria usada: ${source.label}`,
     'Main card estimada desde fuentes web:',
     fightsText,
     'Titulares recientes para validar cambios de último momento:',
@@ -385,10 +813,11 @@ export async function buildWebContextForMessage(
   ].join('\n');
 
   return {
-    date,
+    date: eventDate,
     eventName,
     fights: fightCandidates,
     headlines: recentHeadlines,
+    source: source.label,
     confidence: fightCandidates.length >= MAIN_CARD_FIGHTS_COUNT ? 'medium' : 'low',
     contextText,
   };
@@ -397,5 +826,7 @@ export async function buildWebContextForMessage(
 export default {
   parseDateFromMessage,
   isMainCardLookupRequest,
+  isUpcomingEventLookupRequest,
+  isCalendarLookupRequest,
   buildWebContextForMessage,
 };

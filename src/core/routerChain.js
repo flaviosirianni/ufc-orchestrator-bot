@@ -1,20 +1,7 @@
-import { ChatOpenAI } from '@langchain/openai';
-import { PromptTemplate } from '@langchain/core/prompts';
-
-const routerPrompt = PromptTemplate.fromTemplate(`
-  You are the UFC Orchestrator.
-  Your job is to decide which agent should handle the user's request.
-  Available agents:
-  - "bettingWizard": Handles fight analysis and betting strategies.
-  - "sheetOps": Handles reading/writing UFC fight data in Google Sheets.
-  - "fightsScalper": Handles explicit requests for raw historical rows.
-
-  User message: {input}
-
-  Respond with only one of: bettingWizard, sheetOps, fightsScalper.
-`);
-
-const ENABLE_LLM_ROUTER = process.env.ENABLE_LLM_ROUTER === 'true';
+const DIRECT_SHEET_KEYWORDS = /\b(sheet|google sheets|read|leer|write|append|update|set|escrib|agrega|agregar|anadir|añadir)\b/i;
+const RANGE_PATTERN = /\b(?:[A-Za-z0-9_]+![A-Z]+(?:\d+)?(?::[A-Z]+(?:\d+)?)?|[A-Z]+\d+:[A-Z]+\d+|[A-Z]+:[A-Z]+)\b/;
+const RAW_HISTORY_KEYWORDS = /\b(historial|history|filas|rows|tabla|raw data|cache|sync|refresh)\b/i;
+const ANALYSIS_KEYWORDS = /\b(analiz|opina|pick|gana|quien|evento|main card|predic|estrateg|apuesta|vs|versus)\b/i;
 
 function parseRouteInput(input) {
   if (typeof input === 'string') {
@@ -41,44 +28,28 @@ function parseRouteInput(input) {
 }
 
 function classifyIntent(message = '') {
-  const text = String(message || '').toLowerCase();
-
-  if (!text.trim()) {
+  const text = String(message || '').trim();
+  if (!text) {
     return 'bettingwizard';
   }
 
-  const isSheetCommand =
-    /\b(write|append|update|set|sheet|google sheets|leer|read|escrib|agrega|agregar)\b/.test(
-      text
-    );
-  if (isSheetCommand) {
+  const looksLikeSheetCommand =
+    DIRECT_SHEET_KEYWORDS.test(text) && RANGE_PATTERN.test(text);
+  if (looksLikeSheetCommand) {
     return 'sheetops';
   }
 
-  const asksForRawHistory =
-    /\b(historial|history|record|records|filas|rows|tabla|raw data|mostrar historial)\b/.test(
-      text
-    );
-  const asksForAnalysis =
-    /\b(main|main card|evento|pelea|analiz|opina|quien|gana|pick|predic|pronost|estrateg|apuesta|vs|versus)\b/.test(
-      text
-    );
+  const asksForRawHistory = RAW_HISTORY_KEYWORDS.test(text);
+  const asksForAnalysis = ANALYSIS_KEYWORDS.test(text);
 
   if (asksForRawHistory && !asksForAnalysis) {
     return 'fightsscalper';
   }
 
-  return 'bettingwizard';
-}
+  if (/^\/(historial|history|cache|sync)\b/i.test(text)) {
+    return 'fightsscalper';
+  }
 
-function normaliseTarget(target = '') {
-  const value = String(target || '').trim().toLowerCase();
-  if (value === 'sheetops' || value === 'fightscalper' || value === 'bettingwizard') {
-    return value;
-  }
-  if (value === 'fightsscalper') {
-    return 'fightscalper';
-  }
   return 'bettingwizard';
 }
 
@@ -94,6 +65,7 @@ function unpackAgentResult(result) {
         metadata: result.metadata || {},
       };
     }
+
     if (typeof result.text === 'string') {
       return {
         text: result.text,
@@ -108,22 +80,21 @@ function unpackAgentResult(result) {
   };
 }
 
+function defaultResolution(message) {
+  return {
+    originalMessage: message,
+    resolvedMessage: message,
+    resolvedFight: null,
+    source: null,
+  };
+}
+
 export function createRouterChain({
   sheetOps,
   fightsScalper,
   bettingWizard,
   conversationStore,
-  chain: providedChain,
 } = {}) {
-  const chain =
-    providedChain ??
-    routerPrompt.pipe(
-      new ChatOpenAI({
-        model: 'gpt-4o-mini',
-        temperature: 0.2,
-      })
-    );
-
   async function routeMessage(input = '') {
     const { chatId, message, metadata } = parseRouteInput(input);
     const originalMessage = String(message || '');
@@ -139,34 +110,39 @@ export function createRouterChain({
 
     const resolution = conversationStore?.resolveMessage
       ? conversationStore.resolveMessage(chatId, originalMessage)
-      : {
-          originalMessage,
-          resolvedMessage: originalMessage,
-          resolvedFight: null,
-          source: null,
-        };
+      : defaultResolution(originalMessage);
     const messageForAgent = resolution?.resolvedMessage || originalMessage;
 
-    let target = normaliseTarget(classifyIntent(originalMessage));
-
-    if (ENABLE_LLM_ROUTER) {
-      try {
-        const response = await chain.invoke({ input: originalMessage });
-        target = normaliseTarget(response.content);
-      } catch (error) {
-        console.error('❌ Router failed to invoke the language model.', error);
-      }
-    }
-
+    const target = classifyIntent(originalMessage);
     console.log(`🤖 Router decided: ${target}`);
 
     let rawResult = null;
 
     try {
       switch (target) {
+        case 'sheetops':
+          if (!sheetOps?.handleMessage) {
+            rawResult = 'Sheet Ops agent is unavailable.';
+            break;
+          }
+          rawResult = await sheetOps.handleMessage(originalMessage, {
+            chatId,
+            metadata,
+          });
+          break;
+        case 'fightsscalper':
+          if (!fightsScalper?.handleMessage) {
+            rawResult = 'Fights Scalper agent is unavailable.';
+            break;
+          }
+          rawResult = await fightsScalper.handleMessage(originalMessage, {
+            chatId,
+            metadata,
+          });
+          break;
         case 'bettingwizard':
+        default:
           if (!bettingWizard?.handleMessage) {
-            console.error('❌ Betting Wizard agent missing or invalid.', bettingWizard);
             rawResult = 'Betting Wizard agent is unavailable.';
             break;
           }
@@ -177,30 +153,6 @@ export function createRouterChain({
             metadata,
           });
           break;
-        case 'sheetops':
-          if (!sheetOps?.handleMessage) {
-            console.error('❌ SheetOps agent missing or invalid.', sheetOps);
-            rawResult = 'Sheet Ops agent is unavailable.';
-            break;
-          }
-          rawResult = await sheetOps.handleMessage(originalMessage, {
-            chatId,
-            metadata,
-          });
-          break;
-        case 'fightscalper':
-          if (!fightsScalper?.handleMessage) {
-            console.error('❌ FightsScalper agent missing or invalid.', fightsScalper);
-            rawResult = 'Fights Scalper agent is unavailable.';
-            break;
-          }
-          rawResult = await fightsScalper.handleMessage(originalMessage, {
-            chatId,
-            metadata,
-          });
-          break;
-        default:
-          rawResult = "I'm not sure which agent to use for that.";
       }
     } catch (error) {
       console.error(`❌ Agent "${target}" threw an error.`, error);
@@ -218,11 +170,11 @@ export function createRouterChain({
       conversationStore.setLastResolvedFight(chatId, agentMetadata.resolvedFight);
     }
 
-    if (conversationStore?.setLastCard && agentMetadata?.webContext?.fights?.length) {
+    if (conversationStore?.setLastCard && agentMetadata?.eventCard?.fights?.length) {
       conversationStore.setLastCard(chatId, {
-        eventName: agentMetadata.webContext.eventName,
-        date: agentMetadata.webContext.date,
-        fights: agentMetadata.webContext.fights,
+        eventName: agentMetadata.eventCard.eventName,
+        date: agentMetadata.eventCard.date,
+        fights: agentMetadata.eventCard.fights,
       });
     }
 

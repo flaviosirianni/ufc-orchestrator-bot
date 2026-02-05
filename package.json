@@ -1,7 +1,7 @@
 {
   "name": "ufc-orchestrator-bot",
   "version": "1.0.0",
-  "description": "Telegram-based UFC betting orchestrator using LangChain agents and Google Sheets",
+  "description": "Telegram-based UFC betting orchestrator using OpenAI tool-calling, web intel, and Google Sheets",
   "type": "module",
   "main": "src/core/index.js",
   "scripts": {

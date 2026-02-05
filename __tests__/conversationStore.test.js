@@ -46,6 +46,30 @@ export async function runConversationStoreTests() {
     assert.match(resolution.resolvedMessage, /Alex Pereira vs Magomed Ankalaev/);
   });
 
+  tests.push(async () => {
+    const store = createConversationStore();
+    store.updateUserProfile('chat-d', {
+      bankroll: 1000,
+      unitSize: 25,
+      riskProfile: 'moderado',
+      currency: 'USD',
+    });
+    store.addBetRecord('chat-d', {
+      eventName: 'UFC 312',
+      fight: 'Mario Bautista vs Vinicius Oliveira',
+      pick: 'Mario Bautista',
+      odds: 1.9,
+    });
+
+    const profile = store.getUserProfile('chat-d');
+    const bets = store.getBetHistory('chat-d', 5);
+
+    assert.equal(profile.bankroll, 1000);
+    assert.equal(profile.currency, 'USD');
+    assert.equal(bets.length, 1);
+    assert.equal(bets[0].pick, 'Mario Bautista');
+  });
+
   for (const test of tests) {
     await test();
   }

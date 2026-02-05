@@ -1,6 +1,6 @@
 # UFC Orchestrator Bot
 
-UFC Orchestrator Bot is a Telegram automation system that combines OpenAI chat reasoning, Google Sheets data, and web signals to streamline UFC betting research. The assistant preserves chat context per user so follow-up questions like "pelea 1" stay coherent.
+UFC Orchestrator Bot is a Telegram automation system that combines OpenAI tool-calling, Google Sheets data, and web signals to streamline UFC betting research. The assistant preserves chat context per user so follow-up questions like "pelea 1" stay coherent.
 
 ## Architecture Overview
 
@@ -11,9 +11,9 @@ User → Telegram Bot → Router (intent + context) → Betting Wizard Agent →
 ### Core Components
 
 - **Telegram Bot** – Polling client built with `node-telegram-bot-api` that forwards user messages to the orchestrator router.
-- **Router Chain** – Intent detector with deterministic defaults so analysis stays in a single conversational flow.
+- **Router Chain** – Lightweight intent gate: defaults to Betting Wizard and only routes explicit sheet/raw-history commands.
 - **Conversation Store** – In-memory per-chat memory (card, selected fight, recent turns) for follow-up coherence.
-- **Betting Wizard Agent** – Chat-completions analyst that merges conversational memory, web context, and historical stats.
+- **Betting Wizard Agent** – Tool-calling analyst that decides when to query web intel, fight history cache, and user profile memory.
 - **Sheet Ops Tool** – Google Sheets integration backed by the official `googleapis` client and service account credentials.
 - **Fights Data Tool** – Reads the Google Sheet and extracts fighter history relevant to the user’s query (no external scraping).
 
@@ -28,7 +28,7 @@ User → Telegram Bot → Router (intent + context) → Betting Wizard Agent →
     telegramBot.js       # Telegram bot configuration and polling loop
     env.js               # Tiny .env loader (no third-party dependency)
   /agents
-    bettingWizard.js     # Conversational UFC analyst (OpenAI chat completions)
+    bettingWizard.js     # Conversational UFC analyst (OpenAI tool-calling)
   /tools
     sheetOpsTool.js      # Google Sheets helpers using the official SDK
     fightsScalperTool.js # Fighter history extractor built on top of the sheet tool
@@ -75,6 +75,7 @@ FIGHT_HISTORY_CACHE_DIR=./data
 MAIN_CARD_FIGHTS_COUNT=5
 WEB_NEWS_DAYS=3
 WEB_EVENT_LOOKUP_DAYS=120
+WEB_NEXT_EVENT_LOOKUP_DAYS=45
 WEB_NEWS_MAX_ITEMS=6
 PORT=3000
 ```
@@ -94,7 +95,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 
 - On startup, `fightsScalper` syncs `Fight History` from Google Sheets into `data/fight_history.json`.
 - A background sync runs every 6 hours by default (`FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000`).
-- Betting Wizard receives historical context from this local cache automatically before analysis.
+- Betting Wizard can call `get_fighter_history` against this cache whenever the model needs stats for analysis.
 
 ### Conversational Memory
 
@@ -105,8 +106,9 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 ### Web Enrichment Before Analysis
 
 - When the user asks for a card by date (for example: `main card del 7 de febrero`), the bot tries to resolve the event and main card from Google News sources.
+- Source priority is enforced for event lookup: official UFC domain (`ufc.com`) first, then ESPN (`espn.com`), and only then open web fallback.
 - It also fetches recent headlines from Google News RSS to catch late replacements/injury signals.
-- This web context is injected into the Betting Wizard prompt so it stops asking for fighter names when the event can be resolved online.
+- Betting Wizard can call `resolve_event_card` before answering calendar/card questions, and then store the detected fights in conversation memory.
 
 ### Running Tests
 
@@ -141,12 +143,12 @@ This executes Node-based assertions for router, memory, tools, web intel, and be
 
 ## Extending to WhatsApp
 
-To adapt this orchestrator for WhatsApp, swap out the Telegram bot module for a WhatsApp Business API (or Twilio WhatsApp) listener. The router and LangChain agents can remain unchanged—only the inbound/outbound transport layer needs to change.
+To adapt this orchestrator for WhatsApp, swap out the Telegram bot module for a WhatsApp Business API (or Twilio WhatsApp) listener. The router and core agent orchestration can remain unchanged; only the inbound/outbound transport layer needs to change.
 
 ## Next Steps
 
 Future enhancements could include:
 
-- Adding vector-based memory for historical fight analysis.
+- Adding vector-based long-term memory for historical fight analysis.
 - Scheduling automatic sheet refreshes before major UFC events.
 - Capturing analytics and logging conversational metrics.
