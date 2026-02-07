@@ -356,8 +356,10 @@ function buildUserPayload({
   resolution,
   sessionMemory,
   recentTurns,
+  hasMedia,
 }) {
-  const sections = ['[USER_MESSAGE]', originalMessage];
+  const trimmed = String(originalMessage || '').trim();
+  const sections = ['[USER_MESSAGE]', trimmed || (hasMedia ? 'El usuario envio un archivo multimedia sin texto.' : '')];
 
   if (resolution?.resolvedFight) {
     sections.push(
@@ -907,21 +909,44 @@ export function createBettingWizard({
       const sessionMemory = formatSessionMemory(session);
 
       const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet());
+      const mediaItems = Array.isArray(context.inputItems) ? context.inputItems : [];
+      const hasMedia = mediaItems.length > 0;
+
       const userPayload = buildUserPayload({
         originalMessage,
         resolvedMessage,
         resolution,
         sessionMemory,
         recentTurns,
+        hasMedia,
       });
 
       const tools = buildResponsesTools();
+
+      const messageContent = [{ type: 'input_text', text: userPayload }];
+      const extraItems = [];
+      for (const item of mediaItems) {
+        if (!item || !item.type) continue;
+        if (item.type === 'input_image' || item.type === 'input_file') {
+          messageContent.push(item);
+        } else {
+          extraItems.push(item);
+        }
+      }
+
+      const inputPayload = [
+        {
+          role: 'user',
+          content: messageContent,
+        },
+        ...extraItems,
+      ];
 
       const result = await runResponsesWithTools({
         client,
         tools,
         instructions: systemPrompt,
-        input: userPayload,
+        input: hasMedia ? inputPayload : userPayload,
         executeTool,
       });
 

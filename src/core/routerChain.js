@@ -151,6 +151,7 @@ export function createRouterChain({
             originalMessage,
             resolution,
             metadata,
+            inputItems: metadata?.inputItems,
           });
           break;
       }

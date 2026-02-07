@@ -109,6 +109,12 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - For schedule queries, prompts instruct source priority (`ufc.com` → `espn.com` → other sources) and require live verification before answering.
 - By default the bot does not show citations unless the user asks for sources explicitly (`fuentes`, `links`, etc.).
 
+### Media Inputs (Fotos y Audio)
+
+- El bot acepta fotos y las envía como `input_image` al Responses API.
+- Los audios (voice o audio) se transcriben con la Audio API (`gpt-4o-mini-transcribe`) y luego se pasa el texto resultante a Responses.
+- La conversión de audio requiere `ffmpeg` (se incluye `ffmpeg-static` por defecto).
+
 ### Running Tests
 
 ```bash
