@@ -115,6 +115,21 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - Los audios (voice o audio) se transcriben con la Audio API (`gpt-4o-mini-transcribe`) y luego se pasa el texto resultante a Responses.
 - La conversión de audio requiere `ffmpeg` (se incluye `ffmpeg-static` por defecto).
 
+### History Scraper (interno)
+
+- Agente interno para completar Fight History usando Responses API + `web_search`.
+- Flujo: lee la ultima fecha cargada en Google Sheets y trae todos los eventos posteriores hasta hoy.
+- Ejecucion manual:
+  ```bash
+  npm run history:sync
+  ```
+- Configuracion en `.env`:
+  - `HISTORY_SCRAPER_MODEL`
+  - `HISTORY_SCRAPER_MAX_EVENTS`
+  - `HISTORY_SCRAPER_DRY_RUN`
+  - `HISTORY_SCRAPER_DOMAINS`
+  - `HISTORY_SCRAPER_LOG_PATH` (log JSONL de eventos procesados)
+
 ### Running Tests
 
 ```bash
