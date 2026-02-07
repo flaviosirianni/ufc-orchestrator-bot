@@ -83,6 +83,39 @@ function normalizeRow(row = []) {
   return output;
 }
 
+function normalizeKey(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function deriveEventInfo(payload, rows = []) {
+  const eventName = String(payload.eventName || rows?.[0]?.[1] || '').trim();
+  const eventDate = String(payload.eventDate || rows?.[0]?.[0] || '').trim();
+  return {
+    eventName,
+    eventDate,
+  };
+}
+
+function buildEventKey({ eventName, eventDate }) {
+  const nameKey = normalizeKey(eventName);
+  const dateKey = normalizeKey(eventDate);
+  if (nameKey && dateKey) {
+    return `${dateKey}::${nameKey}`;
+  }
+  if (nameKey) {
+    return `name::${nameKey}`;
+  }
+  if (dateKey) {
+    return `date::${dateKey}`;
+  }
+  return null;
+}
+
 function buildInstructions() {
   return [
     'Tu tarea es actuar como un asistente experto en recopilar informacion completa y precisa sobre eventos de UFC del pasado.',
@@ -100,6 +133,8 @@ function buildInstructions() {
     'Cuando tengas el evento completo, llama append_fight_rows con todas las peleas en el formato indicado.',
     'Despues continua con el siguiente evento hasta llegar al presente o al maximo de eventos permitido.',
     'Interaccion con Google Sheets: usa get_last_loaded_fight para leer el ultimo registro y append_fight_rows para escribir nuevas filas en la hoja.',
+    'No hagas preguntas al operador; ejecuta el batch hasta completar o no encontrar eventos nuevos.',
+    'Si no hay eventos con resultados completos nuevos, termina el batch con un mensaje corto de cierre.',
   ].join(' ');
 }
 
@@ -162,6 +197,41 @@ async function appendLogEntry(entry) {
   await fs.appendFile(LOG_PATH, line, 'utf-8');
 }
 
+async function loadLoggedEvents() {
+  try {
+    const raw = await fs.readFile(LOG_PATH, 'utf-8');
+    const lines = raw.split('\n').filter(Boolean);
+    const keys = new Set();
+    for (const line of lines) {
+      const parsed = JSON.parse(line);
+      if (!parsed) continue;
+      const key = buildEventKey({
+        eventName: parsed.eventName,
+        eventDate: parsed.eventDate,
+      });
+      if (key) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return new Set();
+    }
+    throw error;
+  }
+}
+
+async function loadExistingRowSet() {
+  const rows = await readRange(SHEET_ID, RANGE);
+  const set = new Set();
+  for (const row of rows.slice(1)) {
+    const normalized = normalizeRow(row);
+    set.add(JSON.stringify(normalized));
+  }
+  return { rows, set };
+}
+
 function extractFunctionCalls(response) {
   const output = Array.isArray(response?.output) ? response.output : [];
   return output.filter((item) => item?.type === 'function_call');
@@ -190,8 +260,12 @@ export async function runHistoryScraper() {
   const summary = {
     eventsProcessed: 0,
     rowsAppended: 0,
+    rowsSkippedExisting: 0,
+    eventsSkippedLogged: 0,
     dryRun: DRY_RUN,
   };
+  const loggedEvents = await loadLoggedEvents();
+  let existingRowSet = null;
 
   let response = await client.responses.create({
     model: MODEL,
@@ -246,18 +320,65 @@ export async function runHistoryScraper() {
         }
         const rows = Array.isArray(payload.rows) ? payload.rows : [];
         const normalized = rows.map(normalizeRow).filter((row) => row[0] && row[1]);
+        const derived = deriveEventInfo(payload, normalized);
+        const eventKey = buildEventKey(derived);
+        if (eventKey && loggedEvents.has(eventKey)) {
+          summary.eventsSkippedLogged += 1;
+          await appendLogEntry({
+            at: new Date().toISOString(),
+            eventName: derived.eventName || null,
+            eventDate: derived.eventDate || null,
+            rowsAppended: 0,
+            sheetId: SHEET_ID,
+            range: RANGE,
+            dryRun: DRY_RUN,
+            model: MODEL,
+            skipped: true,
+            reason: 'already_logged',
+          });
+          outputs.push({
+            type: 'function_call_output',
+            call_id: call.call_id,
+            output: JSON.stringify({
+              ok: true,
+              appended: 0,
+              skipped: true,
+              reason: 'already_logged',
+            }),
+          });
+          continue;
+        }
+
+        if (!existingRowSet) {
+          existingRowSet = await loadExistingRowSet();
+        }
+
+        const deduped = [];
+        for (const row of normalized) {
+          const key = JSON.stringify(row);
+          if (existingRowSet.set.has(key)) {
+            summary.rowsSkippedExisting += 1;
+            continue;
+          }
+          existingRowSet.set.add(key);
+          deduped.push(row);
+        }
+
         const logEntryBase = {
           at: new Date().toISOString(),
-          eventName: payload.eventName || null,
-          eventDate: payload.eventDate || null,
-          rowsAppended: normalized.length,
+          eventName: derived.eventName || null,
+          eventDate: derived.eventDate || null,
+          rowsAppended: deduped.length,
           sheetId: SHEET_ID,
           range: RANGE,
           dryRun: DRY_RUN,
           model: MODEL,
         };
         summary.eventsProcessed += 1;
-        summary.rowsAppended += normalized.length;
+        summary.rowsAppended += deduped.length;
+        if (eventKey) {
+          loggedEvents.add(eventKey);
+        }
 
         if (DRY_RUN) {
           await appendLogEntry(logEntryBase);
@@ -273,8 +394,8 @@ export async function runHistoryScraper() {
           continue;
         }
 
-        if (normalized.length) {
-          await writeRange(SHEET_ID, RANGE, normalized, { append: true });
+        if (deduped.length) {
+          await writeRange(SHEET_ID, RANGE, deduped, { append: true });
         }
         await appendLogEntry(logEntryBase);
 
@@ -312,7 +433,9 @@ export async function runHistoryScraper() {
   const summaryLines = [
     'Resumen history:sync',
     `Eventos procesados: ${summary.eventsProcessed}`,
+    `Eventos salteados (log): ${summary.eventsSkippedLogged}`,
     `Filas agregadas: ${summary.rowsAppended}`,
+    `Filas salteadas (duplicadas): ${summary.rowsSkippedExisting}`,
     `Dry run: ${summary.dryRun ? 'si' : 'no'}`,
     `Log: ${LOG_PATH}`,
   ];
