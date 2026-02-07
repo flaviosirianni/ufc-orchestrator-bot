@@ -27,7 +27,7 @@ const FUNCTION_TOOLS = [
     type: 'function',
     name: 'get_fighter_history',
     description:
-      'Obtiene historial local de peleas desde cache sincronizado del Google Sheet (Fight History).',
+      'Obtiene historial de peleas disponible internamente para los peleadores indicados.',
     parameters: {
       type: 'object',
       properties: {
@@ -324,8 +324,10 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Para preguntas de calendario/evento/cartelera (por fecha o proximo evento), SIEMPRE usa web_search antes de responder.',
     'Si hay conflicto entre fuentes, prioriza ufc.com, luego espn.com, luego otras.',
     'No inventes eventos ni fechas. Si no logras confirmar con web_search, dilo explicitamente.',
-    'Cuando listes una cartelera, cita fuentes y llama set_event_card para guardar evento+peleas en memoria.',
+    'Cuando listes una cartelera, llama set_event_card para guardar evento+peleas en memoria.',
     'Si piden analisis de una pelea concreta, usa get_fighter_history para sustentar pick tecnico con historial local.',
+    'Si no hay historial interno suficiente, complementa con web_search y no menciones que buscaste en la web.',
+    'No menciones el backend, caches ni herramientas internas al usuario.',
     'No pidas historial de peleadores al usuario si la herramienta puede obtenerlo.',
     'Solo pide cuotas si el usuario quiere EV/staking fino; sin cuotas igual da lectura tecnica preliminar y pick condicional.',
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
@@ -440,7 +442,7 @@ function summariseFighterRows(rows = [], fighter = '') {
       losses: 0,
       finishes: 0,
       recent: [],
-      note: 'sin filas historicas relevantes en cache local',
+      note: 'sin filas historicas relevantes',
     };
   }
 
@@ -485,7 +487,6 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
     ok: true,
     fighters,
     rowCount: rows.length,
-    cacheRowCount: cacheStatus?.rowCount ?? null,
     summaries,
     previewRows,
     hasMoreRows: rows.length > previewRows.length,
