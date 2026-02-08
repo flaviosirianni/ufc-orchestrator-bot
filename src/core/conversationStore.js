@@ -39,6 +39,7 @@ function createSession(chatId, ttlMs) {
       notes: '',
     },
     betHistory: [],
+    ledgerSummary: null,
   };
 }
 

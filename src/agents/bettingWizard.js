@@ -231,6 +231,22 @@ function hasBetDecisionSignals(message = '') {
   );
 }
 
+function hasOddsRequestSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(cuota|cuotas|odds|quote|quotes|guardad|guardadas|guardado|bet365)\b/.test(
+    text
+  );
+}
+
+function hasLedgerSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(ledger|balance|bankroll|apuestas previas|historial de apuestas|mi ledger|mis apuestas)\b/.test(
+    text
+  );
+}
+
 function shouldUseDecisionModel({ message = '', hasMedia = false } = {}) {
   if (!DECISION_MODEL) {
     return false;
@@ -397,6 +413,19 @@ function formatSessionMemory(session = null) {
     lines.push(`Apuestas recientes: ${recentBets}`);
   }
 
+  if (session.ledgerSummary) {
+    const ledger = session.ledgerSummary;
+    const wins = ledger.wins ?? 0;
+    const losses = ledger.losses ?? 0;
+    const pushes = ledger.pushes ?? 0;
+    const totalBets = ledger.totalBets ?? 0;
+    const totalUnits = ledger.totalUnits ?? 0;
+    const totalStaked = ledger.totalStaked ?? 0;
+    lines.push(
+      `Ledger: ${totalBets} apuestas | W-L-P ${wins}-${losses}-${pushes} | unidades ${totalUnits} | staked ${totalStaked}`
+    );
+  }
+
   return lines.join('\n');
 }
 
@@ -405,6 +434,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
   const rules = [
     'Sos un analista UFC conversacional en espanol, natural y concreto.',
     `Fecha de referencia actual: ${today}.`,
+    'Usa emojis de forma visible para mejorar legibilidad y tono (sin saturar: 1-2 por seccion).',
     'Objetivo principal: dar respuestas coherentes entre turnos y aprovechar herramientas antes de pedir datos al usuario.',
     'Para preguntas de calendario/evento/cartelera (por fecha o proximo evento), SIEMPRE usa web_search antes de responder.',
     'Si hay conflicto entre fuentes, prioriza ufc.com, luego espn.com, luego otras.',
@@ -416,6 +446,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'No pidas historial de peleadores al usuario si la herramienta puede obtenerlo.',
     'Solo pide cuotas si el usuario quiere EV/staking fino; antes de pedirlas, intenta get_user_odds para usar cuotas guardadas.',
     'Cuando haya cuotas guardadas relevantes, usalas automaticamente sin pedirle al usuario que las reenvie.',
+    'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
@@ -450,6 +481,7 @@ function buildUserPayload({
   sessionMemory,
   recentTurns,
   hasMedia,
+  extraSections = [],
 }) {
   const trimmed = String(originalMessage || '').trim();
   const sections = ['[USER_MESSAGE]', trimmed || (hasMedia ? 'El usuario envio un archivo multimedia sin texto.' : '')];
@@ -470,6 +502,10 @@ function buildUserPayload({
 
   if (resolvedMessage && resolvedMessage !== originalMessage) {
     sections.push('', '[RESOLVED_MESSAGE_FOR_REASONING]', resolvedMessage);
+  }
+
+  if (extraSections.length) {
+    sections.push('', ...extraSections);
   }
 
   return sections.join('\n');
@@ -884,6 +920,46 @@ export function createBettingWizard({
       eventCard: null,
     };
 
+    const wantsLedger = hasLedgerSignals(originalMessage);
+    const wantsOdds = hasOddsRequestSignals(originalMessage);
+    const wantsBetDecision = hasBetDecisionSignals(originalMessage);
+    let oddsSnapshot = null;
+    let ledgerSummary = null;
+
+    if (userId && userStore) {
+      if (userStore.getUserProfile) {
+        const profile = userStore.getUserProfile(userId);
+        if (conversationStore?.patch) {
+          conversationStore.patch(chatId, { userProfile: profile });
+        }
+      }
+
+      if (userStore.getBetHistory) {
+        const betHistory = userStore.getBetHistory(userId, 10);
+        if (conversationStore?.patch) {
+          conversationStore.patch(chatId, { betHistory });
+        }
+      }
+
+      if (userStore.getLedgerSummary) {
+        ledgerSummary = userStore.getLedgerSummary(userId);
+        if (conversationStore?.patch) {
+          conversationStore.patch(chatId, { ledgerSummary });
+        }
+      }
+
+      if (
+        userStore.getLatestOddsSnapshot &&
+        (wantsOdds || wantsBetDecision)
+      ) {
+        const fightRef = resolution?.resolvedFight || null;
+        oddsSnapshot = userStore.getLatestOddsSnapshot(userId, {
+          fighterA: fightRef?.fighterA || null,
+          fighterB: fightRef?.fighterB || null,
+        });
+      }
+    }
+
     const executeTool = async (call) => {
       const name = call.name || '';
       const args = parseToolArgs(call.arguments || '{}');
@@ -1129,6 +1205,25 @@ export function createBettingWizard({
       });
       const modelToUse = useDecisionModel ? DECISION_MODEL : MODEL;
 
+      const extraSections = [];
+      if (wantsLedger && ledgerSummary) {
+        extraSections.push(
+          '[LEDGER_SUMMARY]',
+          JSON.stringify(ledgerSummary, null, 2)
+        );
+      }
+
+      if (wantsLedger && userStore?.getBetHistory) {
+        const bets = userStore.getBetHistory(userId, 10);
+        if (bets?.length) {
+          extraSections.push('[RECENT_BETS]', JSON.stringify(bets, null, 2));
+        }
+      }
+
+      if ((wantsOdds || wantsBetDecision) && oddsSnapshot) {
+        extraSections.push('[ODDS_SNAPSHOT]', JSON.stringify(oddsSnapshot, null, 2));
+      }
+
       const userPayload = buildUserPayload({
         originalMessage,
         resolvedMessage,
@@ -1136,6 +1231,7 @@ export function createBettingWizard({
         sessionMemory,
         recentTurns,
         hasMedia,
+        extraSections,
       });
 
       const tools = buildResponsesTools();
