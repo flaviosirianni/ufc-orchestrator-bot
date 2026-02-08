@@ -15,6 +15,7 @@ import {
   getBetHistory,
   getLedgerSummary,
   addOddsSnapshot,
+  getLatestOddsSnapshot,
   addUsageRecord,
   getDbPath,
 } from './sqliteStore.js';
@@ -53,6 +54,7 @@ function bootstrap() {
       getBetHistory,
       getLedgerSummary,
       addOddsSnapshot,
+      getLatestOddsSnapshot,
       recordUsage: addUsageRecord,
     },
   });

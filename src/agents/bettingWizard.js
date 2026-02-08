@@ -123,6 +123,24 @@ const FUNCTION_TOOLS = [
   },
   {
     type: 'function',
+    name: 'get_user_odds',
+    description:
+      'Busca cuotas/odds previamente guardadas para el usuario, segun pelea o evento.',
+    parameters: {
+      type: 'object',
+      properties: {
+        fightId: { type: 'string' },
+        fighterA: { type: 'string' },
+        fighterB: { type: 'string' },
+        eventName: { type: 'string' },
+        eventDate: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'set_event_card',
     description:
       'Guarda en memoria conversacional el evento y sus peleas para resolver referencias como pelea 1 en turnos siguientes.',
@@ -396,13 +414,15 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Si no hay historial interno suficiente, complementa con web_search y no menciones que buscaste en la web.',
     'No menciones el backend, caches ni herramientas internas al usuario.',
     'No pidas historial de peleadores al usuario si la herramienta puede obtenerlo.',
-    'Solo pide cuotas si el usuario quiere EV/staking fino; sin cuotas igual da lectura tecnica preliminar y pick condicional.',
+    'Solo pide cuotas si el usuario quiere EV/staking fino; antes de pedirlas, intenta get_user_odds para usar cuotas guardadas.',
+    'Cuando haya cuotas guardadas relevantes, usalas automaticamente sin pedirle al usuario que las reenvie.',
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
     'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
     'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
     'Cuando el usuario provea cuotas (texto o imagen), construye un JSON estructurado por pelea y llama store_user_odds una vez por pelea. Inclui sportsbook si el usuario lo menciona.',
+    'Para peleas proximas, realiza una busqueda web rapida enfocada en cortes de peso agresivos, fallos de peso, hospitalizaciones o cambios de ultima hora en la semana previa; si hay señales relevantes, ajusta el analisis.',
     'Mantene el formato limpio y util para apostar; no repitas las cuotas mas de una vez.',
   ].join(' ');
 
@@ -1020,6 +1040,32 @@ export function createBettingWizard({
           return {
             ok: true,
             stored,
+          };
+        }
+
+        case 'get_user_odds': {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para odds.' };
+          }
+          if (!userStore?.getLatestOddsSnapshot) {
+            return {
+              ok: false,
+              error: 'userStore no soporta getLatestOddsSnapshot.',
+            };
+          }
+
+          const payload = {
+            fightId: args.fightId ? String(args.fightId).trim() : null,
+            fighterA: args.fighterA ? String(args.fighterA).trim() : null,
+            fighterB: args.fighterB ? String(args.fighterB).trim() : null,
+            eventName: args.eventName ? String(args.eventName).trim() : null,
+            eventDate: args.eventDate ? String(args.eventDate).trim() : null,
+          };
+
+          const odds = userStore.getLatestOddsSnapshot(userId, payload);
+          return {
+            ok: true,
+            odds,
           };
         }
 

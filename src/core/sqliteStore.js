@@ -542,6 +542,107 @@ export function addUsageRecord({
   return { ok: true };
 }
 
+function normalizeName(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function parseOddsRow(row) {
+  if (!row) return null;
+  let payload = null;
+  try {
+    payload = row.odds_json ? JSON.parse(row.odds_json) : null;
+  } catch {
+    payload = null;
+  }
+
+  return {
+    id: row.id,
+    oddsHash: row.odds_hash,
+    createdAt: row.created_at,
+    event: {
+      event_id: row.event_id,
+      name: row.event_name,
+      date_utc: row.event_date_utc,
+      sportsbook: row.sportsbook,
+    },
+    fight: {
+      fight_id: row.fight_id,
+      division: row.division,
+      scheduled_rounds: row.scheduled_rounds,
+      fighter_red: row.fighter_red,
+      fighter_blue: row.fighter_blue,
+    },
+    odds: payload?.odds || payload || null,
+    meta: payload?.meta || {
+      source: row.source,
+      currency: row.currency,
+      odds_format: row.odds_format,
+      scraped_at_utc: row.scraped_at_utc,
+    },
+    raw: payload,
+  };
+}
+
+export function getLatestOddsSnapshot(userId, query = {}) {
+  if (!userId) return null;
+  const db = getDb();
+
+  if (query.fightId) {
+    const row = db
+      .prepare(
+        `SELECT * FROM odds_snapshots
+         WHERE telegram_user_id = ? AND fight_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(userId, query.fightId);
+    return parseOddsRow(row);
+  }
+
+  const fighterA = normalizeName(query.fighterA || query.fighterRed || '');
+  const fighterB = normalizeName(query.fighterB || query.fighterBlue || '');
+
+  if (fighterA && fighterB) {
+    const row = db
+      .prepare(
+        `SELECT * FROM odds_snapshots
+         WHERE telegram_user_id = ?
+           AND (
+             (lower(fighter_red) = ? AND lower(fighter_blue) = ?)
+             OR (lower(fighter_red) = ? AND lower(fighter_blue) = ?)
+           )
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(userId, fighterA, fighterB, fighterB, fighterA);
+    if (row) {
+      return parseOddsRow(row);
+    }
+  }
+
+  if (query.eventName || query.eventDate) {
+    const eventName = query.eventName ? `%${query.eventName}%` : null;
+    const eventDate = query.eventDate || null;
+    const row = db
+      .prepare(
+        `SELECT * FROM odds_snapshots
+         WHERE telegram_user_id = ?
+           AND (? IS NULL OR event_name LIKE ?)
+           AND (? IS NULL OR event_date_utc = ?)
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(userId, eventName, eventName, eventDate, eventDate);
+    return parseOddsRow(row);
+  }
+
+  return null;
+}
+
 export function getDbPath() {
   return DB_PATH;
 }
