@@ -5,6 +5,7 @@ import '../core/env.js';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MODEL = process.env.BETTING_MODEL || 'gpt-4.1-mini';
+const DECISION_MODEL = process.env.BETTING_DECISION_MODEL || '';
 const TEMPERATURE = Number(process.env.BETTING_TEMPERATURE ?? '0.35');
 const KNOWLEDGE_FILE =
   process.env.KNOWLEDGE_FILE || './Knowledge/ufc_bets_playbook.md';
@@ -102,6 +103,26 @@ const FUNCTION_TOOLS = [
   },
   {
     type: 'function',
+    name: 'store_user_odds',
+    description:
+      'Guarda en la base de datos las cuotas/odds provistas por el usuario para una pelea/evento.',
+    parameters: {
+      type: 'object',
+      properties: {
+        oddsPayload: {
+          type: 'object',
+          description:
+            'JSON estructurado con event, fight, odds y meta. Incluye sportsbook y usuario.',
+          additionalProperties: true,
+        },
+      },
+      required: ['oddsPayload'],
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'set_event_card',
     description:
       'Guarda en memoria conversacional el evento y sus peleas para resolver referencias como pelea 1 en turnos siguientes.',
@@ -157,6 +178,51 @@ function isCalendarQuestion(message = '') {
   return hasEventWords && hasDateOrTimeWords;
 }
 
+function hasOddsSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+
+  if (
+    /\b(cuota|cuotas|odds|quote|quotes|bet365|moneyline|ml|over|under|totales|props)\b/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  if (/@\s?\d+(\.\d+)?/.test(text)) {
+    return true;
+  }
+
+  if (/\b(o|u)\s?\d+(\.\d+)?\b/.test(text)) {
+    return true;
+  }
+
+  if (/\b\d+(\.\d+)?\s?(u|units|unidad|unidades)\b/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasBetDecisionSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(pick|picks|apuesta|apostar|recomend|stake|valor|ev|valor esperado)\b/.test(
+    text
+  );
+}
+
+function shouldUseDecisionModel({ message = '', hasMedia = false } = {}) {
+  if (!DECISION_MODEL) {
+    return false;
+  }
+  if (hasMedia) {
+    return true;
+  }
+  return hasOddsSignals(message) || hasBetDecisionSignals(message);
+}
+
 function toNumberOrNull(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -187,6 +253,7 @@ function parseToolArgs(rawArguments = '{}') {
 function logConfiguration() {
   console.log('⚙️ Betting Wizard config', {
     model: MODEL,
+    decisionModel: DECISION_MODEL || null,
     temperature: TEMPERATURE,
     knowledgeFile: RESOLVED_KNOWLEDGE_PATH,
     knowledgeExists: fs.existsSync(RESOLVED_KNOWLEDGE_PATH),
@@ -333,6 +400,10 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
+    'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
+    'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
+    'Cuando el usuario provea cuotas (texto o imagen), construye un JSON estructurado por pelea y llama store_user_odds una vez por pelea. Inclui sportsbook si el usuario lo menciona.',
+    'Mantene el formato limpio y util para apostar; no repitas las cuotas mas de una vez.',
   ].join(' ');
 
   if (!knowledgeSnippet) {
@@ -643,9 +714,56 @@ async function runResponsesWithTools({
   instructions,
   input,
   executeTool,
+  model,
 }) {
+  const activeModel = model || MODEL;
+  const usageTotals = {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    reasoning_tokens: 0,
+    cached_tokens: 0,
+  };
+  const usageBreakdown = [];
+
+  function accumulateUsage(currentResponse) {
+    const usage = currentResponse?.usage;
+    if (!usage || typeof usage !== 'object') {
+      return;
+    }
+
+    usageBreakdown.push({
+      response_id: currentResponse.id,
+      usage,
+    });
+
+    if (Number.isFinite(Number(usage.input_tokens))) {
+      usageTotals.input_tokens += Number(usage.input_tokens);
+    }
+    if (Number.isFinite(Number(usage.output_tokens))) {
+      usageTotals.output_tokens += Number(usage.output_tokens);
+    }
+    if (Number.isFinite(Number(usage.total_tokens))) {
+      usageTotals.total_tokens += Number(usage.total_tokens);
+    }
+
+    const reasoningTokens =
+      usage.reasoning_tokens ??
+      usage.output_tokens_details?.reasoning_tokens ??
+      null;
+    if (Number.isFinite(Number(reasoningTokens))) {
+      usageTotals.reasoning_tokens += Number(reasoningTokens);
+    }
+
+    const cachedTokens =
+      usage.cached_tokens ?? usage.input_tokens_details?.cached_tokens ?? null;
+    if (Number.isFinite(Number(cachedTokens))) {
+      usageTotals.cached_tokens += Number(cachedTokens);
+    }
+  }
+
   let response = await client.responses.create({
-    model: MODEL,
+    model: activeModel,
     temperature: TEMPERATURE,
     instructions,
     input,
@@ -653,6 +771,8 @@ async function runResponsesWithTools({
     include: INCLUDE_FIELDS,
     tool_choice: 'auto',
   });
+
+  accumulateUsage(response);
 
   let usedWebSearch = hasWebSearchCall(response);
   const citationMap = new Map();
@@ -687,7 +807,7 @@ async function runResponsesWithTools({
     }
 
     response = await client.responses.create({
-      model: MODEL,
+      model: activeModel,
       temperature: TEMPERATURE,
       instructions,
       previous_response_id: response.id,
@@ -696,6 +816,8 @@ async function runResponsesWithTools({
       include: INCLUDE_FIELDS,
       tool_choice: 'auto',
     });
+
+    accumulateUsage(response);
 
     usedWebSearch = usedWebSearch || hasWebSearchCall(response);
     for (const citation of extractCitationsFromResponse(response)) {
@@ -707,6 +829,10 @@ async function runResponsesWithTools({
     reply: extractResponseText(response),
     usedWebSearch,
     citations: Array.from(citationMap.values()),
+    usage: {
+      totals: usageTotals,
+      breakdown: usageBreakdown,
+    },
   };
 }
 
@@ -874,6 +1000,29 @@ export function createBettingWizard({
           };
         }
 
+        case 'store_user_odds': {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para odds.' };
+          }
+          if (!userStore?.addOddsSnapshot) {
+            return {
+              ok: false,
+              error: 'userStore no soporta addOddsSnapshot.',
+            };
+          }
+
+          const payload =
+            args.oddsPayload && typeof args.oddsPayload === 'object'
+              ? args.oddsPayload
+              : args;
+
+          const stored = userStore.addOddsSnapshot(userId, payload);
+          return {
+            ok: true,
+            stored,
+          };
+        }
+
         case 'set_event_card': {
           if (!conversationStore?.setLastCard) {
             return {
@@ -928,6 +1077,11 @@ export function createBettingWizard({
       const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet());
       const mediaItems = Array.isArray(context.inputItems) ? context.inputItems : [];
       const hasMedia = mediaItems.length > 0;
+      const useDecisionModel = shouldUseDecisionModel({
+        message: originalMessage,
+        hasMedia,
+      });
+      const modelToUse = useDecisionModel ? DECISION_MODEL : MODEL;
 
       const userPayload = buildUserPayload({
         originalMessage,
@@ -965,7 +1119,24 @@ export function createBettingWizard({
         instructions: systemPrompt,
         input: hasMedia ? inputPayload : userPayload,
         executeTool,
+        model: modelToUse,
       });
+
+      if (userStore?.recordUsage && userId) {
+        try {
+          userStore.recordUsage({
+            userId,
+            sessionId: chatId,
+            model: modelToUse || MODEL,
+            usage: result.usage,
+            usedWebSearch: result.usedWebSearch,
+            inputImages: context.mediaStats?.imageCount || 0,
+            audioSeconds: context.mediaStats?.audioSeconds || 0,
+          });
+        } catch (usageError) {
+          console.error('⚠️ No se pudo guardar usage:', usageError);
+        }
+      }
 
       if (isCalendarQuestion(originalMessage) && !result.usedWebSearch) {
         return {

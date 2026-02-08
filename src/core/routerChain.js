@@ -158,6 +158,7 @@ export function createRouterChain({
             resolution,
             metadata,
             inputItems: metadata?.inputItems,
+            mediaStats: metadata?.mediaStats,
             userId,
             userInfo,
             chatInfo,

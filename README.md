@@ -62,13 +62,19 @@ SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 BETTING_MODEL=gpt-4o-mini
+BETTING_DECISION_MODEL=gpt-5.2
 BETTING_TEMPERATURE=0.35
 BETTING_MAX_RECENT_TURNS=8
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
 KNOWLEDGE_MAX_CHARS=9000
+DB_PATH=./data/bot.db
 CONVERSATION_TTL_MS=86400000
 CONVERSATION_MAX_TURNS=20
 CONVERSATION_MAX_TURN_CHARS=1600
+MAX_MEDIA_BYTES=26214400
+AUDIO_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
+MAX_AUDIO_TRANSCRIPT_CHARS=4000
+MEDIA_GROUP_FLUSH_MS=900
 FIGHT_HISTORY_RANGE=Fight History!A:Z
 FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
 FIGHT_HISTORY_CACHE_DIR=./data
@@ -112,6 +118,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 ### Media Inputs (Fotos y Audio)
 
 - El bot acepta fotos y las envía como `input_image` al Responses API.
+- Si el usuario manda un album (varias fotos juntas), espera un instante y analiza todas juntas antes de responder.
 - Los audios (voice o audio) se transcriben con la Audio API (`gpt-4o-mini-transcribe`) y luego se pasa el texto resultante a Responses.
 - La conversión de audio requiere `ffmpeg` (se incluye `ffmpeg-static` por defecto).
 
