@@ -7,6 +7,15 @@ import * as fightsScalper from '../tools/fightsScalperTool.js';
 import * as webIntel from '../tools/webIntelTool.js';
 import { createBettingWizard } from '../agents/bettingWizard.js';
 import { createConversationStore } from './conversationStore.js';
+import { createSessionLogger } from './sessionLogger.js';
+import {
+  getUserProfile,
+  updateUserProfile,
+  addBetRecord,
+  getBetHistory,
+  getLedgerSummary,
+  getDbPath,
+} from './sqliteStore.js';
 
 function createHealthServer(port) {
   const server = http.createServer((req, res) => {
@@ -23,6 +32,8 @@ function createHealthServer(port) {
 
 function bootstrap() {
   const conversationStore = createConversationStore();
+  const sessionLogger = createSessionLogger();
+  console.log('[bootstrap] SQLite DB:', getDbPath());
 
   fightsScalper.startFightHistorySync({
     intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
@@ -33,6 +44,13 @@ function bootstrap() {
     fightsScalper,
     webIntel,
     conversationStore,
+    userStore: {
+      getUserProfile,
+      updateUserProfile,
+      addBetRecord,
+      getBetHistory,
+      getLedgerSummary,
+    },
   });
 
   console.log('[bootstrap] Betting Wizard instance type:', {
@@ -45,6 +63,7 @@ function bootstrap() {
     fightsScalper,
     bettingWizard,
     conversationStore,
+    sessionLogger,
   });
 
   startTelegramBot(router);

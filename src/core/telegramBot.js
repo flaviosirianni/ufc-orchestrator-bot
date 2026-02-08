@@ -134,6 +134,8 @@ export function startTelegramBot(router) {
 
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const from = msg.from || {};
+    const chatInfo = msg.chat || {};
     let userMessage = msg.text || msg.caption || '';
 
     console.log(`📩 Mensaje recibido: ${userMessage}`);
@@ -201,6 +203,17 @@ export function startTelegramBot(router) {
       message: userMessage,
       telegramMessageId: msg.message_id,
       inputItems,
+      user: {
+        id: from.id ? String(from.id) : null,
+        username: from.username || null,
+        firstName: from.first_name || null,
+        lastName: from.last_name || null,
+      },
+      chat: {
+        id: chatInfo.id ? String(chatInfo.id) : null,
+        type: chatInfo.type || null,
+        title: chatInfo.title || null,
+      },
     });
 
     bot.sendMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');

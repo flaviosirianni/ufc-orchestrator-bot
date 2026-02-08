@@ -713,6 +713,7 @@ async function runResponsesWithTools({
 export function createBettingWizard({
   fightsScalper,
   conversationStore,
+  userStore,
   client: providedClient,
 } = {}) {
   ensureConfigured(providedClient);
@@ -721,6 +722,7 @@ export function createBettingWizard({
 
   async function handleMessage(message, context = {}) {
     const chatId = String(context.chatId ?? 'default');
+    const userId = context.userId ? String(context.userId) : null;
     const originalMessage = context.originalMessage || String(message || '');
     const resolution =
       context.resolution ||
@@ -781,25 +783,36 @@ export function createBettingWizard({
         }
 
         case 'get_user_profile': {
-          const profile = conversationStore?.getUserProfile
-            ? conversationStore.getUserProfile(chatId)
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para perfil.' };
+          }
+
+          const profile = userStore?.getUserProfile
+            ? userStore.getUserProfile(userId)
             : {};
-          const recentBets = conversationStore?.getBetHistory
-            ? conversationStore.getBetHistory(chatId, 8)
+          const recentBets = userStore?.getBetHistory
+            ? userStore.getBetHistory(userId, 8)
             : [];
+          const ledger = userStore?.getLedgerSummary
+            ? userStore.getLedgerSummary(userId)
+            : null;
 
           return {
             ok: true,
             userProfile: profile,
             recentBets,
+            ledger,
           };
         }
 
         case 'update_user_profile': {
-          if (!conversationStore?.updateUserProfile) {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para perfil.' };
+          }
+          if (!userStore?.updateUserProfile) {
             return {
               ok: false,
-              error: 'conversationStore no soporta updateUserProfile.',
+              error: 'userStore no soporta updateUserProfile.',
             };
           }
 
@@ -825,7 +838,7 @@ export function createBettingWizard({
             };
           }
 
-          const profile = conversationStore.updateUserProfile(chatId, updates);
+          const profile = userStore.updateUserProfile(userId, updates);
           return {
             ok: true,
             userProfile: profile,
@@ -833,10 +846,13 @@ export function createBettingWizard({
         }
 
         case 'record_user_bet': {
-          if (!conversationStore?.addBetRecord) {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para apuestas.' };
+          }
+          if (!userStore?.addBetRecord) {
             return {
               ok: false,
-              error: 'conversationStore no soporta addBetRecord.',
+              error: 'userStore no soporta addBetRecord.',
             };
           }
 
@@ -851,7 +867,7 @@ export function createBettingWizard({
             notes: args.notes ? truncateText(String(args.notes), 240) : null,
           };
 
-          const stored = conversationStore.addBetRecord(chatId, record);
+          const stored = userStore.addBetRecord(userId, record);
           return {
             ok: true,
             record: stored,

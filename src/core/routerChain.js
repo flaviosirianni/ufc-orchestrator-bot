@@ -94,10 +94,16 @@ export function createRouterChain({
   fightsScalper,
   bettingWizard,
   conversationStore,
+  sessionLogger,
 } = {}) {
   async function routeMessage(input = '') {
     const { chatId, message, metadata } = parseRouteInput(input);
     const originalMessage = String(message || '');
+    const userIdRaw = metadata?.user?.id;
+    const userId = userIdRaw ? String(userIdRaw) : null;
+    const sessionId = userId ? `${chatId}:${userId}` : chatId;
+    const userInfo = metadata?.user || {};
+    const chatInfo = metadata?.chat || {};
 
     console.log('[routerChain] Incoming message:', originalMessage);
     console.log('[routerChain] Agent availability snapshot:', {
@@ -105,11 +111,11 @@ export function createRouterChain({
       bettingWizardHasHandler: typeof bettingWizard?.handleMessage === 'function',
       sheetOpsHasHandler: typeof sheetOps?.handleMessage === 'function',
       fightsScalperHasHandler: typeof fightsScalper?.handleMessage === 'function',
-      chatId,
+      chatId: sessionId,
     });
 
     const resolution = conversationStore?.resolveMessage
-      ? conversationStore.resolveMessage(chatId, originalMessage)
+      ? conversationStore.resolveMessage(sessionId, originalMessage)
       : defaultResolution(originalMessage);
     const messageForAgent = resolution?.resolvedMessage || originalMessage;
 
@@ -147,11 +153,15 @@ export function createRouterChain({
             break;
           }
           rawResult = await bettingWizard.handleMessage(messageForAgent, {
-            chatId,
+            chatId: sessionId,
             originalMessage,
             resolution,
             metadata,
             inputItems: metadata?.inputItems,
+            userId,
+            userInfo,
+            chatInfo,
+            originalChatId: chatId,
           });
           break;
       }
@@ -163,19 +173,34 @@ export function createRouterChain({
     const { text, metadata: agentMetadata } = unpackAgentResult(rawResult);
 
     if (conversationStore?.appendTurn) {
-      conversationStore.appendTurn(chatId, 'user', originalMessage);
-      conversationStore.appendTurn(chatId, 'assistant', text);
+      conversationStore.appendTurn(sessionId, 'user', originalMessage);
+      conversationStore.appendTurn(sessionId, 'assistant', text);
     }
 
     if (conversationStore?.setLastResolvedFight && agentMetadata?.resolvedFight) {
-      conversationStore.setLastResolvedFight(chatId, agentMetadata.resolvedFight);
+      conversationStore.setLastResolvedFight(sessionId, agentMetadata.resolvedFight);
     }
 
     if (conversationStore?.setLastCard && agentMetadata?.eventCard?.fights?.length) {
-      conversationStore.setLastCard(chatId, {
+      conversationStore.setLastCard(sessionId, {
         eventName: agentMetadata.eventCard.eventName,
         date: agentMetadata.eventCard.date,
         fights: agentMetadata.eventCard.fights,
+      });
+    }
+
+    if (sessionLogger?.logInteraction) {
+      const sessionState = conversationStore?.getSession
+        ? conversationStore.getSession(sessionId)
+        : null;
+      await sessionLogger.logInteraction({
+        chatId,
+        userId,
+        userInfo,
+        chatInfo,
+        sessionState,
+        userMessage: originalMessage,
+        assistantMessage: text,
       });
     }
 
