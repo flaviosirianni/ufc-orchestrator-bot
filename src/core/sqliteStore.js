@@ -135,6 +135,27 @@ function initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_usage_user_time
       ON usage_records (telegram_user_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS user_credits (
+      telegram_user_id TEXT PRIMARY KEY,
+      paid_credits REAL DEFAULT 0,
+      free_credits REAL DEFAULT 0,
+      week_id TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS credit_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT,
+      amount REAL,
+      type TEXT,
+      reason TEXT,
+      metadata TEXT,
+      created_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_credit_tx_user_time
+      ON credit_transactions (telegram_user_id, created_at);
   `);
 }
 
@@ -164,6 +185,15 @@ function toNumberOrNull(value) {
 function hashOddsPayload(payload) {
   const json = JSON.stringify(payload);
   return crypto.createHash('sha256').update(json).digest('hex');
+}
+
+function getIsoWeekId(date = new Date()) {
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - dayNumber);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((target - yearStart) / 86400000 + 1) / 7);
+  return `${target.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 }
 
 export function upsertUser({ userId, username, firstName, lastName } = {}) {
@@ -540,6 +570,200 @@ export function addUsageRecord({
   );
 
   return { ok: true };
+}
+
+export function getCreditState(userId, weeklyFreeCredits = 5) {
+  if (!userId) return null;
+  const db = getDb();
+  const weekId = getIsoWeekId();
+  const existing = db
+    .prepare('SELECT * FROM user_credits WHERE telegram_user_id = ?')
+    .get(userId);
+
+  const ts = nowIso();
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO user_credits (telegram_user_id, paid_credits, free_credits, week_id, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(userId, 0, weeklyFreeCredits, weekId, ts);
+
+    db.prepare(
+      `INSERT INTO credit_transactions
+        (telegram_user_id, amount, type, reason, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      userId,
+      weeklyFreeCredits,
+      'grant_free',
+      'weekly_grant',
+      JSON.stringify({ weekId }),
+      ts
+    );
+
+    return {
+      paidCredits: 0,
+      freeCredits: weeklyFreeCredits,
+      weekId,
+      availableCredits: weeklyFreeCredits,
+    };
+  }
+
+  if (existing.week_id !== weekId) {
+    db.prepare(
+      `UPDATE user_credits
+       SET free_credits = ?, week_id = ?, updated_at = ?
+       WHERE telegram_user_id = ?`
+    ).run(weeklyFreeCredits, weekId, ts, userId);
+
+    db.prepare(
+      `INSERT INTO credit_transactions
+        (telegram_user_id, amount, type, reason, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      userId,
+      weeklyFreeCredits,
+      'grant_free',
+      'weekly_grant',
+      JSON.stringify({ weekId }),
+      ts
+    );
+
+    return {
+      paidCredits: existing.paid_credits || 0,
+      freeCredits: weeklyFreeCredits,
+      weekId,
+      availableCredits: (existing.paid_credits || 0) + weeklyFreeCredits,
+    };
+  }
+
+  const paidCredits = existing.paid_credits || 0;
+  const freeCredits = existing.free_credits || 0;
+  return {
+    paidCredits,
+    freeCredits,
+    weekId,
+    availableCredits: paidCredits + freeCredits,
+  };
+}
+
+export function spendCredits(userId, amount, { reason = 'usage', metadata = null } = {}) {
+  if (!userId || !amount || amount <= 0) return { ok: false };
+  const db = getDb();
+  const state = getCreditState(userId, 0);
+  if (!state) return { ok: false };
+
+  let remaining = amount;
+  let freeUsed = 0;
+  let paidUsed = 0;
+
+  if (state.freeCredits > 0) {
+    freeUsed = Math.min(state.freeCredits, remaining);
+    remaining -= freeUsed;
+  }
+
+  if (remaining > 0 && state.paidCredits > 0) {
+    paidUsed = Math.min(state.paidCredits, remaining);
+    remaining -= paidUsed;
+  }
+
+  if (remaining > 0) {
+    return { ok: false, error: 'insufficient_credits' };
+  }
+
+  const newFree = (state.freeCredits || 0) - freeUsed;
+  const newPaid = (state.paidCredits || 0) - paidUsed;
+  const ts = nowIso();
+
+  db.prepare(
+    `UPDATE user_credits
+     SET free_credits = ?, paid_credits = ?, updated_at = ?
+     WHERE telegram_user_id = ?`
+  ).run(newFree, newPaid, ts, userId);
+
+  db.prepare(
+    `INSERT INTO credit_transactions
+      (telegram_user_id, amount, type, reason, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId,
+    -amount,
+    'spend',
+    reason,
+    metadata ? JSON.stringify(metadata) : null,
+    ts
+  );
+
+  return {
+    ok: true,
+    freeUsed,
+    paidUsed,
+    remainingCredits: newFree + newPaid,
+  };
+}
+
+export function addCredits(userId, amount, { reason = 'purchase', metadata = null } = {}) {
+  if (!userId || !amount || amount <= 0) return { ok: false };
+  const db = getDb();
+  const state = getCreditState(userId, 0);
+  const ts = nowIso();
+  const newPaid = (state?.paidCredits || 0) + amount;
+
+  db.prepare(
+    `INSERT INTO user_credits (telegram_user_id, paid_credits, free_credits, week_id, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET
+       paid_credits = excluded.paid_credits,
+       updated_at = excluded.updated_at`
+  ).run(userId, newPaid, state?.freeCredits || 0, state?.weekId || getIsoWeekId(), ts);
+
+  db.prepare(
+    `INSERT INTO credit_transactions
+      (telegram_user_id, amount, type, reason, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId,
+    amount,
+    'credit',
+    reason,
+    metadata ? JSON.stringify(metadata) : null,
+    ts
+  );
+
+  return { ok: true, paidCredits: newPaid };
+}
+
+export function getUsageCounters({
+  userId,
+  dayIso,
+  weekStartIso,
+  weekEndIso,
+} = {}) {
+  if (!userId) return { imagesToday: 0, audioSecondsWeek: 0 };
+  const db = getDb();
+  const imagesRow = db
+    .prepare(
+      `SELECT SUM(input_images) AS total
+       FROM usage_records
+       WHERE telegram_user_id = ?
+         AND date(created_at) = ?`
+    )
+    .get(userId, dayIso);
+
+  const audioRow = db
+    .prepare(
+      `SELECT SUM(audio_seconds) AS total
+       FROM usage_records
+       WHERE telegram_user_id = ?
+         AND created_at >= ?
+         AND created_at < ?`
+    )
+    .get(userId, weekStartIso, weekEndIso);
+
+  return {
+    imagesToday: Number(imagesRow?.total) || 0,
+    audioSecondsWeek: Number(audioRow?.total) || 0,
+  };
 }
 
 function normalizeName(value = '') {

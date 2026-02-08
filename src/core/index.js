@@ -17,11 +17,57 @@ import {
   addOddsSnapshot,
   getLatestOddsSnapshot,
   addUsageRecord,
+  getCreditState,
+  spendCredits,
+  addCredits,
+  getUsageCounters,
   getDbPath,
 } from './sqliteStore.js';
 
-function createHealthServer(port) {
-  const server = http.createServer((req, res) => {
+function createHealthServer(port, { addCredits } = {}) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+    if (req.method === 'POST' && url.pathname === '/webhooks/credits') {
+      const token = url.searchParams.get('token');
+      const expected = process.env.CREDIT_WEBHOOK_TOKEN || '';
+      if (expected && token !== expected) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'forbidden' }));
+        return;
+      }
+
+      let raw = '';
+      req.on('data', (chunk) => {
+        raw += chunk;
+      });
+      req.on('end', () => {
+        let payload = null;
+        try {
+          payload = raw ? JSON.parse(raw) : {};
+        } catch {
+          payload = null;
+        }
+
+        if (!payload || !payload.telegram_user_id || !payload.credits) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid_payload' }));
+          return;
+        }
+
+        if (typeof addCredits === 'function') {
+          addCredits(String(payload.telegram_user_id), Number(payload.credits), {
+            reason: payload.reason || 'webhook_topup',
+            metadata: payload.metadata || null,
+          });
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('UFC Orchestrator Bot is running.');
   });
@@ -56,6 +102,10 @@ function bootstrap() {
       addOddsSnapshot,
       getLatestOddsSnapshot,
       recordUsage: addUsageRecord,
+      getCreditState,
+      spendCredits,
+      addCredits,
+      getUsageCounters,
     },
   });
 
@@ -75,7 +125,7 @@ function bootstrap() {
   startTelegramBot(router);
 
   const port = Number(process.env.PORT || 3000);
-  createHealthServer(port);
+  createHealthServer(port, { addCredits });
 }
 
 bootstrap();

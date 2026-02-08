@@ -8,7 +8,8 @@
     "start": "node src/core/index.js",
     "dev": "NODE_OPTIONS=--enable-source-maps node src/core/index.js",
     "test": "node __tests__/runTests.js",
-    "history:sync": "node src/scripts/runHistoryScraper.js"
+    "history:sync": "node src/scripts/runHistoryScraper.js",
+    "credits:add": "node src/scripts/addCredits.js"
   },
   "dependencies": {
     "@langchain/openai": "^1.1.0",

@@ -20,6 +20,16 @@ const WEB_SEARCH_REGION = process.env.WEB_SEARCH_REGION || null;
 const WEB_SEARCH_CITY = process.env.WEB_SEARCH_CITY || null;
 const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || null;
 const SHOW_SOURCES_BY_DEFAULT = process.env.SHOW_SOURCES_BY_DEFAULT === 'true';
+const CREDIT_ENFORCE = process.env.CREDIT_ENFORCE !== 'false';
+const CREDIT_FREE_WEEKLY = Number(process.env.CREDIT_FREE_WEEKLY ?? '5');
+const CREDIT_DECISION_COST = Number(process.env.CREDIT_DECISION_COST ?? '1');
+const CREDIT_IMAGE_DAILY_FREE = Number(process.env.CREDIT_IMAGE_DAILY_FREE ?? '5');
+const CREDIT_IMAGE_OVERAGE_COST = Number(process.env.CREDIT_IMAGE_OVERAGE_COST ?? '0.5');
+const CREDIT_AUDIO_WEEKLY_FREE_MINUTES = Number(
+  process.env.CREDIT_AUDIO_WEEKLY_FREE_MINUTES ?? '10'
+);
+const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?? '0.2');
+const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -257,6 +267,35 @@ function shouldUseDecisionModel({ message = '', hasMedia = false } = {}) {
   return hasOddsSignals(message) || hasBetDecisionSignals(message);
 }
 
+function getUtcDayIso(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getWeekBoundsUtc(date = new Date()) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - (day - 1));
+  const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 7));
+  return {
+    weekStartIso: start.toISOString(),
+    weekEndIso: end.toISOString(),
+  };
+}
+
+function buildPaywallMessage({ availableCredits, neededCredits }) {
+  const lines = [];
+  lines.push('⚠️ Te quedaste sin créditos suficientes para este análisis.');
+  lines.push(`Créditos disponibles: ${availableCredits.toFixed(2)}`);
+  lines.push(`Créditos necesarios: ${neededCredits.toFixed(2)}`);
+  if (CREDIT_TOPUP_URL) {
+    lines.push('', `Recargá créditos acá: ${CREDIT_TOPUP_URL}`);
+  } else {
+    lines.push('', 'Pedime un link de recarga y te lo paso.');
+  }
+  return lines.join('\n');
+}
+
 function toNumberOrNull(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -296,6 +335,7 @@ function logConfiguration() {
     maxToolRounds: MAX_TOOL_ROUNDS,
     usesResponsesAPI: true,
     webSearchContextSize: WEB_SEARCH_CONTEXT_SIZE,
+    creditEnforce: CREDIT_ENFORCE,
   });
 }
 
@@ -1205,6 +1245,70 @@ export function createBettingWizard({
       });
       const modelToUse = useDecisionModel ? DECISION_MODEL : MODEL;
 
+      let creditState = null;
+      let estimatedCost = 0;
+      let costBreakdown = null;
+
+      if (CREDIT_ENFORCE && userId && userStore?.getCreditState) {
+        creditState = userStore.getCreditState(userId, CREDIT_FREE_WEEKLY);
+        const dayIso = getUtcDayIso();
+        const { weekStartIso, weekEndIso } = getWeekBoundsUtc();
+        const usageCounters = userStore.getUsageCounters
+          ? userStore.getUsageCounters({
+              userId,
+              dayIso,
+              weekStartIso,
+              weekEndIso,
+            })
+          : { imagesToday: 0, audioSecondsWeek: 0 };
+
+        const imagesToday = Number(usageCounters.imagesToday) || 0;
+        const newImages = Number(context.mediaStats?.imageCount) || 0;
+        const prevImageOver = Math.max(0, imagesToday - CREDIT_IMAGE_DAILY_FREE);
+        const newImageOver = Math.max(
+          0,
+          imagesToday + newImages - CREDIT_IMAGE_DAILY_FREE
+        );
+        const imageCost = (newImageOver - prevImageOver) * CREDIT_IMAGE_OVERAGE_COST;
+
+        const audioSecondsWeek = Number(usageCounters.audioSecondsWeek) || 0;
+        const newAudioSeconds = Number(context.mediaStats?.audioSeconds) || 0;
+        const prevAudioOver = Math.max(
+          0,
+          audioSecondsWeek / 60 - CREDIT_AUDIO_WEEKLY_FREE_MINUTES
+        );
+        const newAudioOver = Math.max(
+          0,
+          (audioSecondsWeek + newAudioSeconds) / 60 - CREDIT_AUDIO_WEEKLY_FREE_MINUTES
+        );
+        const audioCost = (newAudioOver - prevAudioOver) * CREDIT_AUDIO_OVERAGE_COST;
+
+        const decisionCost = useDecisionModel ? CREDIT_DECISION_COST : 0;
+
+        estimatedCost = Math.max(0, decisionCost + imageCost + audioCost);
+        costBreakdown = {
+          decisionCost,
+          imageCost,
+          audioCost,
+          newImages,
+          newAudioSeconds,
+        };
+
+        const availableCredits = creditState?.availableCredits ?? 0;
+        if (estimatedCost > 0 && availableCredits < estimatedCost) {
+          return {
+            reply: buildPaywallMessage({
+              availableCredits,
+              neededCredits: estimatedCost,
+            }),
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+      }
+
       const extraSections = [];
       if (wantsLedger && ledgerSummary) {
         extraSections.push(
@@ -1277,6 +1381,20 @@ export function createBettingWizard({
           });
         } catch (usageError) {
           console.error('⚠️ No se pudo guardar usage:', usageError);
+        }
+      }
+
+      if (CREDIT_ENFORCE && userId && userStore?.spendCredits && estimatedCost > 0) {
+        try {
+          userStore.spendCredits(userId, estimatedCost, {
+            reason: 'analysis',
+            metadata: {
+              model: modelToUse || MODEL,
+              ...costBreakdown,
+            },
+          });
+        } catch (creditError) {
+          console.error('⚠️ No se pudo debitar credits:', creditError);
         }
       }
 

@@ -75,6 +75,15 @@ MAX_MEDIA_BYTES=26214400
 AUDIO_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 MAX_AUDIO_TRANSCRIPT_CHARS=4000
 MEDIA_GROUP_FLUSH_MS=900
+CREDIT_ENFORCE=true
+CREDIT_FREE_WEEKLY=5
+CREDIT_DECISION_COST=1
+CREDIT_IMAGE_DAILY_FREE=5
+CREDIT_IMAGE_OVERAGE_COST=0.5
+CREDIT_AUDIO_WEEKLY_FREE_MINUTES=10
+CREDIT_AUDIO_OVERAGE_COST=0.2
+CREDIT_TOPUP_URL=
+CREDIT_WEBHOOK_TOKEN=
 FIGHT_HISTORY_RANGE=Fight History!A:Z
 FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
 FIGHT_HISTORY_CACHE_DIR=./data
@@ -126,6 +135,24 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 
 - Cuando el usuario envía cuotas, el bot las guarda en SQLite (tabla `odds_snapshots`).
 - Antes de pedir cuotas nuevas para una pelea, el bot intenta reutilizar las últimas cuotas guardadas del usuario.
+
+### Créditos y límites (Free tier + recargas)
+
+- El bot puede aplicar créditos por análisis con cuotas (gpt-5.2), exceso de imágenes o audio.
+- Free tier por defecto: 5 créditos semanales, 5 fotos/día, 10 minutos de audio/semana.
+- Variables clave: `CREDIT_FREE_WEEKLY`, `CREDIT_IMAGE_DAILY_FREE`, `CREDIT_AUDIO_WEEKLY_FREE_MINUTES`.
+- Si faltan créditos, responde con un mensaje de recarga (usa `CREDIT_TOPUP_URL`).
+- Recarga manual (admin):
+  ```bash
+  npm run credits:add -- --user <telegram_user_id> --credits 20
+  ```
+- Webhook simple para recargas:
+  - Endpoint: `POST /webhooks/credits?token=SECRETO`
+  - Body JSON:
+    ```json
+    { "telegram_user_id": "1806836602", "credits": 20, "reason": "mercadopago" }
+    ```
+  - Configurá `CREDIT_WEBHOOK_TOKEN` en `.env` y usá ese token en la URL.
 
 ### History Scraper (interno)
 
