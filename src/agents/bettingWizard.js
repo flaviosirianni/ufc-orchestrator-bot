@@ -236,7 +236,7 @@ function hasOddsSignals(message = '') {
 function hasBetDecisionSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
-  return /\b(pick|picks|apuesta|apostar|recomend|stake|valor|ev|valor esperado)\b/.test(
+  return /\b(pick|picks|apuesta|apostar|recomend|stake|valor|ev|valor esperado|prediccion|predicciones|pronostico|pronosticos)\b/.test(
     text
   );
 }
