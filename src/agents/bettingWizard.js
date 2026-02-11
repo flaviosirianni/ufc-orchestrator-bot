@@ -283,13 +283,29 @@ function getWeekBoundsUtc(date = new Date()) {
   };
 }
 
-function buildPaywallMessage({ availableCredits, neededCredits }) {
+function resolveTopupUrl(userId) {
+  if (!CREDIT_TOPUP_URL) {
+    return '';
+  }
+  const value = String(CREDIT_TOPUP_URL);
+  const hasPlaceholder =
+    value.includes('{user_id}') || value.includes('{telegram_user_id}');
+  if (!userId && hasPlaceholder) {
+    return '';
+  }
+  return value
+    .replaceAll('{user_id}', encodeURIComponent(String(userId || '')))
+    .replaceAll('{telegram_user_id}', encodeURIComponent(String(userId || '')));
+}
+
+function buildPaywallMessage({ availableCredits, neededCredits, userId = '' }) {
   const lines = [];
   lines.push('⚠️ Te quedaste sin créditos suficientes para este análisis.');
   lines.push(`Créditos disponibles: ${availableCredits.toFixed(2)}`);
   lines.push(`Créditos necesarios: ${neededCredits.toFixed(2)}`);
-  if (CREDIT_TOPUP_URL) {
-    lines.push('', `Recargá créditos acá: ${CREDIT_TOPUP_URL}`);
+  const topupUrl = resolveTopupUrl(userId);
+  if (topupUrl) {
+    lines.push('', `Recargá créditos acá: ${topupUrl}`);
   } else {
     lines.push('', 'Pedime un link de recarga y te lo paso.');
   }
@@ -1300,6 +1316,7 @@ export function createBettingWizard({
             reply: buildPaywallMessage({
               availableCredits,
               neededCredits: estimatedCost,
+              userId,
             }),
             metadata: {
               resolvedFight: runtimeState.resolvedFight,

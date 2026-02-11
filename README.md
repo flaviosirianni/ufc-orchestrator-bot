@@ -84,6 +84,17 @@ CREDIT_AUDIO_WEEKLY_FREE_MINUTES=10
 CREDIT_AUDIO_OVERAGE_COST=0.2
 CREDIT_TOPUP_URL=
 CREDIT_WEBHOOK_TOKEN=
+APP_PUBLIC_URL=
+MP_ACCESS_TOKEN=
+MP_WEBHOOK_TOKEN=
+MP_NOTIFICATION_URL=
+MP_TOPUP_PACKS=10:1000,20:1800
+MP_TOPUP_DEFAULT_CREDITS=10
+MP_TOPUP_TITLE=Recarga de creditos UFC
+MP_CURRENCY_ID=ARS
+MP_SUCCESS_URL=
+MP_PENDING_URL=
+MP_FAILURE_URL=
 FIGHT_HISTORY_RANGE=Fight History!A:Z
 FIGHT_HISTORY_SYNC_INTERVAL_MS=21600000
 FIGHT_HISTORY_CACHE_DIR=./data
@@ -142,6 +153,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - Free tier por defecto: 5 créditos semanales, 5 fotos/día, 10 minutos de audio/semana.
 - Variables clave: `CREDIT_FREE_WEEKLY`, `CREDIT_IMAGE_DAILY_FREE`, `CREDIT_AUDIO_WEEKLY_FREE_MINUTES`.
 - Si faltan créditos, responde con un mensaje de recarga (usa `CREDIT_TOPUP_URL`).
+- `CREDIT_TOPUP_URL` acepta placeholders `{user_id}` o `{telegram_user_id}` para generar links dinámicos por usuario.
 - Recarga manual (admin):
   ```bash
   npm run credits:add -- --user <telegram_user_id> --credits 20
@@ -153,6 +165,28 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
     { "telegram_user_id": "1806836602", "credits": 20, "reason": "mercadopago" }
     ```
   - Configurá `CREDIT_WEBHOOK_TOKEN` en `.env` y usá ese token en la URL.
+
+### Mercado Pago Checkout Pro (recarga real)
+
+- Endpoints expuestos por el bot:
+  - `GET /topup/checkout?user_id=<telegram_user_id>&credits=<pack>`
+  - `POST /webhooks/mercadopago` (webhook de Mercado Pago)
+  - `GET /topup/config` (estado de configuración)
+- Configuración mínima en `.env`:
+  - `MP_ACCESS_TOKEN` (token de producción o de pruebas según ambiente)
+  - `MP_TOPUP_PACKS` en formato `creditos:monto` (ej: `10:1000,20:1800`)
+  - `APP_PUBLIC_URL` (URL pública donde corre tu bot)
+  - `CREDIT_TOPUP_URL` recomendado:
+    - `https://tu-dominio.com/topup/checkout?user_id={user_id}&credits=10`
+- Seguridad opcional:
+  - `MP_WEBHOOK_TOKEN`: si lo seteás, Mercado Pago debe llamar al webhook con `?token=...`.
+  - `MP_NOTIFICATION_URL`: fuerza la URL de notificación enviada en la preferencia. Si no se setea, se usa `APP_PUBLIC_URL/webhooks/mercadopago`.
+- Flujo:
+  - El usuario abre el link de `/topup/checkout`.
+  - El backend crea una preferencia en Checkout Pro (`/checkout/preferences`).
+  - Mercado Pago notifica a `/webhooks/mercadopago`.
+  - El backend consulta `/v1/payments/{id}` y acredita créditos solo si `status=approved`.
+  - La acreditación es idempotente por `payment_id` (evita doble recarga por reintentos del webhook).
 
 ### History Scraper (interno)
 

@@ -156,6 +156,19 @@ function initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_credit_tx_user_time
       ON credit_transactions (telegram_user_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS mp_processed_payments (
+      payment_id TEXT PRIMARY KEY,
+      telegram_user_id TEXT,
+      credits REAL,
+      amount REAL,
+      status TEXT,
+      raw_payload TEXT,
+      created_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mp_processed_user_time
+      ON mp_processed_payments (telegram_user_id, created_at);
   `);
 }
 
@@ -731,6 +744,72 @@ export function addCredits(userId, amount, { reason = 'purchase', metadata = nul
   );
 
   return { ok: true, paidCredits: newPaid };
+}
+
+export function creditFromMercadoPagoPayment({
+  paymentId,
+  userId,
+  credits,
+  amount = null,
+  status = 'approved',
+  rawPayload = null,
+} = {}) {
+  const cleanPaymentId = String(paymentId || '').trim();
+  const cleanUserId = String(userId || '').trim();
+  const creditsAmount = Number(credits);
+  const paymentAmount = toNumberOrNull(amount);
+
+  if (!cleanPaymentId || !cleanUserId || !Number.isFinite(creditsAmount) || creditsAmount <= 0) {
+    return { ok: false, error: 'invalid_mp_credit_input' };
+  }
+
+  const db = getDb();
+  const ts = nowIso();
+
+  const applyCredit = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT payment_id FROM mp_processed_payments WHERE payment_id = ?')
+      .get(cleanPaymentId);
+    if (existing) {
+      return { ok: true, alreadyProcessed: true };
+    }
+
+    const creditResult = addCredits(cleanUserId, creditsAmount, {
+      reason: 'mercadopago_payment',
+      metadata: {
+        source: 'mercadopago',
+        payment_id: cleanPaymentId,
+        amount: paymentAmount,
+        status: status || null,
+      },
+    });
+
+    if (!creditResult.ok) {
+      return { ok: false, error: 'credit_failed' };
+    }
+
+    db.prepare(
+      `INSERT INTO mp_processed_payments
+        (payment_id, telegram_user_id, credits, amount, status, raw_payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      cleanPaymentId,
+      cleanUserId,
+      creditsAmount,
+      paymentAmount,
+      status || null,
+      rawPayload ? JSON.stringify(rawPayload) : null,
+      ts
+    );
+
+    return {
+      ok: true,
+      alreadyProcessed: false,
+      paidCredits: creditResult.paidCredits,
+    };
+  });
+
+  return applyCredit();
 }
 
 export function getUsageCounters({
