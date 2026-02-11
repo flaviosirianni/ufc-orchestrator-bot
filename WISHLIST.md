@@ -22,3 +22,13 @@ Ideas para implementar mas adelante (fuera del foco actual de trabajo).
      - Confirmacion de pagos acreditados cuando aplique.
    - **Contexto:** hoy esa informacion existe en backend/DB pero no esta expuesta en el flujo conversacional al usuario final.
    - **Estado:** pendiente.
+
+3. **Hardening de seguridad y operacion de la base de datos**
+   - **Objetivo:** mejorar resiliencia, seguridad y trazabilidad de datos sensibles (usuarios, creditos y pagos).
+   - **Comportamiento deseado:** que la DB no viva dentro del repo y que exista respaldo/auditoria robusta.
+   - **Alcance inicial sugerido:**
+     - Mover la base de datos fuera del repositorio de codigo.
+     - Agregar snapshots/backups periodicos con politica de retencion.
+     - Incorporar logs operativos y auditoria de pagos (eventos, resultado, motivo, timestamp, idempotencia).
+   - **Contexto:** a medida que crece la integracion de pagos, aumenta el riesgo operativo y la necesidad de trazabilidad.
+   - **Estado:** pendiente.
