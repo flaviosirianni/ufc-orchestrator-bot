@@ -1,7 +1,9 @@
 {
-  "mcpServers": {
-    "mercadopago-mcp-server": {
-      "url": "https://mcp.mercadopago.com/mcp"
-    }
-  }
+	"inputs": [],
+	"servers": {
+		"mercadopago": {
+			"url": "https://mcp.mercadopago.com/mcp",
+			"type": "http"
+		}
+	}
 }
