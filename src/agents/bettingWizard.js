@@ -467,6 +467,52 @@ function formatMutationActionLabel(operation = '') {
   return operation || 'MUTATION';
 }
 
+function normalizeText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function parseConfirmationIntent(message = '') {
+  const raw = String(message || '').trim();
+  const text = normalizeText(raw);
+  const tokens = Array.from(
+    new Set((raw.match(/mut_[a-z0-9]+/gi) || []).map((value) => String(value).trim()))
+  );
+
+  const hasConfirmWord = /\bconfirm\w*\b/.test(text);
+  const hasNegative =
+    /\b(no confirm\w*|cancel\w*|anula\w*|deja sin efecto)\b/.test(text);
+
+  const wantsAll = /\b(ambas|ambos|todo|todas|todas las|todo eso)\b/.test(text);
+  const wantsArchive = /\b(archiv\w*|borr\w*|elimin\w*|delete)\b/.test(text);
+  const wantsSetPending = /\b(pending|pendiente|reabr\w*|volver a pending)\b/.test(text);
+  const wantsSettle = /\b(lost|loss|perd\w*|win|won|gan\w*|push|draw|void|nula)\b/.test(
+    text
+  );
+
+  let settleResult = null;
+  if (/\b(lost|loss|perd\w*)\b/.test(text)) {
+    settleResult = 'loss';
+  } else if (/\b(win|won|gan\w*)\b/.test(text)) {
+    settleResult = 'win';
+  } else if (/\b(push|draw|void|nula)\b/.test(text)) {
+    settleResult = 'push';
+  }
+
+  return {
+    hasPositive: hasConfirmWord || tokens.length > 0,
+    hasNegative,
+    tokens,
+    wantsAll,
+    wantsArchive,
+    wantsSetPending,
+    wantsSettle,
+    settleResult,
+  };
+}
+
 function logConfiguration() {
   console.log('⚙️ Betting Wizard config', {
     model: MODEL,
@@ -1243,94 +1289,154 @@ export function createBettingWizard({
     }
 
     const mutationScope = mutationScopeKey({ chatId, userId });
-    const explicitConfirmMatch = String(originalMessage || '')
-      .trim()
-      .match(/^confirmo(?:\s+(mut_[a-z0-9]+))?\s*$/i);
+    const confirmationIntent = parseConfirmationIntent(originalMessage);
 
-    if (explicitConfirmMatch && userId && userStore?.applyBetMutation) {
-      const requestedToken = explicitConfirmMatch[1]
-        ? String(explicitConfirmMatch[1]).trim()
-        : '';
-      const entries = requestedToken
-        ? [consumePendingMutation(mutationScope, requestedToken)].filter(Boolean)
-        : consumeAllPendingMutations(mutationScope);
+    if (userId && userStore?.applyBetMutation) {
+      const pendingNow = getPendingMutationsForScope(mutationScope);
+      if (
+        pendingNow.length &&
+        confirmationIntent.hasPositive &&
+        !confirmationIntent.hasNegative
+      ) {
+        const selectedEntries = [];
 
-      if (!entries.length) {
-        const pendingNow = getPendingMutationsForScope(mutationScope);
-        const hint = pendingNow.length
-          ? `Pendientes: ${pendingNow.map((entry) => entry.token).join(', ')}`
-          : 'No hay mutaciones pendientes activas para confirmar.';
+        if (confirmationIntent.tokens.length) {
+          for (const token of confirmationIntent.tokens) {
+            const consumed = consumePendingMutation(mutationScope, token);
+            if (consumed) {
+              selectedEntries.push(consumed);
+            }
+          }
+        } else {
+          const matchesIntent = (entry) => {
+            if (confirmationIntent.wantsAll) {
+              return true;
+            }
+
+            const operation = String(entry.payload?.operation || '').trim();
+            const result = String(entry.payload?.result || '').trim();
+            let hasSpecificHint = false;
+
+            if (confirmationIntent.wantsArchive) {
+              hasSpecificHint = true;
+              if (operation === 'archive') {
+                return true;
+              }
+            }
+
+            if (confirmationIntent.wantsSetPending) {
+              hasSpecificHint = true;
+              if (operation === 'set_pending') {
+                return true;
+              }
+            }
+
+            if (confirmationIntent.wantsSettle || confirmationIntent.settleResult) {
+              hasSpecificHint = true;
+              if (operation === 'settle') {
+                if (!confirmationIntent.settleResult) {
+                  return true;
+                }
+                if (result === confirmationIntent.settleResult) {
+                  return true;
+                }
+              }
+            }
+
+            // Flexible default: plain "confirmo" applies all pending.
+            if (!hasSpecificHint) {
+              return true;
+            }
+            return false;
+          };
+
+          const filtered = pendingNow.filter(matchesIntent);
+          const source = filtered.length ? filtered : pendingNow;
+          for (const entry of source) {
+            const consumed = consumePendingMutation(mutationScope, entry.token);
+            if (consumed) {
+              selectedEntries.push(consumed);
+            }
+          }
+        }
+
+        if (!selectedEntries.length) {
+          const pendingHint = getPendingMutationsForScope(mutationScope);
+          const hint = pendingHint.length
+            ? `Pendientes: ${pendingHint.map((entry) => entry.token).join(', ')}`
+            : 'No hay mutaciones pendientes activas para confirmar.';
+          return {
+            reply: `No encontré confirmaciones pendientes válidas. ${hint}`,
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+
+        const outcomes = [];
+        for (const entry of selectedEntries) {
+          const applyPayload = {
+            ...entry.payload,
+            confirm: true,
+            metadata: {
+              ...(entry.payload?.metadata || {}),
+              confirmationToken: entry.token,
+              confirmationSource: 'user_confirm_message',
+            },
+          };
+          const applied = userStore.applyBetMutation(userId, applyPayload);
+          outcomes.push({
+            token: entry.token,
+            operation: entry.payload?.operation || '',
+            applied,
+          });
+        }
+
+        const success = outcomes.filter((item) => item.applied?.ok);
+        const failed = outcomes.filter((item) => !item.applied?.ok);
+        const lines = [];
+
+        if (success.length) {
+          lines.push(`✅ Confirmación aplicada: ${success.length} mutación(es).`);
+          for (const item of success) {
+            const operation = formatMutationActionLabel(item.operation);
+            const count = Number(item.applied?.affectedCount) || 0;
+            lines.push(`- ${operation} (${item.token}): ${count} apuesta(s) afectada(s).`);
+            const receipts = Array.isArray(item.applied?.receipts)
+              ? item.applied.receipts.slice(0, 5)
+              : [];
+            for (const receipt of receipts) {
+              lines.push(
+                `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}`
+              );
+            }
+          }
+        }
+
+        if (failed.length) {
+          lines.push('', `⚠️ Mutaciones con error: ${failed.length}.`);
+          for (const item of failed) {
+            lines.push(
+              `- ${formatMutationActionLabel(item.operation)} (${item.token}): ${
+                item.applied?.error || 'error_desconocido'
+              }`
+            );
+          }
+        }
+
+        if (!lines.length) {
+          lines.push('No hubo cambios para confirmar en este turno.');
+        }
+
         return {
-          reply: `No encontré confirmaciones pendientes válidas. ${hint}`,
+          reply: lines.join('\n'),
           metadata: {
             resolvedFight: runtimeState.resolvedFight,
             eventCard: runtimeState.eventCard,
           },
         };
       }
-
-      const outcomes = [];
-      for (const entry of entries) {
-        const applyPayload = {
-          ...entry.payload,
-          confirm: true,
-          metadata: {
-            ...(entry.payload?.metadata || {}),
-            confirmationToken: entry.token,
-            confirmationSource: 'user_confirm_message',
-          },
-        };
-        const applied = userStore.applyBetMutation(userId, applyPayload);
-        outcomes.push({
-          token: entry.token,
-          operation: entry.payload?.operation || '',
-          applied,
-        });
-      }
-
-      const success = outcomes.filter((item) => item.applied?.ok);
-      const failed = outcomes.filter((item) => !item.applied?.ok);
-      const lines = [];
-
-      if (success.length) {
-        lines.push(`✅ Confirmación aplicada: ${success.length} mutación(es).`);
-        for (const item of success) {
-          const operation = formatMutationActionLabel(item.operation);
-          const count = Number(item.applied?.affectedCount) || 0;
-          lines.push(`- ${operation} (${item.token}): ${count} apuesta(s) afectada(s).`);
-          const receipts = Array.isArray(item.applied?.receipts)
-            ? item.applied.receipts.slice(0, 5)
-            : [];
-          for (const receipt of receipts) {
-            lines.push(
-              `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}`
-            );
-          }
-        }
-      }
-
-      if (failed.length) {
-        lines.push('', `⚠️ Mutaciones con error: ${failed.length}.`);
-        for (const item of failed) {
-          lines.push(
-            `- ${formatMutationActionLabel(item.operation)} (${item.token}): ${
-              item.applied?.error || 'error_desconocido'
-            }`
-          );
-        }
-      }
-
-      if (!lines.length) {
-        lines.push('No hubo cambios para confirmar en este turno.');
-      }
-
-      return {
-        reply: lines.join('\n'),
-        metadata: {
-          resolvedFight: runtimeState.resolvedFight,
-          eventCard: runtimeState.eventCard,
-        },
-      };
     }
 
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {

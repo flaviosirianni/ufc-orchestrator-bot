@@ -594,6 +594,99 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 4);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('mutate_user_bets', {
+        operation: 'archive',
+        fight: 'A vs B',
+      }, 'call_multi_preview_3'),
+      responseWithText('Preview archive listo'),
+      responseWithFunctionCall('mutate_user_bets', {
+        operation: 'settle',
+        result: 'loss',
+        fight: 'A vs B',
+      }, 'call_multi_preview_4'),
+      responseWithText('Preview settle listo'),
+    ]);
+
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation(_userId, payload = {}) {
+          const operation = String(payload.operation || '');
+          if (operation === 'archive') {
+            return {
+              ok: true,
+              operation: 'archive',
+              requiresConfirmation: true,
+              candidates: [{ id: 31, result: 'pending' }],
+            };
+          }
+          return {
+            ok: true,
+            operation: 'settle',
+            result: 'loss',
+            requiresConfirmation: true,
+            candidates: [{ id: 32, result: 'pending' }],
+          };
+        },
+        applyBetMutation(_userId, payload = {}) {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: payload.operation || null,
+            affectedCount: 1,
+            receipts: [{ betId: payload.operation === 'archive' ? 31 : 32 }],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('previsualiza archivado 2', {
+      chatId: 'chat-mut-5',
+      userId: 'u-5',
+      originalMessage: 'previsualiza archivado 2',
+      resolution: {
+        resolvedMessage: 'previsualiza archivado 2',
+      },
+    });
+
+    await wizard.handleMessage('previsualiza cierre 2', {
+      chatId: 'chat-mut-5',
+      userId: 'u-5',
+      originalMessage: 'previsualiza cierre 2',
+      resolution: {
+        resolvedMessage: 'previsualiza cierre 2',
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      '- CONFIRMO ARCHIVAR 31\n- CONFIRMO LOST 32',
+      {
+        chatId: 'chat-mut-5',
+        userId: 'u-5',
+        originalMessage: '- CONFIRMO ARCHIVAR 31\n- CONFIRMO LOST 32',
+        resolution: {
+          resolvedMessage: '- CONFIRMO ARCHIVAR 31\n- CONFIRMO LOST 32',
+        },
+      }
+    );
+
+    assert.match(result.reply, /Confirmación aplicada/);
+    assert.equal(applyCalls, 2);
+    // Confirmation should be handled locally.
+    assert.equal(fakeClient.calls.length, 4);
+  });
+
   for (const test of tests) {
     await test();
   }
