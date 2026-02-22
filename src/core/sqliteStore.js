@@ -140,6 +140,23 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_odds_user_fight
       ON odds_snapshots (telegram_user_id, fight_id);
 
+    CREATE TABLE IF NOT EXISTS fight_history_cache (
+      cache_key TEXT PRIMARY KEY,
+      sheet_id TEXT,
+      range_name TEXT,
+      row_count INTEGER DEFAULT 0,
+      hash TEXT,
+      rows_json TEXT,
+      last_sync_at TEXT,
+      last_sync_updated_cache INTEGER DEFAULT 0,
+      latest_fight_date TEXT,
+      sheet_age_days INTEGER,
+      potential_gap INTEGER DEFAULT 0,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fight_history_cache_updated
+      ON fight_history_cache (updated_at);
+
     CREATE TABLE IF NOT EXISTS usage_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_user_id TEXT,
@@ -1373,6 +1390,92 @@ export function getLatestOddsSnapshot(userId, query = {}) {
   }
 
   return null;
+}
+
+function parseFightHistoryCacheRow(row) {
+  if (!row) return null;
+  let rows = [];
+  try {
+    rows = row.rows_json ? JSON.parse(row.rows_json) : [];
+  } catch {
+    rows = [];
+  }
+
+  return {
+    cacheKey: row.cache_key,
+    sheetId: row.sheet_id || null,
+    range: row.range_name || null,
+    rowCount: Number(row.row_count) || 0,
+    hash: row.hash || null,
+    rows: Array.isArray(rows) ? rows : [],
+    lastSyncAt: row.last_sync_at || null,
+    lastSyncUpdatedCache: Boolean(row.last_sync_updated_cache),
+    latestFightDate: row.latest_fight_date || null,
+    sheetAgeDays:
+      row.sheet_age_days === null || row.sheet_age_days === undefined
+        ? null
+        : Number(row.sheet_age_days),
+    potentialGap: Boolean(row.potential_gap),
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function getFightHistoryCacheSnapshot(cacheKey = 'default') {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT cache_key, sheet_id, range_name, row_count, hash, rows_json, last_sync_at,
+              last_sync_updated_cache, latest_fight_date, sheet_age_days, potential_gap, updated_at
+       FROM fight_history_cache
+       WHERE cache_key = ?`
+    )
+    .get(String(cacheKey || 'default'));
+  return parseFightHistoryCacheRow(row);
+}
+
+export function upsertFightHistoryCacheSnapshot(snapshot = {}, cacheKey = 'default') {
+  const db = getDb();
+  const ts = nowIso();
+  const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+  const rowCount = Number.isFinite(Number(snapshot.rowCount))
+    ? Number(snapshot.rowCount)
+    : rows.length;
+
+  db.prepare(
+    `INSERT INTO fight_history_cache
+      (cache_key, sheet_id, range_name, row_count, hash, rows_json, last_sync_at,
+       last_sync_updated_cache, latest_fight_date, sheet_age_days, potential_gap, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       sheet_id = excluded.sheet_id,
+       range_name = excluded.range_name,
+       row_count = excluded.row_count,
+       hash = excluded.hash,
+       rows_json = excluded.rows_json,
+       last_sync_at = excluded.last_sync_at,
+       last_sync_updated_cache = excluded.last_sync_updated_cache,
+       latest_fight_date = excluded.latest_fight_date,
+       sheet_age_days = excluded.sheet_age_days,
+       potential_gap = excluded.potential_gap,
+       updated_at = excluded.updated_at`
+  ).run(
+    String(cacheKey || 'default'),
+    snapshot.sheetId || null,
+    snapshot.range || null,
+    rowCount,
+    snapshot.hash || null,
+    JSON.stringify(rows),
+    snapshot.lastSyncAt || ts,
+    snapshot.lastSyncUpdatedCache ? 1 : 0,
+    snapshot.latestFightDate || null,
+    snapshot.sheetAgeDays === null || snapshot.sheetAgeDays === undefined
+      ? null
+      : Number(snapshot.sheetAgeDays),
+    snapshot.potentialGap ? 1 : 0,
+    ts
+  );
+
+  return getFightHistoryCacheSnapshot(cacheKey);
 }
 
 export function getDbPath() {

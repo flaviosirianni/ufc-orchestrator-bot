@@ -25,6 +25,8 @@ import {
   addCredits,
   creditFromMercadoPagoPayment,
   getUsageCounters,
+  getFightHistoryCacheSnapshot,
+  upsertFightHistoryCacheSnapshot,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -257,6 +259,11 @@ function bootstrap() {
   const conversationStore = createConversationStore();
   const sessionLogger = createSessionLogger();
   console.log('[bootstrap] SQLite DB:', getDbPath());
+
+  fightsScalper.configureFightHistoryStore({
+    getCacheSnapshot: getFightHistoryCacheSnapshot,
+    upsertCacheSnapshot: upsertFightHistoryCacheSnapshot,
+  });
 
   fightsScalper.startFightHistorySync({
     intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
