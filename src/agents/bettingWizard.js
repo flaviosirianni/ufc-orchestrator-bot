@@ -460,6 +460,13 @@ function createMutationToken() {
     .slice(-4)}`;
 }
 
+function formatMutationActionLabel(operation = '') {
+  if (operation === 'archive') return 'ARCHIVE';
+  if (operation === 'set_pending') return 'SET_PENDING';
+  if (operation === 'settle') return 'SETTLE';
+  return operation || 'MUTATION';
+}
+
 function logConfiguration() {
   console.log('⚙️ Betting Wizard config', {
     model: MODEL,
@@ -1082,7 +1089,8 @@ export function createBettingWizard({
   ensureConfigured(providedClient);
   const client = getOpenAIClient(providedClient);
   logConfiguration();
-  const pendingLedgerMutations = new Map();
+  const pendingLedgerMutationsByToken = new Map();
+  const pendingLedgerMutationTokensByScope = new Map();
 
   function mutationScopeKey({ chatId, userId } = {}) {
     return `${chatId || 'default'}:${userId || 'anon'}`;
@@ -1091,34 +1099,86 @@ export function createBettingWizard({
   function savePendingMutation(scopeKey, payload) {
     if (!scopeKey || !payload) return null;
     const token = createMutationToken();
-    pendingLedgerMutations.set(scopeKey, {
+    pendingLedgerMutationsByToken.set(token, {
       ...payload,
+      scopeKey,
       token,
+      createdAt: Date.now(),
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
+    const list = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    list.push(token);
+    pendingLedgerMutationTokensByScope.set(scopeKey, list);
     return token;
+  }
+
+  function removeTokenFromScope(scopeKey, token) {
+    if (!scopeKey || !token) return;
+    const list = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    const next = list.filter((value) => value !== token);
+    if (next.length) {
+      pendingLedgerMutationTokensByScope.set(scopeKey, next);
+    } else {
+      pendingLedgerMutationTokensByScope.delete(scopeKey);
+    }
   }
 
   function consumePendingMutation(scopeKey, token) {
     if (!scopeKey || !token) return null;
-    const entry = pendingLedgerMutations.get(scopeKey);
+    const entry = pendingLedgerMutationsByToken.get(token);
     if (!entry) return null;
+    if (entry.scopeKey !== scopeKey) return null;
     if (entry.expiresAt <= Date.now()) {
-      pendingLedgerMutations.delete(scopeKey);
+      pendingLedgerMutationsByToken.delete(token);
+      removeTokenFromScope(scopeKey, token);
       return null;
     }
-    if (entry.token !== token) {
-      return null;
-    }
-    pendingLedgerMutations.delete(scopeKey);
+    pendingLedgerMutationsByToken.delete(token);
+    removeTokenFromScope(scopeKey, token);
     return entry;
+  }
+
+  function getPendingMutationsForScope(scopeKey) {
+    if (!scopeKey) return [];
+    const tokens = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    const now = Date.now();
+    const entries = [];
+    for (const token of tokens) {
+      const entry = pendingLedgerMutationsByToken.get(token);
+      if (!entry) continue;
+      if (entry.expiresAt <= now) {
+        pendingLedgerMutationsByToken.delete(token);
+        continue;
+      }
+      entries.push(entry);
+    }
+    entries.sort((a, b) => a.createdAt - b.createdAt);
+    const activeTokens = entries.map((entry) => entry.token);
+    if (activeTokens.length) {
+      pendingLedgerMutationTokensByScope.set(scopeKey, activeTokens);
+    } else {
+      pendingLedgerMutationTokensByScope.delete(scopeKey);
+    }
+    return entries;
+  }
+
+  function consumeAllPendingMutations(scopeKey) {
+    const entries = getPendingMutationsForScope(scopeKey);
+    for (const entry of entries) {
+      pendingLedgerMutationsByToken.delete(entry.token);
+    }
+    pendingLedgerMutationTokensByScope.delete(scopeKey);
+    return entries;
   }
 
   function cleanupPendingMutations() {
     const now = Date.now();
-    for (const [key, value] of pendingLedgerMutations.entries()) {
+    for (const [token, value] of pendingLedgerMutationsByToken.entries()) {
       if (!value || value.expiresAt <= now) {
-        pendingLedgerMutations.delete(key);
+        pendingLedgerMutationsByToken.delete(token);
+        if (value?.scopeKey) {
+          removeTokenFromScope(value.scopeKey, token);
+        }
       }
     }
   }
@@ -1183,6 +1243,95 @@ export function createBettingWizard({
     }
 
     const mutationScope = mutationScopeKey({ chatId, userId });
+    const explicitConfirmMatch = String(originalMessage || '')
+      .trim()
+      .match(/^confirmo(?:\s+(mut_[a-z0-9]+))?\s*$/i);
+
+    if (explicitConfirmMatch && userId && userStore?.applyBetMutation) {
+      const requestedToken = explicitConfirmMatch[1]
+        ? String(explicitConfirmMatch[1]).trim()
+        : '';
+      const entries = requestedToken
+        ? [consumePendingMutation(mutationScope, requestedToken)].filter(Boolean)
+        : consumeAllPendingMutations(mutationScope);
+
+      if (!entries.length) {
+        const pendingNow = getPendingMutationsForScope(mutationScope);
+        const hint = pendingNow.length
+          ? `Pendientes: ${pendingNow.map((entry) => entry.token).join(', ')}`
+          : 'No hay mutaciones pendientes activas para confirmar.';
+        return {
+          reply: `No encontré confirmaciones pendientes válidas. ${hint}`,
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const outcomes = [];
+      for (const entry of entries) {
+        const applyPayload = {
+          ...entry.payload,
+          confirm: true,
+          metadata: {
+            ...(entry.payload?.metadata || {}),
+            confirmationToken: entry.token,
+            confirmationSource: 'user_confirm_message',
+          },
+        };
+        const applied = userStore.applyBetMutation(userId, applyPayload);
+        outcomes.push({
+          token: entry.token,
+          operation: entry.payload?.operation || '',
+          applied,
+        });
+      }
+
+      const success = outcomes.filter((item) => item.applied?.ok);
+      const failed = outcomes.filter((item) => !item.applied?.ok);
+      const lines = [];
+
+      if (success.length) {
+        lines.push(`✅ Confirmación aplicada: ${success.length} mutación(es).`);
+        for (const item of success) {
+          const operation = formatMutationActionLabel(item.operation);
+          const count = Number(item.applied?.affectedCount) || 0;
+          lines.push(`- ${operation} (${item.token}): ${count} apuesta(s) afectada(s).`);
+          const receipts = Array.isArray(item.applied?.receipts)
+            ? item.applied.receipts.slice(0, 5)
+            : [];
+          for (const receipt of receipts) {
+            lines.push(
+              `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}`
+            );
+          }
+        }
+      }
+
+      if (failed.length) {
+        lines.push('', `⚠️ Mutaciones con error: ${failed.length}.`);
+        for (const item of failed) {
+          lines.push(
+            `- ${formatMutationActionLabel(item.operation)} (${item.token}): ${
+              item.applied?.error || 'error_desconocido'
+            }`
+          );
+        }
+      }
+
+      if (!lines.length) {
+        lines.push('No hubo cambios para confirmar en este turno.');
+      }
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
 
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
       if (!userId) {
@@ -1239,12 +1388,33 @@ export function createBettingWizard({
       const confirmationToken = String(rawArgs.confirmationToken || '').trim();
 
       if (confirm) {
-        const pending = consumePendingMutation(mutationScope, confirmationToken);
+        let pending = null;
+        if (confirmationToken) {
+          pending = consumePendingMutation(mutationScope, confirmationToken);
+        } else {
+          const pendingByScope = getPendingMutationsForScope(mutationScope);
+          const matching = pendingByScope.filter((entry) => {
+            const sameOperation =
+              String(entry.payload?.operation || '') === String(payload.operation || '');
+            const sameResult =
+              !payload.result || String(entry.payload?.result || '') === String(payload.result || '');
+            return sameOperation && sameResult;
+          });
+          if (matching.length === 1) {
+            pending = consumePendingMutation(mutationScope, matching[0].token);
+          }
+        }
+
         if (!pending) {
           return {
             ok: false,
             error: 'invalid_or_expired_confirmation_token',
             needsConfirmation: true,
+            pendingTokens: getPendingMutationsForScope(mutationScope).map((entry) => ({
+              token: entry.token,
+              operation: entry.payload?.operation || null,
+              result: entry.payload?.result || null,
+            })),
           };
         }
 

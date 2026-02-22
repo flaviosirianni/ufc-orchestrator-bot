@@ -432,9 +432,10 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.match(result.reply, /Listo, ya quedo aplicado/);
+    assert.match(result.reply, /Confirmación aplicada/);
     assert.ok(capturedToken);
     assert.equal(applyCalls, 1);
+    assert.equal(calls.length, 2);
   });
 
   tests.push(async () => {
@@ -492,6 +493,105 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /Necesito confirmacion/);
     assert.equal(previewCalls, 1);
     assert.equal(createCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('mutate_user_bets', {
+        operation: 'archive',
+        fight: 'A vs B',
+      }, 'call_multi_preview_1'),
+      responseWithText('Preview archive listo'),
+      responseWithFunctionCall('mutate_user_bets', {
+        operation: 'settle',
+        result: 'loss',
+        fight: 'A vs B',
+      }, 'call_multi_preview_2'),
+      responseWithText('Preview settle listo'),
+    ]);
+
+    let previewCalls = 0;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation(_userId, payload = {}) {
+          previewCalls += 1;
+          const operation = String(payload.operation || '');
+          if (operation === 'archive') {
+            return {
+              ok: true,
+              operation: 'archive',
+              requiresConfirmation: true,
+              candidates: [{ id: 11, result: 'pending' }],
+            };
+          }
+          return {
+            ok: true,
+            operation: 'settle',
+            result: 'loss',
+            requiresConfirmation: true,
+            candidates: [{ id: 22, result: 'pending' }],
+          };
+        },
+        applyBetMutation(_userId, payload = {}) {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: payload.operation || null,
+            affectedCount: 1,
+            receipts: [
+              {
+                betId: payload.operation === 'archive' ? 11 : 22,
+                previousResult: payload.operation === 'archive' ? 'pending' : 'pending',
+                newResult: payload.operation === 'archive' ? 'pending' : 'loss',
+              },
+            ],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('previsualiza archivado', {
+      chatId: 'chat-mut-4',
+      userId: 'u-4',
+      originalMessage: 'previsualiza archivado',
+      resolution: {
+        resolvedMessage: 'previsualiza archivado',
+      },
+    });
+
+    await wizard.handleMessage('previsualiza cierre', {
+      chatId: 'chat-mut-4',
+      userId: 'u-4',
+      originalMessage: 'previsualiza cierre',
+      resolution: {
+        resolvedMessage: 'previsualiza cierre',
+      },
+    });
+
+    const result = await wizard.handleMessage('CONFIRMO', {
+      chatId: 'chat-mut-4',
+      userId: 'u-4',
+      originalMessage: 'CONFIRMO',
+      resolution: {
+        resolvedMessage: 'CONFIRMO',
+      },
+    });
+
+    assert.match(result.reply, /Confirmación aplicada/);
+    assert.equal(previewCalls, 2);
+    assert.equal(applyCalls, 2);
+    // `CONFIRMO` should be handled deterministically without another model round.
+    assert.equal(fakeClient.calls.length, 4);
   });
 
   for (const test of tests) {
