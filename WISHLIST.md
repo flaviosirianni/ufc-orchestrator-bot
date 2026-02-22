@@ -2,6 +2,23 @@
 
 Ideas para implementar mas adelante (fuera del foco actual de trabajo).
 
+## Convencion para nuevos items
+
+Cada item nuevo debe escribirse con este nivel de detalle, porque se usa como base directa de implementacion:
+
+- Objetivo de negocio/UX (que mejora concreta aporta).
+- Problema observado (con ejemplo real cuando exista).
+- Comportamiento deseado (como deberia verse para el usuario).
+- Diseno tecnico sugerido (componentes, estado, reglas, guardrails).
+- Criterios de aceptacion verificables.
+- Pruebas de regresion necesarias.
+- Riesgos y decisiones abiertas.
+- Prioridad (`critico` / `alta` / `media` / `baja`) y estado.
+
+## Ejecucion
+
+La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (plan en 3 PRs).
+
 ## Pendientes
 
 1. **Feedback de "pensando" mientras el bot procesa la respuesta**
@@ -31,4 +48,480 @@ Ideas para implementar mas adelante (fuera del foco actual de trabajo).
      - Agregar snapshots/backups periodicos con politica de retencion.
      - Incorporar logs operativos y auditoria de pagos (eventos, resultado, motivo, timestamp, idempotencia).
    - **Contexto:** a medida que crece la integracion de pagos, aumenta el riesgo operativo y la necesidad de trazabilidad.
+   - **Estado:** pendiente.
+
+4. **UX clara para usuario final (que puede hacer y que esta haciendo el bot)**
+   - **Objetivo:** reducir friccion inicial y evitar que el usuario tenga que "guiar" al bot para que complete una tarea.
+   - **Problema observado:** el usuario no siempre sabe que pedir ni en que formato; la conversacion puede sentirse clunky.
+   - **Comportamiento deseado:**
+     - El bot propone acciones concretas y ejemplos de mensajes segun contexto.
+     - El bot informa en que etapa esta (entendiendo pelea, validando datos, recomendando, registrando apuesta).
+   - **Diseno tecnico sugerido:**
+     - Mensaje de bienvenida corto + `quick prompts` reutilizables.
+     - "Siguientes acciones sugeridas" al final de respuestas clave (maximo 3).
+     - Estados visibles de procesamiento para tareas lentas.
+     - Mensajes de error accionables (que falta y como resolverlo).
+   - **Criterios de aceptacion:**
+     - Un usuario nuevo puede completar una recomendacion y un registro de apuesta sin instrucciones externas.
+     - Disminuye la cantidad de turnos de aclaracion para llegar a una accion valida.
+   - **Pruebas de regresion necesarias:**
+     - Flujo onboarding desde `/start` hasta primer pick recomendado.
+     - Flujo con input incompleto (sin cuotas) y recuperacion guiada.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+5. **Tracking automatico del ciclo de apuesta en ledger (recomendacion -> ejecucion -> resultado)**
+   - **Objetivo:** pasar de "recomendaciones sueltas" a tracking completo de performance real del usuario.
+   - **Problema observado:** hoy el bot puede guardar apuestas, pero no fuerza un flujo consistente de captura de ejecucion real y settlement.
+   - **Comportamiento deseado:**
+     - Despues de recomendar, el bot pregunta que realmente se jugo.
+     - El bot registra la apuesta en ledger con estructura consistente.
+     - El bot cierra cada apuesta con resultado (manual o automatico) y actualiza metricas.
+   - **Diseno tecnico sugerido:**
+     - Maquina de estados conversacional por usuario/evento:
+       - `recommendation_given`
+       - `awaiting_bet_confirmation`
+       - `bet_logged`
+       - `awaiting_result`
+       - `settled`
+     - Extraccion deterministica de slots: evento, pelea, mercado, cuota final, stake/unidades, timestamp.
+     - Campo `result_source` (`user_reported` / `auto_verified`) para trazabilidad.
+     - Confirmacion de escritura real en DB antes de responder "ya lo anote".
+   - **Criterios de aceptacion:**
+     - El bot nunca confirma registro sin `write` exitoso en DB.
+     - Toda apuesta recomendada puede terminar en estado `settled` con resultado auditable.
+   - **Pruebas de regresion necesarias:**
+     - Registro exitoso via mensaje libre ("anotalo al ledger", "anotalo al lodger", etc.).
+     - Reintento idempotente de registro de la misma apuesta.
+     - Settlement manual y settlement automatico.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+6. **[PRIORIDAD ALTA] Robustecer logica de fechas y validez temporal de datos deportivos**
+   - **Objetivo:** eliminar errores de fecha/recencia que rompen confianza y afectan decisiones de apuesta.
+   - **Incidente de referencia (chat real):**
+     - Claim incorrecto de forma reciente de Michel Pereira.
+     - Uso de peleas 2022-2024 para justificar "ultimas 4" en contexto 2026.
+     - Falta de correccion ante contradiccion explicita del usuario.
+   - **Comportamiento deseado:**
+     - Toda fecha relativa (`hoy`, `manana`, `proximo`) se resuelve a fecha absoluta antes de razonar.
+     - Todo claim de recencia/racha (`ultimos N`, `viene de`, `racha`) requiere evidencia vigente.
+     - Si no hay evidencia suficiente, el bot declara incertidumbre y ejecuta chequeo.
+   - **Diseno tecnico sugerido:**
+     - `RelativeDateResolver` en backend (no solo prompt) para inyectar `as_of_date` en cada turno.
+     - `FactFreshnessGate` obligatorio antes de enviar respuesta con claims deportivos.
+     - `ContradictionHandler`: si el usuario corrige un dato factico, pasar a modo verificacion, no debatir.
+     - `ResponseConsistencyValidator`: bloquear salida si hay inconsistencia temporal o claim sin respaldo.
+   - **Criterios de aceptacion:**
+     - Cero discrepancias entre fecha relativa y fecha real de ejecucion.
+     - Cero afirmaciones de racha/ultimos N sin evidencia temporal valida.
+     - Ante contradiccion del usuario, el bot verifica antes de sostener un claim.
+   - **Pruebas de regresion necesarias:**
+     - Escenario "hoy/manana" con fechas borde.
+     - Escenario "ultimos 4 combates" en distintos anos de corte.
+     - Escenario usuario contradice dato y el bot cambia a verificacion.
+   - **Prioridad:** critico.
+   - **Estado:** pendiente.
+
+7. **[PRIORIDAD ALTA] Orquestacion deterministica para evitar respuestas clunky**
+   - **Objetivo:** mejorar consistencia conversacional y reducir dependencia de memoria textual del modelo.
+   - **Problema observado:** el bot pierde hilo y obliga al usuario a reencauzar la conversacion.
+   - **Comportamiento deseado:** flujos estables donde el bot sabe que dato falta y pide exactamente eso.
+   - **Diseno tecnico sugerido:**
+     - Plan de herramientas por tipo de tarea (analisis, cuotas, registro, settlement).
+     - Resolucion de slots criticos en codigo antes del razonamiento libre.
+     - Confirmaciones estructuradas de accion (ej: `registro_exitoso`, `falta_cuota`, `falta_stake`).
+     - Reuso obligatorio de contexto persistido (odds guardadas, pelea seleccionada, evento activo).
+   - **Criterios de aceptacion:**
+     - Disminuyen turnos de ida y vuelta para completar tareas comunes.
+     - El bot no "reinicia contexto" dentro del mismo hilo sin motivo.
+   - **Pruebas de regresion necesarias:**
+     - "Ya te pase cuotas" -> no vuelve a pedir si estan guardadas.
+     - "Pelea 1" -> resolucion correcta desde contexto previo.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+8. **Suite de regresion conversacional end-to-end (calidad continua)**
+   - **Objetivo:** prevenir reincidencia de errores ya detectados en produccion.
+   - **Comportamiento deseado:** cada bug conversacional critico pasa a prueba automatizada reproducible.
+   - **Diseno tecnico sugerido:**
+     - Carpeta de escenarios E2E basados en transcripciones reales anonimizadas.
+     - Asserts de:
+       - exactitud temporal,
+       - ejecucion real de acciones (no confirmacion falsa),
+       - consistencia de estado conversacional,
+       - fallback seguro ante incertidumbre.
+     - Gate en CI para escenarios `critico` y `alta`.
+   - **Criterios de aceptacion:**
+     - Los incidentes ya registrados quedan cubiertos por tests.
+     - No se mergean cambios que rompan esos escenarios.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+9. **Notificacion inmediata de recarga acreditada + acceso rapido a saldo**
+   - **Objetivo:** mejorar transparencia de pagos y reducir ansiedad/friccion despues de una recarga.
+   - **Problema observado:** el usuario no siempre recibe confirmacion instantanea de acreditacion y no tiene una accion directa para consultar creditos.
+   - **Comportamiento deseado:**
+     - Cuando una recarga se acredita correctamente, el bot avisa en el chat de inmediato.
+     - El usuario puede consultar saldo en 1 toque (boton) o 1 comando.
+   - **Diseno tecnico sugerido:**
+     - Emitir notificacion desde los puntos de acreditacion exitosa:
+       - webhook de Mercado Pago (`/webhooks/mercadopago`) cuando `status=approved` y se acredita,
+       - webhook manual (`/webhooks/credits`),
+       - recarga CLI/manual (si aplica y existe chat vinculado).
+     - Mensaje de confirmacion estandar:
+       - credits acreditados,
+       - saldo total actualizado (`free + paid`),
+       - timestamp y referencia de transaccion (payment_id o reason).
+     - Agregar entrypoint de consulta de saldo:
+       - comando `/creditos` (o `/saldo`),
+       - boton inline "Ver creditos" en respuestas de paywall y en mensaje post-recarga.
+     - Manejar idempotencia de notificaciones para evitar dobles avisos en reintentos de webhook.
+   - **Criterios de aceptacion:**
+     - Toda recarga aprobada dispara exactamente 1 confirmacion visible al usuario.
+     - El comando/boton devuelve saldo correcto y ultimos movimientos relevantes.
+     - No hay confirmaciones de acreditacion cuando la operacion falla o queda pendiente.
+   - **Pruebas de regresion necesarias:**
+     - Pago aprobado (MP) -> acredita y notifica una sola vez.
+     - Reintento del mismo webhook -> no duplica credito ni notificacion.
+     - Consulta de saldo por comando y por boton.
+   - **Riesgos y decisiones abiertas:**
+     - Definir fallback cuando no exista chat_id activo para notificar (guardar notificacion pendiente o enviar al proximo mensaje del usuario).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+10. **Favoritos de peleadores (watchlist personal por usuario)**
+   - **Objetivo:** permitir seguimiento personalizado de peleadores que le interesan al usuario durante eventos y analisis futuros.
+   - **Problema observado:** hoy no existe una forma persistente y simple de marcar peleadores de interes para reutilizar en siguientes conversaciones.
+   - **Comportamiento deseado:**
+     - El usuario puede decir frases tipo:
+       - "Agrega a Michel Pereira a favoritos"
+       - "Mostrame mis favoritos"
+       - "Saca a X de favoritos"
+     - El bot confirma la accion y permite consultar/editar la lista en cualquier momento.
+     - La capacidad aparece en la lista de acciones visibles (onboarding, ayuda, sugerencias).
+   - **Diseno tecnico sugerido:**
+     - Nueva tabla `fighter_favorites` en SQLite con estas columnas:
+       - `id` INTEGER PK autoincrement.
+       - `telegram_user_id` TEXT NOT NULL.
+       - `fighter_slug` TEXT NOT NULL (nombre normalizado para matching estable).
+       - `fighter_name_display` TEXT NOT NULL (nombre para mostrar).
+       - `notes` TEXT NULL (motivo opcional: "me gusta su estilo", etc.).
+       - `source_event_name` TEXT NULL (evento donde se marco favorito).
+       - `source_fight_label` TEXT NULL (pelea/contexto donde se marco).
+       - `priority` INTEGER DEFAULT 0 (orden/preferencia manual futura).
+       - `last_interaction_at` TEXT NULL (ultima vez que el usuario hablo de ese peleador).
+       - `created_at` TEXT NOT NULL.
+       - `updated_at` TEXT NOT NULL.
+       - `archived_at` TEXT NULL (soft delete para historico).
+     - Restricciones e indices:
+       - `UNIQUE(telegram_user_id, fighter_slug)` para evitar duplicados.
+       - Indice por `telegram_user_id, archived_at, updated_at` para listar rapido activos.
+     - Intents/acciones:
+       - `favorite_add`
+       - `favorite_remove` (soft delete via `archived_at`)
+       - `favorite_list`
+       - `favorite_restore` (si existe archivado).
+     - Integracion conversacional:
+       - Incluir accion visible en mensajes de ayuda: "Agregar peleador a favoritos".
+       - Sugerencia contextual despues de analisis: "Queres guardarlo en favoritos?".
+   - **Criterios de aceptacion:**
+     - El usuario puede agregar/quitar/listar favoritos en lenguaje natural sin comandos estrictos.
+     - No se duplican favoritos del mismo usuario para el mismo peleador.
+     - Favoritos quedan persistidos entre sesiones y se listan en orden util (recencia/prioridad).
+   - **Pruebas de regresion necesarias:**
+     - Alta/baja/listado basico.
+     - Reintento de alta del mismo peleador (idempotencia).
+     - Variantes de nombre con acentos/mayusculas (normalizacion consistente).
+     - Soft delete + restore.
+   - **Riesgos y decisiones abiertas:**
+     - Definir si mostrar alertas proactivas cuando haya pelea nueva de un favorito (futuro scope).
+     - Definir limite maximo de favoritos por usuario para evitar listas inmanejables.
+   - **Prioridad:** media.
+   - **Estado:** pendiente.
+
+11. **Render correcto de formato en Telegram (negritas/listas sin markdown crudo)**
+   - **Objetivo:** mejorar legibilidad y evitar mensajes visualmente rotos.
+   - **Problema observado:** el bot envia texto con `**`/`##` y Telegram lo muestra literal (no renderiza negrita), volviendo la lectura clunky.
+   - **Evidencia:** screenshot con contenido tipo `**Pick:**` y `###` mostrado en crudo.
+   - **Comportamiento deseado:**
+     - La respuesta se ve limpia y consistente (negritas reales, listas claras, sin caracteres de markdown visibles).
+     - Si el formato falla, el mensaje igual se entrega en texto limpio (sin basura de escape).
+   - **Diseno tecnico sugerido:**
+     - Definir un unico modo de parseo para Telegram en todo el bot:
+       - opcion recomendada: `parse_mode: "HTML"` con sanitizacion/escape estricto.
+       - alternativa: `MarkdownV2` con helper central de escape (mas propenso a errores).
+     - Crear un `MessageFormatter` centralizado:
+       - helpers: `bold()`, `italic()`, `code()`, `listItem()`, `sectionTitle()`.
+       - salida por canal: telegram/html (principal) y plain-text fallback.
+     - Normalizar salida del LLM antes de enviar:
+       - convertir markdown comun (`**texto**`, `### titulo`) a formato Telegram soportado.
+       - remover/limpiar sintaxis no soportada.
+     - Manejo de errores de envio:
+       - si Telegram rechaza parseo, reintentar automaticamente en plain text seguro.
+   - **Criterios de aceptacion:**
+     - No aparecen `**`, `##` o sintaxis markdown cruda en respuestas normales.
+     - Las secciones clave (pick, cuota, stake, estado) se leen con formato consistente.
+     - Ante falla de parseo, el usuario recibe fallback legible en el mismo turno.
+   - **Pruebas de regresion necesarias:**
+     - Mensaje con multiples negritas y listas.
+     - Mensaje con caracteres especiales (`_`, `-`, `(`, `)`, `@`, `.`).
+     - Caso rechazo de parse_mode por Telegram -> fallback automatico.
+   - **Riesgos y decisiones abiertas:**
+     - Elegir estandar final (`HTML` vs `MarkdownV2`) y migrar templates existentes.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+12. **Ajuste de staking: unidades demasiado bajas vs bankroll declarado**
+   - **Objetivo:** que el tamaño de apuesta recomendado sea coherente con el bankroll total y el plan del evento.
+   - **Problema observado:** con bankroll declarado de `$40.000` para un evento (~6 peleas), el bot sugiere stakes muy bajos (`$400`, `$800`) y la exposicion total queda subutilizada.
+   - **Comportamiento deseado:**
+     - Si el usuario declara bankroll para el evento, el bot debe asignar stakes que reflejen mejor ese presupuesto (segun riesgo).
+     - Mantener proporcionalidad por confianza/valor, pero evitando montos "residuales" que no mueven resultado.
+   - **Diseno tecnico sugerido:**
+     - Separar 2 conceptos en perfil:
+       - `bankroll_total`
+       - `event_budget` (monto a jugar en este evento).
+     - Introducir `StakingPolicy` deterministico en backend:
+       - define rango de unidad (`u`) como % de `event_budget` segun perfil de riesgo,
+       - define `stake_floor_ars` (minimo por apuesta) para evitar recomendaciones irrisorias,
+       - define `max_exposure_per_pick` y `max_event_exposure`.
+     - Asignacion por tiers de confianza:
+       - `A` (alta conviccion) -> mayor peso,
+       - `B` (media) -> peso intermedio,
+       - `C` (baja/correlacionada) -> peso reducido.
+     - En respuesta, mostrar resumen de asignacion:
+       - presupuesto del evento,
+       - total comprometido,
+       - remanente.
+   - **Criterios de aceptacion:**
+     - Con `event_budget` alto, las recomendaciones no caen sistematicamente en stakes minimos desproporcionados.
+     - La suma de stakes respeta los limites de exposicion configurados.
+     - El usuario entiende por que cada pick lleva ese stake (transparencia de sizing).
+   - **Pruebas de regresion necesarias:**
+     - Caso base: `event_budget=40000`, 6 peleas, perfil moderado -> stakes consistentes y no residuales.
+     - Perfil conservador/agresivo con mismo presupuesto -> distribuciones distintas pero coherentes.
+     - Picks correlacionados (ej: ML + total rounds) -> control de sobreexposicion.
+   - **Riesgos y decisiones abiertas:**
+     - Definir objetivo de utilizacion de presupuesto por evento (ej: 60%-85% recomendado, no 100% fijo).
+     - Definir si estelares reciben peso adicional por defecto o solo por edge/confianza.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+13. **Progreso visible durante respuestas lentas (status while thinking)**
+   - **Objetivo:** reducir ansiedad del usuario y evitar percepcion de bot trabado cuando el procesamiento tarda.
+   - **Problema observado:** cuando la respuesta tarda, parece que el bot se quedo colgado y el usuario puede empezar a mandar mas mensajes.
+   - **Comportamiento deseado:**
+     - Al iniciar procesamiento, el bot envia una senal inmediata tipo "Trabajando en eso...".
+     - Si el procesamiento sigue, el bot muestra estados breves de avance (ej: "validando evento", "analizando cuotas").
+     - Estilo amigable con emoji de reloj de arena (`⏳`) o similar.
+   - **Diseno tecnico sugerido:**
+     - `ProgressNotifier` por chat con lifecycle:
+       - `start` -> mensaje inicial o `sendChatAction(typing)`.
+       - `update` -> 1 o 2 actualizaciones maximas por solicitud (evitar spam).
+       - `finish` -> borrar/editar estado si aplica cuando llega la respuesta final.
+     - Templates de estado por tipo de flujo:
+       - calendario/evento,
+       - analisis de pelea,
+       - lectura de historial,
+       - registro de apuestas/creditos.
+     - Throttling para no enviar demasiados estados en respuestas cortas.
+   - **Criterios de aceptacion:**
+     - El usuario recibe feedback de inicio dentro de los primeros segundos del turno.
+     - En respuestas largas, hay visibilidad de progreso sin inundar el chat.
+     - No quedan mensajes de estado "colgados" despues de enviar la respuesta final.
+   - **Pruebas de regresion necesarias:**
+     - Flujo rapido (sin updates intermedios innecesarios).
+     - Flujo lento (con start + update + finish).
+     - Error en procesamiento (mostrar cierre claro de fallo y no dejar estado inconsistente).
+   - **Riesgos y decisiones abiertas:**
+     - Definir si usar mensaje visible, `typing`, o combinacion de ambos segun duracion.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+14. **Guardrail para mensajes encadenados mientras el bot aun procesa**
+   - **Objetivo:** mantener coherencia turno-a-turno y evitar que se rompa el flujo cuando el usuario manda multiples lineas antes de respuesta.
+   - **Problema observado:** algunos usuarios escriben en rafaga; el bot esta pensado para alternancia `Usuario -> Bot -> Usuario -> Bot`.
+   - **Comportamiento deseado:**
+     - Si hay una respuesta en curso, el bot avisa que espere o que mande todo junto.
+     - Opcionalmente, el bot agrupa mensajes cercanos en una sola entrada antes de procesar.
+   - **Diseno tecnico sugerido:**
+     - `InFlightTurnGuard` por chat con `isProcessing` + `queuePolicy`.
+     - Politicas posibles:
+       - `reject_with_notice`: rechaza mensajes nuevos y envia aviso breve.
+       - `coalesce_window`: junta mensajes entrantes durante X segundos y procesa uno solo.
+       - `queue_limited`: cola corta (max N) con aviso si supera limite.
+     - Mensaje de guardrail sugerido:
+       - "Estoy respondiendo tu mensaje anterior. Espera mi respuesta y despues seguimos 🙏"
+       - "Si queres, manda todo en un solo mensaje para que analice mejor."
+     - Registrar metricas: cantidad de mensajes bloqueados/coalesced por chat.
+   - **Criterios de aceptacion:**
+     - No se pisan respuestas ni se mezclan contextos por mensajes simultaneos.
+     - El usuario recibe una indicacion clara cuando envia mensajes durante procesamiento.
+     - Se mantiene trazabilidad de que se proceso, bloqueo o agrupo.
+   - **Pruebas de regresion necesarias:**
+     - 2+ mensajes seguidos mientras hay una corrida activa.
+     - Modo `coalesce_window` con lineas separadas que deben terminar en un unico procesamiento.
+     - Validacion de no perdida de mensajes importantes.
+   - **Riesgos y decisiones abiertas:**
+     - Elegir politica por defecto (`reject` vs `coalesce`) segun UX esperada.
+     - Definir excepciones (comandos como `/cancel` o `/stop` deben pasar siempre).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+15. **Educar al usuario para cargar cuotas (quotes) completas como input principal**
+   - **Objetivo:** mejorar la calidad de recomendaciones haciendo explicito que el bot rinde mejor cuando analiza cuotas reales del usuario.
+   - **Problema observado:** los usuarios no saben que conviene pasar sus quotes/snapshots completos por pelea para obtener mejores picks y staking.
+   - **Comportamiento deseado:**
+     - El bot informa de forma visible que idealmente se deben compartir cuotas de su casa de apuestas.
+     - Recomienda enviar screenshots completos de cada pelea (mercados/cuotas visibles) antes del analisis final.
+     - Si faltan cuotas, el bot pide ese input de forma guiada en lugar de avanzar con informacion incompleta sin advertir.
+   - **Diseno tecnico sugerido:**
+     - Incluir este mensaje en:
+       - onboarding inicial,
+       - respuestas de analisis sin odds detectadas,
+       - bloque de "siguientes acciones sugeridas".
+     - Templates cortos sugeridos:
+       - "Para recomendar mejor, subime los quotes de tu bookie."
+       - "Ideal: screenshot completo de las cuotas de cada pelea del evento."
+     - Detectar cuando hay odds incompletas y marcar estado `missing_odds_context`.
+     - Añadir CTA rapido: "Subir cuotas ahora" (texto/boton segun canal).
+   - **Criterios de aceptacion:**
+     - El usuario recibe instruccion clara sobre carga de cuotas en los puntos clave del flujo.
+     - Disminuyen recomendaciones emitidas sin contexto de odds cuando el usuario puede aportarlas.
+     - Aumenta la proporcion de conversaciones con odds guardadas antes de picks finales.
+   - **Pruebas de regresion necesarias:**
+     - Flujo sin cuotas -> bot solicita screenshots/quotes completos de forma accionable.
+     - Flujo con cuotas ya cargadas -> no repite instruccion innecesariamente.
+     - Flujo con cuotas parciales -> bot pide completar faltantes antes de cerrar recomendacion.
+   - **Riesgos y decisiones abiertas:**
+     - Definir cuanta insistencia aplicar para no volver la UX repetitiva.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+16. **[PRIORIDAD CRITICA] Cierre de apuestas en ledger: evitar updates sobre pelea equivocada**
+   - **Objetivo:** prevenir errores de data integrity al cerrar apuestas (`WON/LOST`) en conversaciones largas.
+   - **Incidente de referencia (chat real):**
+     - Usuario dice "anota como perdidas las de la pelea anterior".
+     - Bot cierra como `LOST` apuestas de la pelea estelar que todavia no habia empezado.
+     - Tras correccion explicita del usuario ("esas no"), el bot insiste en el estado incorrecto.
+   - **Problema observado:**
+     - Resolucion ambigua de referencias temporales (`anterior`, `esa`, `recién`) usando contexto debil.
+     - Escritura en DB sin confirmacion robusta del target.
+   - **Comportamiento deseado:**
+     - El bot no muta ledger si la referencia no es inequívoca.
+     - Si hay ambiguedad, pide desambiguacion mostrando opciones concretas.
+     - Si el usuario corrige, el bot entra en modo reconciliacion y no reafirma el error.
+   - **Diseno tecnico sugerido:**
+     - `LedgerMutationGuard` (hard gate) antes de cualquier `update` de resultado:
+       - requiere `bet_id` o resolucion unica de pelea.
+       - bloquea mutacion si hay 2+ candidatos posibles.
+     - `FightReferenceResolver` deterministico:
+       - mapea `esta/anterior/siguiente` contra estado de cartelera y timeline de turnos.
+       - prioriza apuestas abiertas recientemente del usuario por orden temporal real.
+     - `FightStateGate`:
+       - prohibir cierre `WON/LOST` para apuestas de pelea `not_started` o `in_progress` salvo override explicito.
+     - `CorrectionMode`:
+       - trigger cuando usuario dice "no", "esas no", "te dije la anterior", etc.
+       - respuesta obligatoria con lista de candidatos para confirmar.
+   - **Criterios de aceptacion:**
+     - No se puede cerrar apuesta equivocada por referencia ambigua.
+     - Ante correccion del usuario, el bot deja de insistir y solicita confirmacion estructurada.
+     - Cierres solo se aplican sobre apuestas elegibles por estado de pelea.
+   - **Pruebas de regresion necesarias:**
+     - Caso exacto del incidente (`pelea anterior`) con estelar aun no iniciada.
+     - Caso con multiples apuestas abiertas en peleas consecutivas.
+     - Caso de correccion inmediata del usuario despues de una accion mal interpretada.
+   - **Riesgos y decisiones abiertas:**
+     - Definir umbral de friccion aceptable (cuanta confirmacion pedir sin dañar UX).
+   - **Prioridad:** critico.
+   - **Estado:** pendiente.
+
+17. **Trazabilidad y reversibilidad de mutaciones de ledger (receipts + undo)**
+   - **Objetivo:** asegurar auditabilidad y correccion rapida si un update conversacional fue incorrecto.
+   - **Problema observado:** el bot confirma "ya lo anote" sin exponer comprobante verificable, dificultando detectar/corregir errores.
+   - **Comportamiento deseado:**
+     - Cada mutacion de ledger devuelve recibo visible y auditable.
+     - Existe accion de rollback/undo segura para revertir el ultimo cierre incorrecto.
+   - **Diseno tecnico sugerido:**
+     - `MutationReceipt` obligatorio en respuestas de escritura:
+       - `bet_id`, `event_name`, `fight_label`, `prev_result`, `new_result`, `updated_at`, `source`.
+     - Tabla de auditoria (append-only) para cambios de estado en apuestas.
+     - `undo_last_mutation` restringido por usuario y ventana temporal configurable.
+     - En caso de fallo parcial, no confirmar accion como exitosa.
+   - **Criterios de aceptacion:**
+     - Toda mutacion de ledger deja rastro auditable y visible al usuario.
+     - El usuario puede revertir un cierre errado sin intervencion manual en DB.
+     - El bot nunca responde "listo" si no existe confirmacion de persistencia.
+   - **Pruebas de regresion necesarias:**
+     - Update exitoso con receipt completo.
+     - Falla de escritura -> mensaje de error sin falsa confirmacion.
+     - Undo exitoso y undo no permitido fuera de ventana/politica.
+   - **Riesgos y decisiones abiertas:**
+     - Definir politicas de undo (tiempo maximo, cantidad de pasos, restricciones por tipo de usuario).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+18. **[PRIORIDAD CRITICA] Operaciones destructivas del ledger con confirmacion en dos pasos**
+   - **Objetivo:** evitar borrados/cierres masivos incorrectos por interpretacion ambigua de lenguaje natural.
+   - **Incidente de referencia (chat real):**
+     - Usuario pide: "la de Neal LOST, las demas borralas, y anota estas dos como pending".
+     - Bot afirma borrado de multiples apuestas sin comprobante transaccional ni confirmacion explicita de alcance.
+   - **Problema observado:**
+     - Mutaciones destructivas (`delete`, `bulk close`) se ejecutan sin "preview + confirm".
+     - El bot comunica cambios como realizados aunque el target no esta completamente validado.
+   - **Comportamiento deseado:**
+     - Cualquier accion destructiva requiere confirmacion explicita del usuario antes de ejecutar.
+     - El bot muestra un preview exacto de que se va a tocar (IDs/cantidad/alcance).
+   - **Diseno tecnico sugerido:**
+     - `DestructiveActionGuard`:
+       - detecta intents de borrado/cierre masivo.
+       - exige paso 1: `mutation_preview`.
+       - exige paso 2: `mutation_confirm` (ej: "CONFIRMAR BORRADO").
+     - Por defecto usar soft delete (`archived_at`) y no hard delete fisico.
+     - Ejecutar en transaccion atomica con rollback total ante fallo parcial.
+     - Incluir recibo final con lista de `bet_id` afectados.
+   - **Criterios de aceptacion:**
+     - No hay borrados ni cierres masivos sin confirmacion en dos pasos.
+     - El usuario ve exactamente que se va a modificar antes de confirmar.
+     - Si falla una parte, no quedan cambios parciales silenciosos.
+   - **Pruebas de regresion necesarias:**
+     - Intento de "borra las demas" sin confirmacion -> bloqueado con preview.
+     - Confirmacion valida -> mutacion ejecutada con receipt.
+     - Falla a mitad de batch -> rollback completo.
+   - **Riesgos y decisiones abiertas:**
+     - Definir UX de confirmacion para no generar friccion excesiva.
+   - **Prioridad:** critico.
+   - **Estado:** pendiente.
+
+19. **Ejecucion multi-accion robusta en un mismo turno (close + delete + create)**
+   - **Objetivo:** procesar instrucciones compuestas del usuario sin perder pasos ni inventar estado.
+   - **Incidente de referencia (chat real):**
+     - Instruccion compuesta en una sola frase (marcar 1 perdida + borrar otras + crear 2 pending).
+     - Bot mezcla confirmaciones parciales y deja pasos pendientes sin un plan transaccional claro.
+   - **Problema observado:**
+     - Falta un planificador deterministico para intents compuestos.
+     - Falta reporte estructurado por sub-accion (`ok`/`failed`/`needs_input`).
+   - **Comportamiento deseado:**
+     - El bot descompone y ejecuta cada sub-accion de forma ordenada.
+     - Si falta data para una sub-accion (ej: picks nuevos), lo marca como pendiente sin mentir sobre el resto.
+   - **Diseno tecnico sugerido:**
+     - `CompositeMutationPlanner`:
+       - parsea acciones en `steps[]` (close, delete, create).
+       - valida precondiciones por step.
+       - ejecuta con politica transaccional definida (`all_or_nothing` o `partial_with_receipts`).
+     - `StepResultEnvelope` en respuesta:
+       - `step_name`, `status`, `affected_ids`, `missing_fields`.
+     - Integrar con screenshot parser: si el usuario adjunta imagen, intentar extraer picks antes de pedir tipeo manual.
+   - **Criterios de aceptacion:**
+     - Instrucciones compuestas se resuelven sin contradicciones.
+     - El usuario recibe estado exacto por cada sub-accion.
+     - Nunca se confirma como hecho un step que quedo `needs_input`.
+   - **Pruebas de regresion necesarias:**
+     - Caso "close 1 + delete resto + add 2 pending" en un solo mensaje.
+     - Caso con data incompleta en una sub-accion y completa en otras.
+     - Caso con adjunto de screenshot como fuente de las apuestas nuevas.
+   - **Riesgos y decisiones abiertas:**
+     - Definir politica por defecto de transaccion para operaciones mixtas.
+   - **Prioridad:** alta.
    - **Estado:** pendiente.
