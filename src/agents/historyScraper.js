@@ -21,6 +21,18 @@ const REQUEST_TIMEOUT_MS = Math.max(
   1000,
   Number(process.env.HISTORY_SCRAPER_FETCH_TIMEOUT_MS ?? '12000')
 );
+const OPENAI_TIMEOUT_MS = Math.max(
+  10000,
+  Number(process.env.HISTORY_SCRAPER_OPENAI_TIMEOUT_MS ?? '90000')
+);
+const OPENAI_MAX_RETRIES = Math.max(
+  0,
+  Number(process.env.HISTORY_SCRAPER_OPENAI_MAX_RETRIES ?? '1')
+);
+const SCRAPER_DEADLINE_MS = Math.max(
+  60000,
+  Number(process.env.HISTORY_SCRAPER_DEADLINE_MS ?? '480000')
+);
 
 const WEB_SEARCH_DOMAINS = (process.env.HISTORY_SCRAPER_DOMAINS ||
   'ufc.com,espn.com,en.wikipedia.org,es.wikipedia.org,tapology.com,sherdog.com')
@@ -449,7 +461,11 @@ function formatPendingEventsHint(events = []) {
 
 export async function runHistoryScraper() {
   ensureConfigured();
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+  const client = new OpenAI({
+    apiKey: OPENAI_API_KEY,
+    timeout: OPENAI_TIMEOUT_MS,
+    maxRetries: OPENAI_MAX_RETRIES,
+  });
   const instructions = buildInstructions();
   const tools = buildTools();
   const summary = {
@@ -462,9 +478,39 @@ export async function runHistoryScraper() {
   const loggedEvents = await loadLoggedEvents();
   let existingRowSet = null;
   const processedEventDates = new Set();
+  const runStartedAt = Date.now();
+
+  function ensureDeadline(contextLabel = 'history:sync') {
+    if (Date.now() - runStartedAt > SCRAPER_DEADLINE_MS) {
+      throw new Error(
+        `${contextLabel} exceeded deadline (${SCRAPER_DEADLINE_MS}ms). Increase HISTORY_SCRAPER_DEADLINE_MS or narrow scope.`
+      );
+    }
+  }
+
+  async function createResponseWithLog(payload, label = 'model_call') {
+    ensureDeadline(`history:sync ${label}`);
+    const startedAt = Date.now();
+    console.log(`[history:sync] ${label} -> started`);
+    const response = await client.responses.create(payload);
+    console.log(`[history:sync] ${label} -> completed in ${Date.now() - startedAt}ms`);
+    return response;
+  }
+
+  console.log(
+    `[history:sync] Starting run | model=${MODEL} | maxEvents=${MAX_EVENTS} | maxToolRounds=${MAX_TOOL_ROUNDS}`
+  );
+  console.log('[history:sync] Reading latest loaded fight from sheet...');
 
   const sheetRows = await readRange(SHEET_ID, RANGE);
   const latestLoaded = extractLatestLoadedFight(sheetRows);
+  console.log(
+    `[history:sync] Sheet latest: ${latestLoaded.lastDate || 'unknown'} | event=${
+      latestLoaded.lastEvent || 'unknown'
+    }`
+  );
+
+  console.log('[history:sync] Reconciling with completed UFC events index...');
   let pendingEventsHint = [];
   try {
     const completedEvents = await fetchCompletedEventsIndex();
@@ -474,26 +520,39 @@ export async function runHistoryScraper() {
       untilDate: toIso(new Date()),
       maxEvents: MAX_EVENTS,
     });
+    console.log(
+      `[history:sync] Completed index loaded. Missing candidates: ${pendingEventsHint.length}`
+    );
   } catch (error) {
     console.warn('⚠️ No se pudo obtener indice de eventos completados:', error?.message || error);
   }
 
-  async function runModelToolLoop(initialInput) {
-    let response = await client.responses.create({
-      model: MODEL,
-      instructions,
-      input: initialInput,
-      tools,
-      tool_choice: 'auto',
-    });
+  async function runModelToolLoop(initialInput, loopLabel = 'batch') {
+    let response = await createResponseWithLog(
+      {
+        model: MODEL,
+        instructions,
+        input: initialInput,
+        tools,
+        tool_choice: 'auto',
+      },
+      `${loopLabel}:initial`
+    );
 
     let rounds = 0;
     while (rounds < MAX_TOOL_ROUNDS) {
+      ensureDeadline(`history:sync ${loopLabel}`);
       rounds += 1;
       const calls = extractFunctionCalls(response);
       if (!calls.length) {
+        console.log(`[history:sync] ${loopLabel}: no tool calls in round ${rounds}, finishing loop.`);
         break;
       }
+      console.log(
+        `[history:sync] ${loopLabel}: round ${rounds} tool calls -> ${calls
+          .map((call) => call.name)
+          .join(', ')}`
+      );
 
       const outputs = [];
       for (const call of calls) {
@@ -625,14 +684,17 @@ export async function runHistoryScraper() {
         });
       }
 
-      response = await client.responses.create({
-        model: MODEL,
-        instructions,
-        previous_response_id: response.id,
-        input: outputs,
-        tools,
-        tool_choice: 'auto',
-      });
+      response = await createResponseWithLog(
+        {
+          model: MODEL,
+          instructions,
+          previous_response_id: response.id,
+          input: outputs,
+          tools,
+          tool_choice: 'auto',
+        },
+        `${loopLabel}:round_${rounds}`
+      );
     }
 
     return extractResponseText(response);
@@ -649,7 +711,7 @@ export async function runHistoryScraper() {
   ].join('\n');
 
   const notes = [];
-  const note = await runModelToolLoop(firstInput);
+  const note = await runModelToolLoop(firstInput, 'initial_batch');
   if (note) {
     notes.push(note);
   }
@@ -667,7 +729,8 @@ export async function runHistoryScraper() {
         `EVENTO_OBJETIVO: ${event.eventDate} | ${event.eventName}`,
         `URL_REFERENCIA: ${event.eventUrl}`,
         'Busca resultados completos del evento y llama append_fight_rows con todas las peleas.',
-      ].join('\n')
+      ].join('\n'),
+      `targeted_retry_${event.eventDate}`
     );
     if (retryNote) {
       notes.push(retryNote);
