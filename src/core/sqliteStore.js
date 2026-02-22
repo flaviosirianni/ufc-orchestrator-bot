@@ -76,8 +76,34 @@ function initSchema(db) {
       units REAL,
       result TEXT,
       notes TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      settled_at TEXT,
+      archived_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bets_user_created
+      ON bets (telegram_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_bets_user_active
+      ON bets (telegram_user_id, archived_at, created_at);
+
+    CREATE TABLE IF NOT EXISTS bet_mutations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT,
+      bet_id INTEGER,
+      action TEXT,
+      prev_result TEXT,
+      new_result TEXT,
+      prev_archived_at TEXT,
+      new_archived_at TEXT,
+      metadata TEXT,
       created_at TEXT
     );
+
+    CREATE INDEX IF NOT EXISTS idx_bet_mutations_user_time
+      ON bet_mutations (telegram_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_bet_mutations_bet_time
+      ON bet_mutations (bet_id, created_at);
 
     CREATE TABLE IF NOT EXISTS ledger_summary (
       telegram_user_id TEXT PRIMARY KEY,
@@ -172,6 +198,28 @@ function initSchema(db) {
   `);
 }
 
+function ensureBetSchema(db) {
+  const columns = db.prepare("PRAGMA table_info('bets')").all();
+  const names = new Set(columns.map((row) => row?.name).filter(Boolean));
+
+  if (!names.has('updated_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN updated_at TEXT');
+  }
+  if (!names.has('settled_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN settled_at TEXT');
+  }
+  if (!names.has('archived_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN archived_at TEXT');
+  }
+
+  db.exec(
+    "UPDATE bets SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL"
+  );
+  db.exec(
+    "UPDATE bets SET result = 'pending' WHERE result IS NULL OR TRIM(result) = ''"
+  );
+}
+
 export function getDb() {
   if (dbInstance) {
     return dbInstance;
@@ -182,6 +230,7 @@ export function getDb() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   initSchema(db);
+  ensureBetSchema(db);
   dbInstance = db;
   return dbInstance;
 }
@@ -371,44 +420,196 @@ export function updateUserProfile(userId, updates = {}) {
 
 function normalizeResult(result = '') {
   const value = String(result || '').toLowerCase();
-  if (value.includes('win') || value.includes('won')) return 'win';
-  if (value.includes('loss') || value.includes('lose')) return 'loss';
-  if (value.includes('push') || value.includes('draw')) return 'push';
+  if (!value.trim()) return 'pending';
+  if (
+    value.includes('pending') ||
+    value.includes('pend') ||
+    value.includes('open') ||
+    value.includes('abierta')
+  ) {
+    return 'pending';
+  }
+  if (
+    value.includes('win') ||
+    value.includes('won') ||
+    value.includes('gan')
+  ) {
+    return 'win';
+  }
+  if (
+    value.includes('loss') ||
+    value.includes('lose') ||
+    value.includes('lost') ||
+    value.includes('perd')
+  ) {
+    return 'loss';
+  }
+  if (
+    value.includes('push') ||
+    value.includes('draw') ||
+    value.includes('void') ||
+    value.includes('nula')
+  ) {
+    return 'push';
+  }
   return null;
 }
 
-export function addBetRecord(userId, record = {}) {
+function normalizeLooseText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isSettledResult(result = '') {
+  return result === 'win' || result === 'loss' || result === 'push';
+}
+
+function mapBetRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    eventName: row.event_name,
+    fight: row.fight,
+    pick: row.pick,
+    odds: row.odds,
+    stake: row.stake,
+    units: row.units,
+    result: normalizeResult(row.result) || 'pending',
+    notes: row.notes,
+    recordedAt: row.created_at,
+    updatedAt: row.updated_at || row.created_at,
+    settledAt: row.settled_at || null,
+    archivedAt: row.archived_at || null,
+  };
+}
+
+function listBetRowsForUser(
+  db,
+  userId,
+  { includeArchived = false, limit = 300 } = {}
+) {
+  if (!userId) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
+       FROM bets
+       WHERE telegram_user_id = ?
+       ORDER BY id DESC
+       LIMIT ?`
+    )
+    .all(userId, Math.max(1, Number(limit) || 300));
+
+  if (includeArchived) {
+    return rows;
+  }
+  return rows.filter((row) => !row.archived_at);
+}
+
+function filterBetRows(rows = [], filter = {}) {
+  const eventNameNorm = normalizeLooseText(filter.eventName || '');
+  const fightNorm = normalizeLooseText(filter.fight || '');
+  const pickNorm = normalizeLooseText(filter.pick || '');
+  const rawStatus = String(filter.status ?? '').trim();
+  const wantedStatus = rawStatus ? normalizeResult(rawStatus) : null;
+  const wantedIds = new Set(
+    Array.isArray(filter.betIds)
+      ? filter.betIds
+          .map((value) => Number(value))
+          .filter((value) => Number.isInteger(value) && value > 0)
+      : []
+  );
+
+  return rows.filter((row) => {
+    if (wantedIds.size && !wantedIds.has(Number(row.id))) {
+      return false;
+    }
+
+    if (eventNameNorm) {
+      const rowEvent = normalizeLooseText(row.event_name || '');
+      if (!rowEvent.includes(eventNameNorm)) {
+        return false;
+      }
+    }
+
+    if (fightNorm) {
+      const rowFight = normalizeLooseText(row.fight || '');
+      if (!rowFight.includes(fightNorm)) {
+        return false;
+      }
+    }
+
+    if (pickNorm) {
+      const rowPick = normalizeLooseText(row.pick || '');
+      if (!rowPick.includes(pickNorm)) {
+        return false;
+      }
+    }
+
+    if (wantedStatus) {
+      const rowStatus = normalizeResult(row.result) || 'pending';
+      if (rowStatus !== wantedStatus) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function logBetMutation(db, {
+  userId,
+  betId,
+  action,
+  prevResult = null,
+  nextResult = null,
+  prevArchivedAt = null,
+  nextArchivedAt = null,
+  metadata = null,
+  at = nowIso(),
+} = {}) {
+  db.prepare(
+    `INSERT INTO bet_mutations
+      (telegram_user_id, bet_id, action, prev_result, new_result, prev_archived_at, new_archived_at, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId || null,
+    betId || null,
+    action || null,
+    prevResult || null,
+    nextResult || null,
+    prevArchivedAt || null,
+    nextArchivedAt || null,
+    metadata ? JSON.stringify(metadata) : null,
+    at
+  );
+}
+
+export function rebuildLedgerSummary(userId) {
   if (!userId) return null;
   const db = getDb();
   const ts = nowIso();
-  db.prepare(
-    `INSERT INTO bets
-      (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    userId,
-    record.eventName || null,
-    record.fight || null,
-    record.pick || null,
-    record.odds ?? null,
-    record.stake ?? null,
-    record.units ?? null,
-    record.result || null,
-    record.notes || null,
-    ts
-  );
+  const rows = listBetRowsForUser(db, userId, { includeArchived: false, limit: 2000 });
 
-  const normalizedResult = normalizeResult(record.result);
-  const existing = db
-    .prepare('SELECT * FROM ledger_summary WHERE telegram_user_id = ?')
-    .get(userId);
+  let totalStaked = 0;
+  let totalUnits = 0;
+  let wins = 0;
+  let losses = 0;
+  let pushes = 0;
 
-  const totalStaked = (existing?.total_staked || 0) + (Number(record.stake) || 0);
-  const totalUnits = (existing?.total_units || 0) + (Number(record.units) || 0);
-  const totalBets = (existing?.total_bets || 0) + 1;
-  const wins = (existing?.wins || 0) + (normalizedResult === 'win' ? 1 : 0);
-  const losses = (existing?.losses || 0) + (normalizedResult === 'loss' ? 1 : 0);
-  const pushes = (existing?.pushes || 0) + (normalizedResult === 'push' ? 1 : 0);
+  for (const row of rows) {
+    totalStaked += Number(row.stake) || 0;
+    totalUnits += Number(row.units) || 0;
+    const status = normalizeResult(row.result) || 'pending';
+    if (status === 'win') wins += 1;
+    if (status === 'loss') losses += 1;
+    if (status === 'push') pushes += 1;
+  }
+
+  const totalBets = rows.length;
 
   db.prepare(
     `INSERT INTO ledger_summary
@@ -425,46 +626,271 @@ export function addBetRecord(userId, record = {}) {
   ).run(userId, totalStaked, totalUnits, totalBets, wins, losses, pushes, ts);
 
   return {
-    ...record,
-    recordedAt: ts,
+    totalStaked,
+    totalUnits,
+    totalBets,
+    wins,
+    losses,
+    pushes,
+    lastUpdatedAt: ts,
   };
 }
 
-export function getBetHistory(userId, limit = 20) {
+export function listUserBets(userId, options = {}) {
   if (!userId) return [];
   const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT event_name, fight, pick, odds, stake, units, result, notes, created_at
-       FROM bets WHERE telegram_user_id = ?
-       ORDER BY created_at DESC
-       LIMIT ?`
-    )
-    .all(userId, limit);
+  const rows = listBetRowsForUser(db, userId, {
+    includeArchived: Boolean(options.includeArchived),
+    limit: options.limit ?? 300,
+  });
+  const filtered = filterBetRows(rows, options);
+  const limit = Math.max(1, Number(options.limit) || 50);
+  return filtered.slice(0, limit).map(mapBetRow);
+}
 
-  return rows.map((row) => ({
-    eventName: row.event_name,
-    fight: row.fight,
-    pick: row.pick,
-    odds: row.odds,
-    stake: row.stake,
-    units: row.units,
-    result: row.result,
-    notes: row.notes,
-    recordedAt: row.created_at,
-  }));
+function buildMutationPreview(userId, payload = {}) {
+  const operation = String(payload.operation || '').trim().toLowerCase();
+  if (!operation) {
+    return { ok: false, error: 'missing_operation' };
+  }
+
+  if (!['settle', 'set_pending', 'archive'].includes(operation)) {
+    return { ok: false, error: 'invalid_operation' };
+  }
+
+  const normalizedResult = normalizeResult(payload.result);
+  if (operation === 'settle' && !isSettledResult(normalizedResult)) {
+    return { ok: false, error: 'invalid_settle_result' };
+  }
+
+  const rawStatus = String(payload.status ?? '').trim();
+  const explicitStatus = rawStatus ? normalizeResult(rawStatus) : null;
+  const statusFilter =
+    operation === 'settle'
+      ? (explicitStatus || 'pending')
+      : explicitStatus;
+
+  const candidates = listUserBets(userId, {
+    includeArchived: false,
+    betIds: payload.betIds,
+    eventName: payload.eventName,
+    fight: payload.fight,
+    pick: payload.pick,
+    status: statusFilter,
+    limit: payload.limit ?? 100,
+  });
+
+  if (!candidates.length) {
+    return {
+      ok: false,
+      error: 'no_matching_bets',
+      operation,
+      statusFilter,
+    };
+  }
+
+  const hasExplicitIds =
+    Array.isArray(payload.betIds) &&
+    payload.betIds.some((value) => Number.isInteger(Number(value)));
+  const requiresConfirmation =
+    operation === 'archive' || candidates.length > 1 || !hasExplicitIds;
+
+  return {
+    ok: true,
+    operation,
+    result: normalizedResult || null,
+    requiresConfirmation,
+    hasExplicitIds,
+    candidates,
+  };
+}
+
+export function previewBetMutation(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+  return buildMutationPreview(userId, payload);
+}
+
+export function applyBetMutation(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+  const preview = buildMutationPreview(userId, payload);
+  if (!preview.ok) {
+    return preview;
+  }
+
+  if (preview.requiresConfirmation && !payload.confirm) {
+    return {
+      ok: false,
+      error: 'confirmation_required',
+      preview,
+    };
+  }
+
+  const db = getDb();
+  const ts = nowIso();
+  const operation = preview.operation;
+  const nextResult =
+    operation === 'settle'
+      ? preview.result
+      : operation === 'set_pending'
+      ? 'pending'
+      : null;
+
+  const apply = db.transaction(() => {
+    const receipts = [];
+    for (const candidate of preview.candidates) {
+      const before = db
+        .prepare(
+          `SELECT id, result, archived_at
+           FROM bets
+           WHERE id = ? AND telegram_user_id = ?`
+        )
+        .get(candidate.id, userId);
+      if (!before) continue;
+
+      if (operation === 'archive') {
+        db.prepare(
+          `UPDATE bets
+           SET archived_at = ?, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run(ts, ts, candidate.id, userId);
+      } else if (operation === 'set_pending') {
+        db.prepare(
+          `UPDATE bets
+           SET result = ?, settled_at = NULL, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run('pending', ts, candidate.id, userId);
+      } else {
+        db.prepare(
+          `UPDATE bets
+           SET result = ?, settled_at = ?, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run(nextResult, ts, ts, candidate.id, userId);
+      }
+
+      const after = db
+        .prepare(
+          `SELECT id, event_name, fight, pick, result, archived_at, updated_at
+           FROM bets
+           WHERE id = ? AND telegram_user_id = ?`
+        )
+        .get(candidate.id, userId);
+
+      logBetMutation(db, {
+        userId,
+        betId: candidate.id,
+        action: operation,
+        prevResult: normalizeResult(before.result) || 'pending',
+        nextResult: normalizeResult(after?.result) || 'pending',
+        prevArchivedAt: before.archived_at || null,
+        nextArchivedAt: after?.archived_at || null,
+        metadata: payload.metadata || null,
+        at: ts,
+      });
+
+      receipts.push({
+        action: operation,
+        betId: candidate.id,
+        eventName: after?.event_name || null,
+        fight: after?.fight || null,
+        pick: after?.pick || null,
+        previousResult: normalizeResult(before.result) || 'pending',
+        newResult: normalizeResult(after?.result) || 'pending',
+        previousArchivedAt: before.archived_at || null,
+        newArchivedAt: after?.archived_at || null,
+        updatedAt: after?.updated_at || ts,
+      });
+    }
+
+    return receipts;
+  });
+
+  const receipts = apply();
+  const ledgerSummary = rebuildLedgerSummary(userId);
+
+  return {
+    ok: true,
+    operation,
+    affectedCount: receipts.length,
+    receipts,
+    ledgerSummary,
+  };
+}
+
+export function addBetRecord(userId, record = {}) {
+  if (!userId) return null;
+  const db = getDb();
+  const ts = nowIso();
+  const normalizedResult = normalizeResult(record.result) || 'pending';
+  const settledAt = isSettledResult(normalizedResult) ? ts : null;
+
+  const result = db.prepare(
+    `INSERT INTO bets
+      (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+  ).run(
+    userId,
+    record.eventName || null,
+    record.fight || null,
+    record.pick || null,
+    record.odds ?? null,
+    record.stake ?? null,
+    record.units ?? null,
+    normalizedResult,
+    record.notes || null,
+    ts,
+    ts,
+    settledAt
+  );
+
+  const betId = Number(result.lastInsertRowid);
+  logBetMutation(db, {
+    userId,
+    betId,
+    action: 'create',
+    prevResult: null,
+    nextResult: normalizedResult,
+    prevArchivedAt: null,
+    nextArchivedAt: null,
+    metadata: { source: 'record_user_bet' },
+    at: ts,
+  });
+
+  rebuildLedgerSummary(userId);
+
+  const row = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
+       FROM bets
+       WHERE id = ? AND telegram_user_id = ?`
+    )
+    .get(betId, userId);
+
+  return mapBetRow(row);
+}
+
+export function getBetHistory(userId, limit = 20, options = {}) {
+  if (!userId) return [];
+  const bets = listUserBets(userId, {
+    includeArchived: Boolean(options.includeArchived),
+    limit,
+  });
+  return bets;
 }
 
 export function getLedgerSummary(userId) {
   if (!userId) return null;
   const db = getDb();
-  const row = db
+  let row = db
     .prepare(
       `SELECT total_staked, total_units, total_bets, wins, losses, pushes, last_updated_at
        FROM ledger_summary WHERE telegram_user_id = ?`
     )
     .get(userId);
-  if (!row) return null;
+
+  if (!row) {
+    return rebuildLedgerSummary(userId);
+  }
+
   return {
     totalStaked: row.total_staked,
     totalUnits: row.total_units,

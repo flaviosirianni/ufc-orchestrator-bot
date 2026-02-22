@@ -262,6 +262,238 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 1);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('mutate_user_bets', {
+        operation: 'archive',
+        fight: 'Anthony Hernandez vs Sean Strickland',
+      }, 'call_mut_1'),
+      responseWithText('Necesito confirmacion antes de archivar esas apuestas.'),
+    ]);
+
+    let previewCalls = 0;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation() {
+          previewCalls += 1;
+          return {
+            ok: true,
+            operation: 'archive',
+            requiresConfirmation: true,
+            candidates: [
+              {
+                id: 101,
+                eventName: 'UFC FN',
+                fight: 'Anthony Hernandez vs Sean Strickland',
+                pick: 'Under 4.5',
+                result: 'pending',
+              },
+            ],
+          };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: 'archive',
+            affectedCount: 1,
+            receipts: [],
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('borra esas apuestas pendientes', {
+      chatId: 'chat-mut-1',
+      userId: 'u-1',
+      originalMessage: 'borra esas apuestas pendientes',
+      resolution: {
+        resolvedMessage: 'borra esas apuestas pendientes',
+      },
+    });
+
+    assert.match(result.reply, /Necesito confirmacion/);
+    assert.equal(previewCalls, 1);
+    assert.equal(applyCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const calls = [];
+    let callIndex = 0;
+    let capturedToken = '';
+    let applyCalls = 0;
+
+    const fakeClient = {
+      calls,
+      responses: {
+        async create(payload) {
+          calls.push(JSON.parse(JSON.stringify(payload)));
+          callIndex += 1;
+
+          if (callIndex === 1) {
+            return responseWithFunctionCall('mutate_user_bets', {
+              operation: 'settle',
+              result: 'loss',
+              fight: 'Anthony Hernandez vs Sean Strickland',
+            }, 'call_mut_preview');
+          }
+
+          if (callIndex === 2) {
+            const output = payload.input?.[0]?.output;
+            capturedToken = JSON.parse(output || '{}').confirmationToken || '';
+            return responseWithText('Perfecto, confirmame y lo aplico.');
+          }
+
+          if (callIndex === 3) {
+            return responseWithFunctionCall('mutate_user_bets', {
+              operation: 'settle',
+              result: 'loss',
+              fight: 'Anthony Hernandez vs Sean Strickland',
+              confirm: true,
+              confirmationToken: capturedToken,
+            }, 'call_mut_apply');
+          }
+
+          return responseWithText('Listo, ya quedo aplicado.');
+        },
+      },
+    };
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation() {
+          return {
+            ok: true,
+            operation: 'settle',
+            requiresConfirmation: true,
+            result: 'loss',
+            candidates: [
+              {
+                id: 300,
+                eventName: 'UFC FN',
+                fight: 'Anthony Hernandez vs Sean Strickland',
+                pick: 'Under 4.5',
+                result: 'pending',
+              },
+            ],
+          };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: 'settle',
+            affectedCount: 1,
+            receipts: [
+              {
+                action: 'settle',
+                betId: 300,
+                newResult: 'loss',
+              },
+            ],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('marcalas como perdidas', {
+      chatId: 'chat-mut-2',
+      userId: 'u-2',
+      originalMessage: 'marcalas como perdidas',
+      resolution: {
+        resolvedMessage: 'marcalas como perdidas',
+      },
+    });
+
+    const result = await wizard.handleMessage('confirmo', {
+      chatId: 'chat-mut-2',
+      userId: 'u-2',
+      originalMessage: 'confirmo',
+      resolution: {
+        resolvedMessage: 'confirmo',
+      },
+    });
+
+    assert.match(result.reply, /Listo, ya quedo aplicado/);
+    assert.ok(capturedToken);
+    assert.equal(applyCalls, 1);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('record_user_bet', {
+        fight: 'Anthony Hernandez vs Sean Strickland',
+        pick: 'Under 4.5',
+        result: 'LOST',
+      }, 'call_legacy_settle'),
+      responseWithText('Necesito confirmacion para cerrar esa apuesta.'),
+    ]);
+
+    let previewCalls = 0;
+    let createCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord() {
+          createCalls += 1;
+          return null;
+        },
+        previewBetMutation() {
+          previewCalls += 1;
+          return {
+            ok: true,
+            operation: 'settle',
+            requiresConfirmation: true,
+            result: 'loss',
+            candidates: [{ id: 44, result: 'pending' }],
+          };
+        },
+        applyBetMutation() {
+          return { ok: true, operation: 'settle', affectedCount: 1, receipts: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('anotala como perdida', {
+      chatId: 'chat-mut-3',
+      userId: 'u-3',
+      originalMessage: 'anotala como perdida',
+      resolution: {
+        resolvedMessage: 'anotala como perdida',
+      },
+    });
+
+    assert.match(result.reply, /Necesito confirmacion/);
+    assert.equal(previewCalls, 1);
+    assert.equal(createCalls, 0);
+  });
+
   for (const test of tests) {
     await test();
   }
