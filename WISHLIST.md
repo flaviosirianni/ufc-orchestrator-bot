@@ -525,3 +525,31 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir politica por defecto de transaccion para operaciones mixtas.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+20. **Automatizar `history:sync` para rellenar la planilla sin ejecucion manual**
+   - **Objetivo:** asegurar que la sheet de Fight History se mantenga actualizada sin depender de que alguien ejecute el comando a mano.
+   - **Problema observado:** hoy existe `npm run history:sync`, pero su ejecucion depende de operacion manual.
+   - **Comportamiento deseado:**
+     - El proceso de relleno de faltantes corre automaticamente en un scheduler.
+     - Si falla, queda logueado y hay visibilidad operativa del fallo.
+   - **Diseno tecnico sugerido:**
+     - Agregar job programado (cron interno o scheduler externo) que ejecute `history:sync` con frecuencia configurable.
+     - Reusar dedupe existente (`history_scraper.log.jsonl` + dedupe por filas/evento) para idempotencia.
+     - Exponer metricas basicas por corrida:
+       - eventos procesados,
+       - filas agregadas,
+       - filas duplicadas salteadas,
+       - ultima corrida exitosa / ultima corrida fallida.
+     - Agregar alerta simple ante fallos consecutivos (ej: log con severidad + notificacion opcional a Telegram admin).
+   - **Criterios de aceptacion:**
+     - El job corre segun frecuencia definida sin intervencion manual.
+     - Corridas exitosas y fallidas quedan auditables.
+     - No se duplican filas por reintentos o corridas solapadas.
+   - **Pruebas de regresion necesarias:**
+     - Corrida automatica exitosa con append real.
+     - Reintento tras fallo temporal sin duplicar datos.
+     - Corridas concurrentes -> bloqueo de solapamiento (single-flight).
+   - **Riesgos y decisiones abiertas:**
+     - Definir si el scheduler vive dentro del bot o en infraestructura externa (cron/worker separado).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.

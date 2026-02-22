@@ -84,8 +84,6 @@ function initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_bets_user_created
       ON bets (telegram_user_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_bets_user_active
-      ON bets (telegram_user_id, archived_at, created_at);
 
     CREATE TABLE IF NOT EXISTS bet_mutations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +215,11 @@ function ensureBetSchema(db) {
   );
   db.exec(
     "UPDATE bets SET result = 'pending' WHERE result IS NULL OR TRIM(result) = ''"
+  );
+
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_bets_user_active
+      ON bets (telegram_user_id, archived_at, created_at)`
   );
 }
 
