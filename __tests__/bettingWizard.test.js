@@ -265,6 +265,37 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
+      responseWithText('El ultimo evento fue UFC 324.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+        getFightHistoryCacheStatus() {
+          return { rowCount: 100 };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('decime cual fue el ultimo evento de la ufc', {
+      chatId: 'chat-3b',
+      originalMessage: 'decime cual fue el ultimo evento de la ufc',
+      resolution: {
+        resolvedMessage: 'decime cual fue el ultimo evento de la ufc',
+      },
+    });
+
+    assert.match(result.reply, /No pude validar en vivo la cartelera/);
+    assert.equal(fakeClient.calls.length, 1);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
       responseWithFunctionCall('mutate_user_bets', {
         operation: 'archive',
         fight: 'Anthony Hernandez vs Sean Strickland',

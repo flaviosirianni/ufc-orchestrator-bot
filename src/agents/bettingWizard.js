@@ -261,7 +261,9 @@ function isCalendarQuestion(message = '') {
       text
     );
   const hasDateOrTimeWords =
-    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana)\b/.test(text) ||
+    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana|ayer|ultimo|ultima|last|reciente|mas reciente|fecha|cuando|when)\b/.test(
+      text
+    ) ||
     /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/.test(
       text
     );

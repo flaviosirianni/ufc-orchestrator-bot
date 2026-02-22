@@ -9,6 +9,10 @@ const MAX_HISTORY_ROWS = 12;
 const DEFAULT_SYNC_INTERVAL_MS = Number(
   process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'
 );
+const DEFAULT_STALENESS_ALERT_DAYS = Math.max(
+  1,
+  Number(process.env.FIGHT_HISTORY_STALENESS_ALERT_DAYS ?? '10')
+);
 const NAME_STOPWORDS = new Set([
   'a',
   'al',
@@ -100,6 +104,89 @@ let syncInFlight = null;
 
 function normalise(value) {
   return value ? String(value).toLowerCase() : '';
+}
+
+function startOfUtcDay(date) {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function parseSheetDate(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() + 1 === month &&
+      date.getUTCDate() === day
+    ) {
+      return date;
+    }
+    return null;
+  }
+
+  const dayFirstMatch = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if (dayFirstMatch) {
+    const day = Number(dayFirstMatch[1]);
+    const month = Number(dayFirstMatch[2]);
+    const rawYear = dayFirstMatch[3];
+    const year = Number(rawYear.length === 2 ? `20${rawYear}` : rawYear);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() + 1 === month &&
+      date.getUTCDate() === day
+    ) {
+      return date;
+    }
+    return null;
+  }
+
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  const date = new Date(parsed);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function buildFreshnessSummary(rows = []) {
+  let latestDate = null;
+
+  for (const row of rows) {
+    const candidate = parseSheetDate(Array.isArray(row) ? row[0] : '');
+    if (!candidate) {
+      continue;
+    }
+    if (!latestDate || candidate.getTime() > latestDate.getTime()) {
+      latestDate = candidate;
+    }
+  }
+
+  if (!latestDate) {
+    return {
+      latestFightDate: null,
+      sheetAgeDays: null,
+      potentialGap: false,
+    };
+  }
+
+  const ageMs = Math.max(0, startOfUtcDay(new Date()) - startOfUtcDay(latestDate));
+  const sheetAgeDays = Math.floor(ageMs / 86400000);
+
+  return {
+    latestFightDate: latestDate.toISOString().slice(0, 10),
+    sheetAgeDays,
+    potentialGap: sheetAgeDays >= DEFAULT_STALENESS_ALERT_DAYS,
+  };
 }
 
 function normaliseWord(word = '') {
@@ -314,6 +401,7 @@ export async function syncFightHistoryCache({
     const rows = await readRangeImpl(sheetId, range);
     const hash = computeRowsHash(rows);
     const previousMeta = getFightHistoryCacheStatus();
+    const freshness = buildFreshnessSummary(rows);
     const updated =
       force ||
       previousMeta?.hash !== hash ||
@@ -338,6 +426,9 @@ export async function syncFightHistoryCache({
       hash,
       lastSyncAt: now,
       lastSyncUpdatedCache: updated,
+      latestFightDate: freshness.latestFightDate,
+      sheetAgeDays: freshness.sheetAgeDays,
+      potentialGap: freshness.potentialGap,
     });
 
     return {
@@ -347,6 +438,7 @@ export async function syncFightHistoryCache({
       rows,
       sheetId,
       range,
+      ...freshness,
     };
   })();
 
@@ -403,8 +495,19 @@ export function startFightHistorySync({
         range,
         readRangeImpl,
       });
+      const freshnessLabel = result.latestFightDate
+        ? `${result.latestFightDate}${
+            Number.isFinite(result.sheetAgeDays)
+              ? ` (${result.sheetAgeDays} day(s) old)`
+              : ''
+          }`
+        : 'unknown';
       console.log(
-        `[fightsScalper] Cache sync ${result.updated ? 'updated' : 'unchanged'} (${result.rowCount} rows)`
+        `[fightsScalper] Cache sync ${
+          result.updated ? 'updated' : 'unchanged'
+        } (${result.rowCount} rows, sheet latest ${freshnessLabel}${
+          result.potentialGap ? ', possible_gap' : ''
+        })`
       );
     } catch (error) {
       console.error('❌ Scheduled fight history sync failed:', error);
@@ -514,10 +617,26 @@ function formatHistoryResult({ fighters, rows }) {
 }
 
 function formatSyncStatus(result) {
-  return [
+  const lines = [
     `✅ Sync de Fight History completado (${result.rowCount} fila(s)).`,
-    `Cache ${result.updated ? 'actualizado' : 'sin cambios'}.`,
-  ].join('\n');
+    `Cache local ${result.updated ? 'actualizado' : 'sin cambios'} contra Google Sheets.`,
+    'Este sync NO scrapea web: solo refleja lo que ya existe en la sheet.',
+  ];
+
+  if (result.latestFightDate) {
+    const ageSuffix = Number.isFinite(result.sheetAgeDays)
+      ? ` (${result.sheetAgeDays} dia(s) atras)`
+      : '';
+    lines.push(`Ultima fecha detectada en sheet: ${result.latestFightDate}${ageSuffix}.`);
+  }
+
+  if (result.potentialGap) {
+    lines.push(
+      '⚠️ Posible hueco de eventos recientes en la sheet. Ejecuta `npm run history:sync` para backfill.'
+    );
+  }
+
+  return lines.join('\n');
 }
 
 export async function handleMessage(message = '', deps = {}) {

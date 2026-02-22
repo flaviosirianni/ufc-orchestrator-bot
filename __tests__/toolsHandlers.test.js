@@ -102,12 +102,21 @@ export async function runToolsHandlersTests() {
       syncFightHistoryCacheImpl: async ({ sheetId, range }) => {
         assert.equal(sheetId, 'sheet-test');
         assert.equal(range, 'Fight History!A:Z');
-        return { rowCount: 128, updated: true };
+        return {
+          rowCount: 128,
+          updated: true,
+          latestFightDate: '2026-02-07',
+          sheetAgeDays: 15,
+          potentialGap: true,
+        };
       },
     });
 
     assert.match(response, /Sync de Fight History completado/);
-    assert.match(response, /Cache actualizado/);
+    assert.match(response, /Cache local actualizado contra Google Sheets/);
+    assert.match(response, /NO scrapea web/);
+    assert.match(response, /Ultima fecha detectada en sheet: 2026-02-07/);
+    assert.match(response, /Posible hueco de eventos recientes/);
   });
 
   tests.push(async () => {

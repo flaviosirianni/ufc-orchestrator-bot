@@ -553,3 +553,30 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si el scheduler vive dentro del bot o en infraestructura externa (cron/worker separado).
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+21. **Reconciliar "ultimo evento UFC" vs cobertura real de la Sheet**
+   - **Objetivo:** evitar respuestas desactualizadas sobre calendario y detectar cuando la sheet esta atrasada respecto a eventos reales.
+   - **Problema observado:**
+     - Consultas tipo "cual fue el ultimo evento de UFC" pueden responder con memoria vieja si no se fuerza verificacion online.
+     - El sync del `fightsScalper` puede verse "ok" aunque solo haya sincronizado cache local con una sheet incompleta.
+   - **Comportamiento deseado:**
+     - Preguntas de recencia/calendario siempre se validan con web search antes de responder.
+     - El estado de sync informa explicitamente la ultima fecha encontrada en la sheet y alerta posible gap reciente.
+     - Debe existir un flujo de reconciliacion que compare "ultimo evento oficial" vs "ultimo evento en sheet".
+   - **Diseno tecnico sugerido:**
+     - En `bettingWizard`: ampliar clasificador de preguntas de calendario para cubrir "ultimo/reciente/fecha/cuando".
+     - En `fightsScalper`: incluir metadata de frescura (latest date + age in days + warning) y aclarar que el sync base no scrapea web.
+     - Agregar job/endpoint de reconciliacion:
+       - trae ultimo evento oficial por web,
+       - compara contra ultima fecha/evento en sheet,
+       - dispara `history:sync` si detecta atraso.
+   - **Criterios de aceptacion:**
+     - "Ultimo evento UFC" nunca sale sin validacion web.
+     - Si la sheet esta atrasada, el sistema lo declara explicitamente y propone/ejecuta backfill.
+     - El operador puede ver rapidamente si hay gap historico sin inspeccion manual.
+   - **Pruebas de regresion necesarias:**
+     - Caso pregunta de "ultimo evento" sin web_search -> fallback seguro.
+     - Caso sync con sheet vieja -> mensaje de posible hueco.
+     - Caso reconciliacion detecta faltantes y dispara relleno.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
