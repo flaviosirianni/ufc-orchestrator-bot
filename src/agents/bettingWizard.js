@@ -145,7 +145,7 @@ const FUNCTION_TOOLS = [
     type: 'function',
     name: 'mutate_user_bets',
     description:
-      'Actualiza apuestas existentes (settle/set_pending/archive) con guardrails. Para acciones destructivas usa confirmacion en dos pasos.',
+      'Actualiza apuestas existentes (settle/set_pending/archive) con guardrails. Solo pide confirmacion cuando la seleccion es ambigua.',
     parameters: {
       type: 'object',
       properties: {
@@ -510,6 +510,43 @@ function parseBetIds(rawValue) {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
+function extractBetIdsFromMessage(message = '') {
+  const raw = String(message || '');
+  if (!raw.trim()) return [];
+
+  const values = [];
+  const patterns = [
+    /\b(?:bet[\s_-]?id|id)\s*#?\s*(\d{1,8})\b/gi,
+    /#(\d{1,8})\b/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match = null;
+    while ((match = pattern.exec(raw)) !== null) {
+      const parsed = Number(match[1]);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        values.push(parsed);
+      }
+    }
+  }
+
+  const groupedListPattern =
+    /\b(?:apuestas?|bets?)\b[^0-9#]{0,20}((?:#?\d{1,8}\s*(?:,|y|e)\s*)+#?\d{1,8})\b/gi;
+  let groupedMatch = null;
+  while ((groupedMatch = groupedListPattern.exec(raw)) !== null) {
+    const chunk = groupedMatch[1] || '';
+    const idsInChunk = chunk.match(/\d{1,8}/g) || [];
+    for (const rawId of idsInChunk) {
+      const parsed = Number(rawId);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        values.push(parsed);
+      }
+    }
+  }
+
+  return Array.from(new Set(values));
+}
+
 function resolvedFightLabel(fight = null) {
   if (!fight?.fighterA || !fight?.fighterB) {
     return '';
@@ -601,6 +638,17 @@ function normalizeTimeZone(timezone = '') {
     return candidate;
   } catch {
     return fallback;
+  }
+}
+
+function isValidTimeZone(timezone = '') {
+  const candidate = String(timezone || '').trim();
+  if (!candidate) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -747,6 +795,109 @@ function isLedgerOperationMessage(message = '') {
   );
 }
 
+function normalizeRiskProfile(rawValue = '') {
+  const normalized = normalizeText(rawValue);
+  if (!normalized) return null;
+  if (/\b(conservador|conservadora|bajo|baja|prudente|low)\b/.test(normalized)) {
+    return 'conservador';
+  }
+  if (/\b(moderado|moderada|medio|media|balanced)\b/.test(normalized)) {
+    return 'moderado';
+  }
+  if (/\b(agresivo|agresiva|alto|alta|high)\b/.test(normalized)) {
+    return 'agresivo';
+  }
+  return null;
+}
+
+function parseProfilePreferenceMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+  const text = normalizeText(raw);
+
+  const updates = {};
+  const warnings = [];
+
+  const bankrollMatch = raw.match(
+    /\b(?:bankroll|banca|bank)\b[^0-9$]{0,20}\$?\s*([0-9][0-9\.,]*)/i
+  );
+  const unitMatch = raw.match(
+    /\b(?:unidad(?:es)?|unit(?: size)?)\b[^0-9$]{0,20}\$?\s*([0-9][0-9\.,]*)/i
+  );
+  const riskMatch = raw.match(
+    /\b(?:riesgo|risk(?: profile)?|perfil(?: de riesgo)?)\b[^a-zA-Z]{0,20}(conservador(?:a)?|moderad[oa]|agresiv[oa]|baj[oa]|medi[oa]|alt[oa])\b/i
+  );
+  const timezoneMatch = raw.match(
+    /\b(?:timezone|tz|zona horaria)\b[^A-Za-z0-9/_+\-]{0,20}([A-Za-z][A-Za-z0-9_+\-]*(?:\/[A-Za-z0-9_+\-]+)+)\b/
+  );
+  const utilizationMatch = raw.match(
+    /\b(?:utilizacion(?: objetivo)?(?: del evento)?|exposicion(?: objetivo)?(?: del evento)?|target(?: event)? utilization)\b[^0-9]{0,20}([0-9]+(?:[.,][0-9]+)?)\s*%?/i
+  );
+
+  if (bankrollMatch) {
+    const parsed = parseDecimalLike(bankrollMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      updates.bankroll = parsed;
+    }
+  }
+
+  if (unitMatch) {
+    const parsed = parseDecimalLike(unitMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      updates.unitSize = parsed;
+    }
+  }
+
+  if (riskMatch) {
+    const normalizedRisk = normalizeRiskProfile(riskMatch[1]);
+    if (normalizedRisk) {
+      updates.riskProfile = normalizedRisk;
+    }
+  }
+
+  if (timezoneMatch) {
+    const timezone = String(timezoneMatch[1] || '').trim();
+    if (isValidTimeZone(timezone)) {
+      updates.timezone = timezone;
+    } else {
+      warnings.push(
+        'No pude validar ese timezone. Usa formato IANA, por ejemplo: America/Argentina/Buenos_Aires.'
+      );
+    }
+  }
+
+  if (utilizationMatch) {
+    const parsed = parseDecimalLike(utilizationMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 100) {
+      updates.targetEventUtilizationPct = parsed;
+    } else {
+      warnings.push('La utilizacion objetivo debe estar entre 0 y 100%.');
+    }
+  }
+
+  const touchedAny =
+    /\b(bankroll|banca|unidad|unit|riesgo|risk|perfil|timezone|tz|zona horaria|utilizacion|exposicion)\b/.test(
+      text
+    );
+  if (!Object.keys(updates).length && !warnings.length && !touchedAny) {
+    return null;
+  }
+
+  return {
+    updates,
+    warnings,
+    touchedAny,
+  };
+}
+
+function isProfileSummaryRequest(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(mi config|mi configuracion|ver config|mostrar config|mostrame mi configuracion|mis ajustes|settings|perfil de usuario)\b/.test(
+    text
+  );
+}
+
 function parseStakePreferenceMessage(message = '') {
   const raw = String(message || '').trim();
   if (!raw) return null;
@@ -773,6 +924,49 @@ function parseStakePreferenceMessage(message = '') {
     minStakeAmount,
     minUnitsPerBet,
   };
+}
+
+function formatAmountWithCurrency(amount, currency = 'ARS') {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) {
+    return 'N/D';
+  }
+  const rounded = Math.round(value);
+  const formatted = new Intl.NumberFormat('es-AR').format(rounded);
+  const symbol = '$';
+  return `${symbol}${formatted} ${String(currency || 'ARS').toUpperCase()}`;
+}
+
+function formatProfileSummary(profile = {}) {
+  const safeProfile = profile || {};
+  const currency = safeProfile.currency || 'ARS';
+  const timezone = safeProfile.timezone || DEFAULT_USER_TIMEZONE;
+  const unitSize = toNumberOrNull(safeProfile.unitSize);
+  const bankroll = toNumberOrNull(safeProfile.bankroll);
+  const targetUtil = toNumberOrNull(safeProfile.targetEventUtilizationPct);
+  const stakeConfig = getStakeCalibrationConfig(safeProfile);
+
+  const lines = [
+    '⚙️ Config actual',
+    `- Bankroll: ${bankroll ? formatAmountWithCurrency(bankroll, currency) : 'No definido'}`,
+    `- Unidad: ${unitSize ? formatAmountWithCurrency(unitSize, currency) : 'No definida'}`,
+    `- Riesgo: ${safeProfile.riskProfile || 'No definido'}`,
+    `- Timezone: ${timezone}`,
+    `- Stake minimo: ${formatUnits(stakeConfig.minUnitsPerBet)}u / ${formatAmountWithCurrency(
+      stakeConfig.minStakeAmount,
+      currency
+    )}`,
+    `- Utilizacion objetivo evento: ${
+      targetUtil ? `${formatUnits(targetUtil)}%` : 'No definida'
+    }`,
+  ];
+
+  lines.push(
+    '',
+    'Si queres cambiar algo: `unidad 600`, `riesgo moderado`, `bankroll 120000`, `timezone America/Argentina/Buenos_Aires`.'
+  );
+
+  return lines.join('\n');
 }
 
 function getStakeCalibrationConfig(userProfile = {}) {
@@ -1187,6 +1381,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
     'Para cambiar estado de apuestas existentes (WON/LOST/PENDING) o borrar/archivar, usa mutate_user_bets, nunca record_user_bet.',
     'Si la referencia de pelea es ambigua (esa/anterior/recien), no ejecutes mutaciones: pedi desambiguacion con bet_id.',
+    'Si el target de mutacion es inequivoco (bet_id explicito o selector unico), ejecuta directo sin pedir confirmacion extra.',
     'Si mutate_user_bets responde requiresConfirmation=true, pedile confirmacion explicita al usuario y luego ejecuta con confirm=true + confirmationToken.',
     'Nunca confirmes una mutacion de ledger sin mostrar receipt (bet_id y nuevo estado).',
     'Si el usuario pide corregir/revertir, usa undo_last_mutation para deshacer la ultima mutacion sensible.',
@@ -1816,14 +2011,33 @@ export function createBettingWizard({
       originalMessage,
     });
 
+    if (isProfileSummaryRequest(originalMessage) && userId) {
+      const latestProfile =
+        userStore?.getUserProfile?.(userId) ||
+        userProfile ||
+        conversationStore?.getSession?.(chatId)?.userProfile ||
+        {};
+      return {
+        reply: formatProfileSummary(latestProfile),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
     const stakePreference = parseStakePreferenceMessage(originalMessage);
-    if (stakePreference && userId && userStore?.updateUserProfile) {
+    const profilePreference = parseProfilePreferenceMessage(originalMessage);
+    if ((stakePreference || profilePreference) && userId && userStore?.updateUserProfile) {
       const updates = {};
-      if (stakePreference.minStakeAmount !== null) {
+      if (stakePreference?.minStakeAmount !== null && stakePreference?.minStakeAmount !== undefined) {
         updates.minStakeAmount = stakePreference.minStakeAmount;
       }
-      if (stakePreference.minUnitsPerBet !== null) {
+      if (stakePreference?.minUnitsPerBet !== null && stakePreference?.minUnitsPerBet !== undefined) {
         updates.minUnitsPerBet = stakePreference.minUnitsPerBet;
+      }
+      if (profilePreference?.updates && Object.keys(profilePreference.updates).length) {
+        Object.assign(updates, profilePreference.updates);
       }
 
       if (Object.keys(updates).length) {
@@ -1831,15 +2045,77 @@ export function createBettingWizard({
         if (conversationStore?.patch) {
           conversationStore.patch(chatId, { userProfile: nextProfile });
         }
-        const lines = [
-          '✅ Perfil de staking actualizado.',
-          `- Piso por apuesta: ${formatUnits(
-            toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
-          )}u / ${formatArsAmount(
-            toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT
-          )}`,
-          'En las próximas recomendaciones voy a respetar ese mínimo.',
-        ];
+        const onlyStakeUpdate =
+          Object.keys(updates).every((key) => ['minStakeAmount', 'minUnitsPerBet'].includes(key)) &&
+          Object.keys(updates).length > 0;
+
+        const currency = nextProfile.currency || 'ARS';
+        const lines = [onlyStakeUpdate ? '✅ Perfil de staking actualizado.' : '✅ Config actualizada.'];
+        if (onlyStakeUpdate) {
+          lines.push(
+            `- Piso por apuesta: ${formatUnits(
+              toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
+            )}u / ${formatAmountWithCurrency(
+              toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT,
+              currency
+            )}`,
+            'En las proximas recomendaciones voy a respetar ese minimo.'
+          );
+        } else {
+          if (updates.bankroll !== undefined) {
+            lines.push(`- Bankroll: ${formatAmountWithCurrency(nextProfile.bankroll, currency)}`);
+          }
+          if (updates.unitSize !== undefined) {
+            lines.push(`- Unidad: ${formatAmountWithCurrency(nextProfile.unitSize, currency)}`);
+          }
+          if (updates.riskProfile !== undefined) {
+            lines.push(`- Riesgo: ${nextProfile.riskProfile || 'No definido'}`);
+          }
+          if (updates.timezone !== undefined) {
+            lines.push(`- Timezone: ${nextProfile.timezone || DEFAULT_USER_TIMEZONE}`);
+          }
+          if (updates.minStakeAmount !== undefined || updates.minUnitsPerBet !== undefined) {
+            lines.push(
+              `- Stake minimo: ${formatUnits(
+                toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
+              )}u / ${formatAmountWithCurrency(
+                toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT,
+                currency
+              )}`
+            );
+          }
+          if (updates.targetEventUtilizationPct !== undefined) {
+            lines.push(
+              `- Utilizacion objetivo evento: ${formatUnits(
+                toNumberOrNull(nextProfile.targetEventUtilizationPct) || 0
+              )}%`
+            );
+          }
+        }
+
+        const warnings = profilePreference?.warnings || [];
+        if (warnings.length) {
+          lines.push('', ...warnings.map((warning) => `⚠️ ${warning}`));
+        }
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (profilePreference?.warnings?.length) {
+        const lines = ['No pude aplicar cambios en Config por estos motivos:'];
+        for (const warning of profilePreference.warnings) {
+          lines.push(`- ${warning}`);
+        }
+        lines.push(
+          '',
+          'Ejemplos validos: `unidad 600`, `riesgo moderado`, `bankroll 120000`, `timezone America/Argentina/Buenos_Aires`.'
+        );
         return {
           reply: lines.join('\n'),
           metadata: {
@@ -2107,7 +2383,10 @@ export function createBettingWizard({
 
       const operation = String(rawArgs.operation || '').trim().toLowerCase();
       const normalizedResult = normalizeBetResult(rawArgs.result);
-      const betIds = parseBetIds(rawArgs.betIds);
+      const explicitBetIds = parseBetIds(rawArgs.betIds);
+      const inferredBetIds =
+        explicitBetIds.length > 0 ? [] : extractBetIdsFromMessage(originalMessage);
+      const betIds = explicitBetIds.length ? explicitBetIds : inferredBetIds;
       const inferredFight =
         String(rawArgs.fight || '').trim() ||
         resolvedFightLabel(runtimeState.resolvedFight || resolution?.resolvedFight || null) ||

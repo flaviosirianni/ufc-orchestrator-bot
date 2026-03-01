@@ -644,7 +644,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir fuente oficial primaria y secundaria para settlement automatico.
      - Definir SLA de polling y costo operativo (frecuencia vs consumo).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (MVP implementado: monitor periodico + auto-cierre por match de historial + notificacion Telegram; falta hardening de fuentes/confianza).
 
 24. **Botones de acciones guiadas (sin perder chat libre) para reducir prompts ambiguos**
    - **Objetivo de negocio/UX:** bajar errores operativos por lenguaje ambiguo y acelerar tareas recurrentes con flujos guiados.
@@ -686,7 +686,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si el menu se muestra siempre o solo en respuestas clave.
      - Definir copy final de instrucciones por boton para evitar ruido excesivo.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (botones base + instrucciones guiadas implementadas; falta cobertura completa de flujos y pruebas de callback expirado/doble tap).
 
 25. **Explicabilidad obligatoria: pedirle al bot que fundamente su eleccion de apuesta**
    - **Objetivo de negocio/UX:** aumentar confianza del usuario y evitar ejecucion ciega de picks mostrando razonamiento auditable en cada recomendacion.
@@ -795,7 +795,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir politica final para mutaciones masivas (siempre preview o no) cuando el usuario lista multiples IDs explicitos.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (mutaciones con target explicito ya no piden doble confirmacion; falta definir politica final para batch multi-ID).
 
 28. **Menu jerarquico en Telegram (submenus de Config y Apuestas)**
    - **Objetivo de negocio/UX:** mejorar navegacion y descubribilidad de funciones sin depender de texto libre.
@@ -825,4 +825,4 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir si conviene `editMessageText` (chat mas limpio) vs mensajes nuevos (trazabilidad completa).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (menu principal + submenus Apuestas/Config y persistencia de scope por chat implementados; falta evaluar `editMessageText` e idempotencia avanzada de taps).

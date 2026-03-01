@@ -802,6 +802,13 @@ function buildMutationPreview(userId, payload = {}) {
       ? (explicitStatus || 'pending')
       : explicitStatus;
 
+  const explicitIds = Array.isArray(payload.betIds)
+    ? payload.betIds
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+  const explicitIdsSet = new Set(explicitIds);
+
   const candidates = listUserBets(userId, {
     includeArchived: false,
     betIds: payload.betIds,
@@ -821,11 +828,25 @@ function buildMutationPreview(userId, payload = {}) {
     };
   }
 
-  const hasExplicitIds =
-    Array.isArray(payload.betIds) &&
-    payload.betIds.some((value) => Number.isInteger(Number(value)));
-  const requiresConfirmation =
-    operation === 'archive' || candidates.length > 1 || !hasExplicitIds;
+  const hasExplicitIds = explicitIdsSet.size > 0;
+  if (hasExplicitIds) {
+    const matched = new Set(
+      candidates
+        .map((item) => Number(item?.id))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+    const missingIds = explicitIds.filter((id) => !matched.has(id));
+    if (missingIds.length) {
+      return {
+        ok: false,
+        error: 'explicit_ids_not_found',
+        missingIds,
+        operation,
+      };
+    }
+  }
+
+  const requiresConfirmation = !hasExplicitIds && candidates.length > 1;
 
   return {
     ok: true,

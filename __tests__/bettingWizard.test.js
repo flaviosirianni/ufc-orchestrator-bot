@@ -1087,6 +1087,267 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          operation: 'archive',
+        },
+        'call-archive-direct'
+      ),
+      responseWithText('Hecho, archivada sin confirmación extra.'),
+    ]);
+
+    let previewPayload = null;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation(_userId, payload = {}) {
+          previewPayload = payload;
+          return {
+            ok: true,
+            operation: 'archive',
+            requiresConfirmation: false,
+            candidates: [{ id: 35, result: 'pending' }],
+          };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: 'archive',
+            affectedCount: 1,
+            receipts: [{ betId: 35, previousResult: 'pending', newResult: 'pending' }],
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('borra bet_id 35', {
+      chatId: 'chat-archive-direct-1',
+      userId: 'u-archive-direct-1',
+      originalMessage: 'borra bet_id 35',
+      resolution: {
+        resolvedMessage: 'borra bet_id 35',
+      },
+    });
+
+    assert.equal(Array.isArray(previewPayload?.betIds), true);
+    assert.deepEqual(previewPayload.betIds, [35]);
+    assert.equal(applyCalls, 1);
+    assert.match(result.reply, /sin confirmación extra|sin confirmacion extra/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          operation: 'settle',
+          result: 'LOST',
+        },
+        'call-settle-inferred-list'
+      ),
+      responseWithText('Listo, cierre aplicado.'),
+    ]);
+
+    let previewPayload = null;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation(_userId, payload = {}) {
+          previewPayload = payload;
+          return {
+            ok: true,
+            operation: 'settle',
+            result: 'loss',
+            requiresConfirmation: false,
+            candidates: [
+              { id: 3, result: 'pending' },
+              { id: 4, result: 'pending' },
+              { id: 5, result: 'pending' },
+            ],
+          };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: 'settle',
+            affectedCount: 3,
+            receipts: [
+              { betId: 3, previousResult: 'pending', newResult: 'loss' },
+              { betId: 4, previousResult: 'pending', newResult: 'loss' },
+              { betId: 5, previousResult: 'pending', newResult: 'loss' },
+            ],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('cerra las apuestas 3, 4 y 5 como perdidas', {
+      chatId: 'chat-settle-list-1',
+      userId: 'u-settle-list-1',
+      originalMessage: 'cerra las apuestas 3, 4 y 5 como perdidas',
+      resolution: {
+        resolvedMessage: 'cerra las apuestas 3, 4 y 5 como perdidas',
+      },
+    });
+
+    assert.deepEqual(previewPayload?.betIds, [3, 4, 5]);
+    assert.equal(applyCalls, 1);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    let receivedUpdates = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        updateUserProfile(_userId, updates) {
+          receivedUpdates = updates;
+          return {
+            currency: 'ARS',
+            minStakeAmount: 3000,
+            minUnitsPerBet: 4,
+            ...updates,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'unidad 600, riesgo moderado, bankroll 120000, timezone America/Argentina/Buenos_Aires, utilizacion objetivo 35%',
+      {
+        chatId: 'chat-config-update-1',
+        userId: 'u-config-update-1',
+        originalMessage:
+          'unidad 600, riesgo moderado, bankroll 120000, timezone America/Argentina/Buenos_Aires, utilizacion objetivo 35%',
+        resolution: {
+          resolvedMessage:
+            'unidad 600, riesgo moderado, bankroll 120000, timezone America/Argentina/Buenos_Aires, utilizacion objetivo 35%',
+        },
+      }
+    );
+
+    assert.deepEqual(receivedUpdates, {
+      bankroll: 120000,
+      unitSize: 600,
+      riskProfile: 'moderado',
+      timezone: 'America/Argentina/Buenos_Aires',
+      targetEventUtilizationPct: 35,
+    });
+    assert.match(result.reply, /Config actualizada/i);
+    assert.match(result.reply, /Bankroll/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            bankroll: 120000,
+            unitSize: 600,
+            riskProfile: 'moderado',
+            currency: 'ARS',
+            timezone: 'America/Argentina/Buenos_Aires',
+            minStakeAmount: 3000,
+            minUnitsPerBet: 4,
+            targetEventUtilizationPct: 35,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame mi configuracion actual', {
+      chatId: 'chat-config-view-1',
+      userId: 'u-config-view-1',
+      originalMessage: 'mostrame mi configuracion actual',
+      resolution: {
+        resolvedMessage: 'mostrame mi configuracion actual',
+      },
+    });
+
+    assert.match(result.reply, /Config actual/);
+    assert.match(result.reply, /Stake minimo/);
+    assert.match(result.reply, /Timezone/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    let updateCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        updateUserProfile() {
+          updateCalls += 1;
+          return {};
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('timezone Marte/Phobos', {
+      chatId: 'chat-config-tz-invalid-1',
+      userId: 'u-config-tz-invalid-1',
+      originalMessage: 'timezone Marte/Phobos',
+      resolution: {
+        resolvedMessage: 'timezone Marte/Phobos',
+      },
+    });
+
+    assert.match(result.reply, /No pude aplicar cambios en Config/i);
+    assert.match(result.reply, /timezone/i);
+    assert.equal(updateCalls, 0);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }
