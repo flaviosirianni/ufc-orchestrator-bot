@@ -1007,6 +1007,86 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText(
+        'Pick principal\n- Stake: **1.0u** (=$400 ARS)\n- Cuota: @2.90'
+      ),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            unitSize: 400,
+            minStakeAmount: 2000,
+            minUnitsPerBet: 2.5,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick con stake', {
+      chatId: 'chat-stake-cal-1',
+      userId: 'u-stake-cal-1',
+      originalMessage: 'dame un pick con stake',
+      resolution: {
+        resolvedMessage: 'dame un pick con stake',
+      },
+    });
+
+    assert.match(result.reply, /5u/);
+    assert.match(result.reply, /\$2\.000 ARS/);
+    assert.match(result.reply, /Nota de staking/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+    let receivedUpdates = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        updateUserProfile(_userId, updates) {
+          receivedUpdates = updates;
+          return {
+            unitSize: 400,
+            minStakeAmount: updates.minStakeAmount,
+            minUnitsPerBet: updates.minUnitsPerBet,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mi stake minimo es $3000 y minimo 4u por pick', {
+      chatId: 'chat-stake-pref-1',
+      userId: 'u-stake-pref-1',
+      originalMessage: 'mi stake minimo es $3000 y minimo 4u por pick',
+      resolution: {
+        resolvedMessage: 'mi stake minimo es $3000 y minimo 4u por pick',
+      },
+    });
+
+    assert.deepEqual(receivedUpdates, { minStakeAmount: 3000, minUnitsPerBet: 4 });
+    assert.match(result.reply, /Perfil de staking actualizado/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }

@@ -63,6 +63,9 @@ function initSchema(db) {
       risk_profile TEXT,
       currency TEXT,
       timezone TEXT,
+      min_stake_amount REAL,
+      min_units_per_bet REAL,
+      target_event_utilization_pct REAL,
       notes TEXT,
       updated_at TEXT
     );
@@ -249,6 +252,15 @@ function ensureUserProfileSchema(db) {
   if (!names.has('timezone')) {
     db.exec('ALTER TABLE user_profiles ADD COLUMN timezone TEXT');
   }
+  if (!names.has('min_stake_amount')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN min_stake_amount REAL');
+  }
+  if (!names.has('min_units_per_bet')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN min_units_per_bet REAL');
+  }
+  if (!names.has('target_event_utilization_pct')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN target_event_utilization_pct REAL');
+  }
 }
 
 export function getDb() {
@@ -398,12 +410,19 @@ export function getUserProfile(userId) {
       riskProfile: null,
       currency: null,
       notes: '',
+      timezone: null,
+      minStakeAmount: null,
+      minUnitsPerBet: null,
+      targetEventUtilizationPct: null,
     };
   }
   const db = getDb();
   const row = db
     .prepare(
-      'SELECT bankroll, unit_size, risk_profile, currency, timezone, notes FROM user_profiles WHERE telegram_user_id = ?'
+      `SELECT bankroll, unit_size, risk_profile, currency, timezone,
+              min_stake_amount, min_units_per_bet, target_event_utilization_pct, notes
+       FROM user_profiles
+       WHERE telegram_user_id = ?`
     )
     .get(userId);
   return {
@@ -412,6 +431,9 @@ export function getUserProfile(userId) {
     riskProfile: row?.risk_profile ?? null,
     currency: row?.currency ?? null,
     timezone: row?.timezone ?? null,
+    minStakeAmount: row?.min_stake_amount ?? null,
+    minUnitsPerBet: row?.min_units_per_bet ?? null,
+    targetEventUtilizationPct: row?.target_event_utilization_pct ?? null,
     notes: row?.notes ?? '',
   };
 }
@@ -426,18 +448,28 @@ export function updateUserProfile(userId, updates = {}) {
     riskProfile: updates.riskProfile ?? current.riskProfile,
     currency: updates.currency ?? current.currency,
     timezone: updates.timezone ?? current.timezone,
+    minStakeAmount: updates.minStakeAmount ?? current.minStakeAmount,
+    minUnitsPerBet: updates.minUnitsPerBet ?? current.minUnitsPerBet,
+    targetEventUtilizationPct:
+      updates.targetEventUtilizationPct ?? current.targetEventUtilizationPct,
     notes: updates.notes ?? current.notes,
   };
 
   db.prepare(
-    `INSERT INTO user_profiles (telegram_user_id, bankroll, unit_size, risk_profile, currency, timezone, notes, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO user_profiles (
+      telegram_user_id, bankroll, unit_size, risk_profile, currency, timezone,
+      min_stake_amount, min_units_per_bet, target_event_utilization_pct, notes, updated_at
+    )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        bankroll = excluded.bankroll,
        unit_size = excluded.unit_size,
        risk_profile = excluded.risk_profile,
        currency = excluded.currency,
        timezone = excluded.timezone,
+       min_stake_amount = excluded.min_stake_amount,
+       min_units_per_bet = excluded.min_units_per_bet,
+       target_event_utilization_pct = excluded.target_event_utilization_pct,
        notes = excluded.notes,
        updated_at = excluded.updated_at`
   ).run(
@@ -447,6 +479,9 @@ export function updateUserProfile(userId, updates = {}) {
     next.riskProfile,
     next.currency,
     next.timezone,
+    next.minStakeAmount,
+    next.minUnitsPerBet,
+    next.targetEventUtilizationPct,
     next.notes,
     nowIso()
   );
@@ -520,6 +555,23 @@ function mapBetRow(row) {
     updatedAt: row.updated_at || row.created_at,
     settledAt: row.settled_at || null,
     archivedAt: row.archived_at || null,
+  };
+}
+
+function mapPendingBetForAuto(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    telegramUserId: row.telegram_user_id ? String(row.telegram_user_id) : null,
+    eventName: row.event_name || null,
+    fight: row.fight || null,
+    pick: row.pick || null,
+    odds: row.odds ?? null,
+    stake: row.stake ?? null,
+    units: row.units ?? null,
+    result: normalizeResult(row.result) || 'pending',
+    recordedAt: row.created_at || null,
+    updatedAt: row.updated_at || row.created_at || null,
   };
 }
 
@@ -691,6 +743,41 @@ export function listUserBets(userId, options = {}) {
   const filtered = filterBetRows(rows, options);
   const limit = Math.max(1, Number(options.limit) || 50);
   return filtered.slice(0, limit).map(mapBetRow);
+}
+
+export function listPendingBetsForAutoSettlement({ limit = 300 } = {}) {
+  const db = getDb();
+  const max = Math.max(1, Number(limit) || 300);
+  const rows = db
+    .prepare(
+      `SELECT id, telegram_user_id, event_name, fight, pick, odds, stake, units, result, created_at, updated_at
+       FROM bets
+       WHERE archived_at IS NULL
+         AND lower(coalesce(result, 'pending')) IN ('pending', 'open')
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(max);
+
+  return rows.map(mapPendingBetForAuto).filter(Boolean);
+}
+
+export function getLatestChatIdForUser(userId) {
+  if (!userId) return null;
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT chat_id
+       FROM sessions
+       WHERE telegram_user_id = ?
+         AND chat_id IS NOT NULL
+         AND trim(chat_id) <> ''
+       ORDER BY last_activity_at DESC
+       LIMIT 1`
+    )
+    .get(String(userId));
+
+  return row?.chat_id ? String(row.chat_id) : null;
 }
 
 function buildMutationPreview(userId, payload = {}) {

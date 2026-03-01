@@ -37,6 +37,9 @@ function createSession(chatId, ttlMs) {
       riskProfile: null,
       currency: null,
       timezone: null,
+      minStakeAmount: null,
+      minUnitsPerBet: null,
+      targetEventUtilizationPct: null,
       notes: '',
     },
     flowState: {

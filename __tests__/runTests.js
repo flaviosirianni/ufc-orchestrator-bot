@@ -5,6 +5,7 @@ import { runConversationStoreTests } from './conversationStore.test.js';
 import { runBettingWizardTests } from './bettingWizard.test.js';
 import { runHistoryScraperTests } from './historyScraper.test.js';
 import { runMessageFormatterTests } from './messageFormatter.test.js';
+import { runAutoSettlementTests } from './autoSettlement.test.js';
 
 async function main() {
   await runRouterChainTests();
@@ -12,6 +13,7 @@ async function main() {
   await runToolsHandlersTests();
   await runWebIntelToolTests();
   await runHistoryScraperTests();
+  await runAutoSettlementTests();
   await runBettingWizardTests();
   await runMessageFormatterTests();
   console.log('All test suites passed.');

@@ -32,6 +32,8 @@ const CREDIT_AUDIO_WEEKLY_FREE_MINUTES = Number(
 );
 const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?? '0.2');
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
+const STAKE_MIN_AMOUNT_DEFAULT = Number(process.env.STAKE_MIN_AMOUNT_DEFAULT ?? '2000');
+const STAKE_MIN_UNITS_DEFAULT = Number(process.env.STAKE_MIN_UNITS_DEFAULT ?? '2.5');
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -87,6 +89,9 @@ const FUNCTION_TOOLS = [
         riskProfile: { type: 'string' },
         currency: { type: 'string' },
         timezone: { type: 'string' },
+        minStakeAmount: { type: 'number' },
+        minUnitsPerBet: { type: 'number' },
+        targetEventUtilizationPct: { type: 'number' },
         notes: { type: 'string' },
       },
       additionalProperties: false,
@@ -415,6 +420,31 @@ function toNumberOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseDecimalLike(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/\s+/g, '').replace(/\.(?=\d{3}(?:\D|$))/g, '').replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatArsAmount(amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) return '$0 ARS';
+  const rounded = Math.round(value);
+  const formatted = new Intl.NumberFormat('es-AR').format(rounded);
+  return `$${formatted} ARS`;
+}
+
+function formatUnits(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '0';
+  if (Math.abs(num - Math.round(num)) < 1e-9) {
+    return String(Math.round(num));
+  }
+  return num.toFixed(2).replace(/\.?0+$/, '');
+}
+
 function truncateText(value = '', maxChars = 900) {
   const text = String(value || '').trim();
   if (text.length <= maxChars) {
@@ -717,6 +747,161 @@ function isLedgerOperationMessage(message = '') {
   );
 }
 
+function parseStakePreferenceMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+  const text = normalizeText(raw);
+  const hasStakePreferenceIntent =
+    /\b(stake minimo|minimo por apuesta|apuesta minima|minimo de stake|minimo por pick|minimo en u|minimo unidades|minimo de unidades)\b/.test(
+      text
+    ) || /\b(mi stake minimo|mi minimo)\b/.test(text);
+  if (!hasStakePreferenceIntent) {
+    return null;
+  }
+
+  const moneyMatch = raw.match(/\$\s*([0-9][0-9\.\,]*)/);
+  const unitsMatch = raw.match(/([0-9]+(?:[.,][0-9]+)?)\s*u(?:nidades?)?\b/i);
+
+  const minStakeAmount = moneyMatch ? parseDecimalLike(moneyMatch[1]) : null;
+  const minUnitsPerBet = unitsMatch ? parseDecimalLike(unitsMatch[1]) : null;
+
+  if (minStakeAmount === null && minUnitsPerBet === null) {
+    return null;
+  }
+
+  return {
+    minStakeAmount,
+    minUnitsPerBet,
+  };
+}
+
+function getStakeCalibrationConfig(userProfile = {}) {
+  const minStakeAmount = toNumberOrNull(userProfile?.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT;
+  const minUnitsPerBet = toNumberOrNull(userProfile?.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT;
+  const unitSize = toNumberOrNull(userProfile?.unitSize);
+
+  let floorAmount = minStakeAmount;
+  let floorUnits = minUnitsPerBet;
+  if (unitSize && unitSize > 0) {
+    floorAmount = Math.max(minStakeAmount, minUnitsPerBet * unitSize);
+    floorUnits = Math.max(minUnitsPerBet, minStakeAmount / unitSize);
+  }
+
+  return {
+    unitSize,
+    minStakeAmount,
+    minUnitsPerBet,
+    floorAmount,
+    floorUnits,
+  };
+}
+
+function calibrateStakeLine(line = '', config = {}) {
+  const text = String(line || '');
+  if (!/stake/i.test(text)) {
+    return { line: text, changed: false };
+  }
+
+  const { floorAmount, floorUnits, unitSize } = config;
+  if (!Number.isFinite(floorAmount) && !Number.isFinite(floorUnits)) {
+    return { line: text, changed: false };
+  }
+
+  const unitsMatch = text.match(/([0-9]+(?:[.,][0-9]+)?)\s*u\b/i);
+  const amountMatch = text.match(/\$\s*([0-9][0-9\.\,]*)/);
+
+  const parsedUnits = unitsMatch ? parseDecimalLike(unitsMatch[1]) : null;
+  const parsedAmount = amountMatch ? parseDecimalLike(amountMatch[1]) : null;
+
+  let inferredUnits = parsedUnits;
+  let inferredAmount = parsedAmount;
+
+  if (inferredUnits === null && inferredAmount !== null && unitSize) {
+    inferredUnits = inferredAmount / unitSize;
+  }
+  if (inferredAmount === null && inferredUnits !== null && unitSize) {
+    inferredAmount = inferredUnits * unitSize;
+  }
+
+  if (inferredUnits === null && inferredAmount === null) {
+    return { line: text, changed: false };
+  }
+
+  let targetUnits = inferredUnits ?? floorUnits;
+  let targetAmount = inferredAmount ?? floorAmount;
+
+  if (Number.isFinite(floorUnits)) {
+    targetUnits = Math.max(targetUnits ?? floorUnits, floorUnits);
+  }
+  if (Number.isFinite(floorAmount)) {
+    targetAmount = Math.max(targetAmount ?? floorAmount, floorAmount);
+  }
+
+  if (unitSize) {
+    targetAmount = Math.max(targetAmount || 0, targetUnits * unitSize);
+    targetUnits = Math.max(targetUnits || 0, targetAmount / unitSize);
+  }
+
+  const needsAdjustByUnits =
+    inferredUnits !== null && Number.isFinite(floorUnits) && inferredUnits + 1e-9 < floorUnits;
+  const needsAdjustByAmount =
+    inferredAmount !== null && Number.isFinite(floorAmount) && inferredAmount + 1e-9 < floorAmount;
+  const needsAdjust = needsAdjustByUnits || needsAdjustByAmount;
+
+  if (!needsAdjust) {
+    return { line: text, changed: false };
+  }
+
+  let updated = text;
+  if (unitsMatch) {
+    const formattedUnits = `${formatUnits(targetUnits)}u`;
+    updated = updated.replace(unitsMatch[0], formattedUnits);
+  } else if (Number.isFinite(targetUnits)) {
+    updated = `${updated} (${formatUnits(targetUnits)}u)`;
+  }
+
+  if (amountMatch) {
+    updated = updated.replace(amountMatch[0], formatArsAmount(targetAmount));
+  } else if (Number.isFinite(targetAmount)) {
+    updated = `${updated} (=${formatArsAmount(targetAmount)})`;
+  }
+
+  return { line: updated, changed: true };
+}
+
+function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+
+  const userMessage = String(originalMessage || '');
+  const looksLikeDecisionTurn =
+    hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || /\b(stake|cuota|pick)\b/i.test(userMessage);
+  if (!looksLikeDecisionTurn || isLedgerOperationMessage(userMessage)) {
+    return text;
+  }
+
+  const config = getStakeCalibrationConfig(userProfile || {});
+  const lines = text.split('\n');
+  let changed = false;
+  const updatedLines = lines.map((line) => {
+    const next = calibrateStakeLine(line, config);
+    if (next.changed) changed = true;
+    return next.line;
+  });
+
+  if (!changed) {
+    return text;
+  }
+
+  updatedLines.push(
+    '',
+    `Nota de staking: ajusté el stake al piso configurado (${formatUnits(
+      config.minUnitsPerBet
+    )}u / ${formatArsAmount(config.minStakeAmount)}).`
+  );
+  return updatedLines.join('\n');
+}
+
 function enforceRationaleSection(reply = '', originalMessage = '') {
   const text = String(reply || '').trim();
   const userMessage = String(originalMessage || '');
@@ -899,6 +1084,21 @@ function summariseProfile(profile = {}) {
     chunks.push(`timezone=${profile.timezone}`);
   }
 
+  if (profile.minStakeAmount !== null && profile.minStakeAmount !== undefined) {
+    chunks.push(`minStakeAmount=${profile.minStakeAmount}`);
+  }
+
+  if (profile.minUnitsPerBet !== null && profile.minUnitsPerBet !== undefined) {
+    chunks.push(`minUnitsPerBet=${profile.minUnitsPerBet}`);
+  }
+
+  if (
+    profile.targetEventUtilizationPct !== null &&
+    profile.targetEventUtilizationPct !== undefined
+  ) {
+    chunks.push(`targetEventUtilizationPct=${profile.targetEventUtilizationPct}`);
+  }
+
   if (profile.notes) {
     chunks.push(`notes=${truncateText(profile.notes, 180)}`);
   }
@@ -993,6 +1193,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
+    'Cuando sugieras stake, respeta min_stake_amount y min_units_per_bet del perfil; si el edge no justifica ese piso, propone NO_BET en lugar de stake simbolico.',
     'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
     'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
     'Toda recomendacion debe incluir "Fundamento de la eleccion": tesis breve, riesgos y regla de entrada (cuota minima o condicion de no-bet).',
@@ -1615,6 +1816,40 @@ export function createBettingWizard({
       originalMessage,
     });
 
+    const stakePreference = parseStakePreferenceMessage(originalMessage);
+    if (stakePreference && userId && userStore?.updateUserProfile) {
+      const updates = {};
+      if (stakePreference.minStakeAmount !== null) {
+        updates.minStakeAmount = stakePreference.minStakeAmount;
+      }
+      if (stakePreference.minUnitsPerBet !== null) {
+        updates.minUnitsPerBet = stakePreference.minUnitsPerBet;
+      }
+
+      if (Object.keys(updates).length) {
+        const nextProfile = userStore.updateUserProfile(userId, updates) || {};
+        if (conversationStore?.patch) {
+          conversationStore.patch(chatId, { userProfile: nextProfile });
+        }
+        const lines = [
+          '✅ Perfil de staking actualizado.',
+          `- Piso por apuesta: ${formatUnits(
+            toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
+          )}u / ${formatArsAmount(
+            toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT
+          )}`,
+          'En las próximas recomendaciones voy a respetar ese mínimo.',
+        ];
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+    }
+
     const mutationScope = mutationScopeKey({ chatId, userId });
     const confirmationIntent = parseConfirmationIntent(originalMessage);
 
@@ -2140,6 +2375,9 @@ export function createBettingWizard({
             riskProfile: args.riskProfile ? String(args.riskProfile).trim() : null,
             currency: args.currency ? String(args.currency).trim() : null,
             timezone: args.timezone ? normalizeTimeZone(String(args.timezone)) : null,
+            minStakeAmount: toNumberOrNull(args.minStakeAmount),
+            minUnitsPerBet: toNumberOrNull(args.minUnitsPerBet),
+            targetEventUtilizationPct: toNumberOrNull(args.targetEventUtilizationPct),
             notes: args.notes ? truncateText(String(args.notes), 400) : '',
           };
 
@@ -2568,8 +2806,13 @@ export function createBettingWizard({
         ? formatCitationsFooter(result.citations)
         : '';
       const replyWithRationale = enforceRationaleSection(reply, originalMessage);
-      const replyWithTemporalGuard = enforceCalendarNoEventContext(
+      const replyWithStakeCalibration = enforceStakeCalibration(
         replyWithRationale,
+        originalMessage,
+        userProfile || {}
+      );
+      const replyWithTemporalGuard = enforceCalendarNoEventContext(
+        replyWithStakeCalibration,
         originalMessage,
         temporalContext
       );

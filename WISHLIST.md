@@ -769,3 +769,60 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir jerarquia final entre `min_stake_amount` y `min_units_per_bet` cuando entran en conflicto.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+27. **Reducir confirmaciones de mutaciones de ledger cuando el target es inequivoco**
+   - **Objetivo de negocio/UX:** eliminar friccion innecesaria en operaciones de DB cuando la intencion del usuario es clara y segura.
+   - **Problema observado (ejemplo real):**
+     - El bot pide confirmacion explicita para archivar/eliminar apuestas en ledger incluso cuando el usuario ya indico `bet_id` puntual.
+     - Esto agrega pasos y entorpece flujo rapido de operacion en vivo.
+   - **Comportamiento deseado para el usuario final:**
+     - Si el target es inequivoco (ej: `bet_id` unico), ejecutar la mutacion directamente sin doble confirmacion.
+     - Solo pedir confirmacion o aclaracion cuando haya ambiguedad real (2+ candidatos o referencia vaga).
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `MutationConfidenceGate` antes de aplicar cambios:
+       - `high_confidence` (bet_id unico / selector exacto) -> ejecutar.
+       - `low_confidence` (referencias tipo "esa/anterior/las otras") -> pedir desambiguacion.
+     - Ajustar `previewBetMutation` / `applyBetMutation` para no forzar `requiresConfirmation` en operaciones con selector unico.
+     - Mantener recibo obligatorio post-mutacion (`bet_id`, estado previo, estado nuevo, timestamp).
+   - **Criterios de aceptacion verificables:**
+     - Mutaciones con `bet_id` unico se ejecutan en un solo paso.
+     - Mutaciones ambiguas siguen bloqueadas hasta aclaracion.
+     - Nunca se aplica cambio sobre una apuesta distinta a la pedida.
+   - **Pruebas de regresion necesarias:**
+     - `archivar bet_id 35` -> aplica sin confirmacion extra.
+     - `borra la anterior` -> bloquea y pide aclaracion.
+     - `cerra 33 como win` -> aplica directo y devuelve receipt.
+   - **Riesgos y decisiones abiertas:**
+     - Definir politica final para mutaciones masivas (siempre preview o no) cuando el usuario lista multiples IDs explicitos.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+28. **Menu jerarquico en Telegram (submenus de Config y Apuestas)**
+   - **Objetivo de negocio/UX:** mejorar navegacion y descubribilidad de funciones sin depender de texto libre.
+   - **Problema observado:**
+     - El menu actual de botones es plano; faltan rutas rapidas para configuraciones y acciones de apuestas agrupadas.
+   - **Comportamiento deseado para el usuario final:**
+     - Tener menu principal con accesos a submenus:
+       - `Apuestas` -> abrir / cerrar / pendientes / historial.
+       - `Config` -> stake minimo / unidad / riesgo / timezone / creditos.
+     - Poder volver atras (`⬅ Volver`) sin perder contexto.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `InlineMenuRouter` por `callback_data` con convencion `menu:<scope>:<action>`.
+     - `MenuStateStore` por chat para recordar submenu activo y ultima accion.
+     - Renderizar menus por edicion de mensaje (`editMessageText`) o envio nuevo segun caso.
+     - Guardrails:
+       - validar callbacks expirados.
+       - idempotencia en taps repetidos.
+       - fallback a texto si callback falla.
+   - **Criterios de aceptacion verificables:**
+     - Usuario puede navegar principal -> submenu -> accion -> volver en <= 3 taps.
+     - Acciones frecuentes de ledger/config se disparan desde submenu sin prompts complejos.
+     - No se duplican ejecuciones por doble tap de botones.
+   - **Pruebas de regresion necesarias:**
+     - Navegacion completa `Main -> Config -> Stake minimo -> Volver`.
+     - Navegacion `Main -> Apuestas -> Pendientes`.
+     - Callback invalido/expirado -> fallback controlado.
+   - **Riesgos y decisiones abiertas:**
+     - Definir si conviene `editMessageText` (chat mas limpio) vs mensajes nuevos (trazabilidad completa).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.

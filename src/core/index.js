@@ -8,6 +8,7 @@ import * as webIntel from '../tools/webIntelTool.js';
 import { createBettingWizard } from '../agents/bettingWizard.js';
 import { createConversationStore } from './conversationStore.js';
 import { createSessionLogger } from './sessionLogger.js';
+import { startAutoSettlementMonitor } from './autoSettlement.js';
 import {
   getUserProfile,
   updateUserProfile,
@@ -28,6 +29,8 @@ import {
   getUsageCounters,
   getFightHistoryCacheSnapshot,
   upsertFightHistoryCacheSnapshot,
+  listPendingBetsForAutoSettlement,
+  getLatestChatIdForUser,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -308,7 +311,19 @@ function bootstrap() {
     sessionLogger,
   });
 
-  startTelegramBot(router);
+  const telegram = startTelegramBot(router);
+
+  startAutoSettlementMonitor({
+    intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+    getFightHistoryCacheSnapshot,
+    listPendingBetsForAutoSettlement,
+    applyBetMutation,
+    getLatestChatIdForUser,
+    notify: async ({ chatId, text }) => {
+      if (!telegram?.sendSystemMessage) return;
+      await telegram.sendSystemMessage({ chatId, text });
+    },
+  });
 
   const port = Number(process.env.PORT || 3000);
   createHealthServer(port, { addCredits, creditFromMercadoPagoPayment });

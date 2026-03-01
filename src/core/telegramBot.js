@@ -497,4 +497,12 @@ export function startTelegramBot(router) {
   });
 
   console.log('🤖 Telegram bot iniciado y esperando mensajes...');
+
+  return {
+    bot,
+    async sendSystemMessage({ chatId, text } = {}) {
+      if (!chatId || !text) return null;
+      return sendBotMessage(chatId, text);
+    },
+  };
 }
