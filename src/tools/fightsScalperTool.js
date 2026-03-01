@@ -9,6 +9,10 @@ const MAX_HISTORY_ROWS = 12;
 const DEFAULT_SYNC_INTERVAL_MS = Number(
   process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'
 );
+const DEFAULT_STALENESS_ALERT_DAYS = Math.max(
+  1,
+  Number(process.env.FIGHT_HISTORY_STALENESS_ALERT_DAYS ?? '10')
+);
 const NAME_STOPWORDS = new Set([
   'a',
   'al',
@@ -94,12 +98,100 @@ const CACHE_DIR = path.resolve(
 );
 const CACHE_FILE = path.join(CACHE_DIR, 'fight_history.json');
 const META_FILE = path.join(CACHE_DIR, 'fight_history.meta.json');
+const CACHE_KEY = process.env.FIGHT_HISTORY_CACHE_KEY || 'default';
 
 let syncIntervalHandle = null;
 let syncInFlight = null;
+let externalCacheStore = {
+  getCacheSnapshot: null,
+  upsertCacheSnapshot: null,
+};
 
 function normalise(value) {
   return value ? String(value).toLowerCase() : '';
+}
+
+function startOfUtcDay(date) {
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function parseSheetDate(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() + 1 === month &&
+      date.getUTCDate() === day
+    ) {
+      return date;
+    }
+    return null;
+  }
+
+  const dayFirstMatch = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if (dayFirstMatch) {
+    const day = Number(dayFirstMatch[1]);
+    const month = Number(dayFirstMatch[2]);
+    const rawYear = dayFirstMatch[3];
+    const year = Number(rawYear.length === 2 ? `20${rawYear}` : rawYear);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() + 1 === month &&
+      date.getUTCDate() === day
+    ) {
+      return date;
+    }
+    return null;
+  }
+
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  const date = new Date(parsed);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function buildFreshnessSummary(rows = []) {
+  let latestDate = null;
+
+  for (const row of rows) {
+    const candidate = parseSheetDate(Array.isArray(row) ? row[0] : '');
+    if (!candidate) {
+      continue;
+    }
+    if (!latestDate || candidate.getTime() > latestDate.getTime()) {
+      latestDate = candidate;
+    }
+  }
+
+  if (!latestDate) {
+    return {
+      latestFightDate: null,
+      sheetAgeDays: null,
+      potentialGap: false,
+    };
+  }
+
+  const ageMs = Math.max(0, startOfUtcDay(new Date()) - startOfUtcDay(latestDate));
+  const sheetAgeDays = Math.floor(ageMs / 86400000);
+
+  return {
+    latestFightDate: latestDate.toISOString().slice(0, 10),
+    sheetAgeDays,
+    potentialGap: sheetAgeDays >= DEFAULT_STALENESS_ALERT_DAYS,
+  };
 }
 
 function normaliseWord(word = '') {
@@ -242,6 +334,85 @@ function computeRowsHash(rows) {
     .digest('hex');
 }
 
+function toCacheStatus(snapshot) {
+  if (!snapshot) return null;
+  return {
+    sheetId: snapshot.sheetId || null,
+    range: snapshot.range || null,
+    rowCount: Number(snapshot.rowCount) || 0,
+    hash: snapshot.hash || null,
+    lastSyncAt: snapshot.lastSyncAt || null,
+    lastSyncUpdatedCache: Boolean(snapshot.lastSyncUpdatedCache),
+    latestFightDate: snapshot.latestFightDate || null,
+    sheetAgeDays:
+      snapshot.sheetAgeDays === null || snapshot.sheetAgeDays === undefined
+        ? null
+        : Number(snapshot.sheetAgeDays),
+    potentialGap: Boolean(snapshot.potentialGap),
+  };
+}
+
+function loadExternalCacheSnapshot() {
+  if (typeof externalCacheStore.getCacheSnapshot !== 'function') {
+    return null;
+  }
+
+  try {
+    const snapshot = externalCacheStore.getCacheSnapshot(CACHE_KEY);
+    if (!snapshot || !Array.isArray(snapshot.rows)) {
+      return null;
+    }
+    return snapshot;
+  } catch (error) {
+    console.error('❌ Failed to load fight history cache from sqlite store:', error);
+    return null;
+  }
+}
+
+async function upsertExternalCacheSnapshot(snapshot = {}) {
+  if (typeof externalCacheStore.upsertCacheSnapshot !== 'function') {
+    return null;
+  }
+
+  try {
+    return await Promise.resolve(
+      externalCacheStore.upsertCacheSnapshot(
+        {
+          sheetId: snapshot.sheetId || null,
+          range: snapshot.range || null,
+          rowCount: Number(snapshot.rowCount) || 0,
+          hash: snapshot.hash || null,
+          rows: Array.isArray(snapshot.rows) ? snapshot.rows : [],
+          lastSyncAt: snapshot.lastSyncAt || null,
+          lastSyncUpdatedCache: Boolean(snapshot.lastSyncUpdatedCache),
+          latestFightDate: snapshot.latestFightDate || null,
+          sheetAgeDays:
+            snapshot.sheetAgeDays === null || snapshot.sheetAgeDays === undefined
+              ? null
+              : Number(snapshot.sheetAgeDays),
+          potentialGap: Boolean(snapshot.potentialGap),
+        },
+        CACHE_KEY
+      )
+    );
+  } catch (error) {
+    console.error('❌ Failed to persist fight history cache into sqlite store:', error);
+    return null;
+  }
+}
+
+export function configureFightHistoryStore({
+  getCacheSnapshot = null,
+  upsertCacheSnapshot = null,
+} = {}) {
+  externalCacheStore = {
+    getCacheSnapshot:
+      typeof getCacheSnapshot === 'function' ? getCacheSnapshot : null,
+    upsertCacheSnapshot:
+      typeof upsertCacheSnapshot === 'function' ? upsertCacheSnapshot : null,
+  };
+}
+
 export function extractFighterNamesFromMessage(message = '') {
   const words = splitWords(message);
   const aroundVs = extractNamesAroundVs(message);
@@ -285,10 +456,25 @@ function isCacheStale(meta, maxAgeMs) {
 }
 
 export function getFightHistoryCacheStatus() {
+  const external = loadExternalCacheSnapshot();
+  if (external) {
+    return toCacheStatus(external);
+  }
   return readJsonFile(META_FILE);
 }
 
 export function loadFightHistoryCache() {
+  const external = loadExternalCacheSnapshot();
+  if (external) {
+    return {
+      sheetId: external.sheetId || null,
+      range: external.range || null,
+      rowCount: Number(external.rowCount) || 0,
+      syncedAt: external.lastSyncAt || null,
+      rows: Array.isArray(external.rows) ? external.rows : [],
+    };
+  }
+
   const payload = readJsonFile(CACHE_FILE);
   if (!payload || !Array.isArray(payload.rows)) {
     return null;
@@ -314,6 +500,7 @@ export async function syncFightHistoryCache({
     const rows = await readRangeImpl(sheetId, range);
     const hash = computeRowsHash(rows);
     const previousMeta = getFightHistoryCacheStatus();
+    const freshness = buildFreshnessSummary(rows);
     const updated =
       force ||
       previousMeta?.hash !== hash ||
@@ -338,6 +525,22 @@ export async function syncFightHistoryCache({
       hash,
       lastSyncAt: now,
       lastSyncUpdatedCache: updated,
+      latestFightDate: freshness.latestFightDate,
+      sheetAgeDays: freshness.sheetAgeDays,
+      potentialGap: freshness.potentialGap,
+    });
+
+    await upsertExternalCacheSnapshot({
+      sheetId,
+      range,
+      rowCount: rows.length,
+      hash,
+      rows,
+      lastSyncAt: now,
+      lastSyncUpdatedCache: updated,
+      latestFightDate: freshness.latestFightDate,
+      sheetAgeDays: freshness.sheetAgeDays,
+      potentialGap: freshness.potentialGap,
     });
 
     return {
@@ -347,6 +550,7 @@ export async function syncFightHistoryCache({
       rows,
       sheetId,
       range,
+      ...freshness,
     };
   })();
 
@@ -365,16 +569,21 @@ async function loadHistoryRows({
 } = {}) {
   const cached = loadFightHistoryCache();
   const meta = getFightHistoryCacheStatus();
-  const cacheMatchesRequest =
-    meta?.sheetId === sheetId && meta?.range === range;
+  const cacheMatchesRequest = !sheetId || (
+    meta?.sheetId === sheetId && meta?.range === range
+  );
 
   if (cacheMatchesRequest && cached?.rows?.length) {
-    if (isCacheStale(meta, maxAgeMs)) {
+    if (sheetId && isCacheStale(meta, maxAgeMs)) {
       syncFightHistoryCache({ sheetId, range, readRangeImpl }).catch((error) =>
         console.error('❌ Background cache refresh failed:', error)
       );
     }
     return cached.rows;
+  }
+
+  if (!sheetId) {
+    return [];
   }
 
   const synced = await syncFightHistoryCache({ sheetId, range, readRangeImpl });
@@ -403,8 +612,19 @@ export function startFightHistorySync({
         range,
         readRangeImpl,
       });
+      const freshnessLabel = result.latestFightDate
+        ? `${result.latestFightDate}${
+            Number.isFinite(result.sheetAgeDays)
+              ? ` (${result.sheetAgeDays} day(s) old)`
+              : ''
+          }`
+        : 'unknown';
       console.log(
-        `[fightsScalper] Cache sync ${result.updated ? 'updated' : 'unchanged'} (${result.rowCount} rows)`
+        `[fightsScalper] Cache sync ${
+          result.updated ? 'updated' : 'unchanged'
+        } (${result.rowCount} rows, sheet latest ${freshnessLabel}${
+          result.potentialGap ? ', possible_gap' : ''
+        })`
       );
     } catch (error) {
       console.error('❌ Scheduled fight history sync failed:', error);
@@ -514,10 +734,26 @@ function formatHistoryResult({ fighters, rows }) {
 }
 
 function formatSyncStatus(result) {
-  return [
+  const lines = [
     `✅ Sync de Fight History completado (${result.rowCount} fila(s)).`,
-    `Cache ${result.updated ? 'actualizado' : 'sin cambios'}.`,
-  ].join('\n');
+    `Cache local ${result.updated ? 'actualizado' : 'sin cambios'} contra Google Sheets.`,
+    'Este sync NO scrapea web: solo refleja lo que ya existe en la sheet.',
+  ];
+
+  if (result.latestFightDate) {
+    const ageSuffix = Number.isFinite(result.sheetAgeDays)
+      ? ` (${result.sheetAgeDays} dia(s) atras)`
+      : '';
+    lines.push(`Ultima fecha detectada en sheet: ${result.latestFightDate}${ageSuffix}.`);
+  }
+
+  if (result.potentialGap) {
+    lines.push(
+      '⚠️ Posible hueco de eventos recientes en la sheet. Ejecuta `npm run history:sync` para backfill.'
+    );
+  }
+
+  return lines.join('\n');
 }
 
 export async function handleMessage(message = '', deps = {}) {
@@ -528,8 +764,9 @@ export async function handleMessage(message = '', deps = {}) {
   const fetchAndStoreUpcomingFightsImpl =
     deps.fetchAndStoreUpcomingFightsImpl ?? fetchAndStoreUpcomingFights;
   const syncFightHistoryCacheImpl = deps.syncFightHistoryCacheImpl ?? syncFightHistoryCache;
+  const hasLocalCache = Boolean(loadFightHistoryCache()?.rows?.length);
 
-  if (!sheetId) {
+  if (!sheetId && !hasLocalCache) {
     return '⚠️ Falta SHEET_ID. Configuralo para consultar historial de peleas.';
   }
 
@@ -542,6 +779,10 @@ export async function handleMessage(message = '', deps = {}) {
       text
     );
   if (wantsRefresh) {
+    if (!sheetId) {
+      return '⚠️ No puedo sincronizar contra Google Sheets porque falta SHEET_ID. Pero si tengo cache local para consultas.';
+    }
+
     if (/\b(upcoming|proxim|pr[oó]ximas|scrape|scraping)\b/i.test(text)) {
       return fetchAndStoreUpcomingFightsImpl();
     }
@@ -569,6 +810,7 @@ export async function handleMessage(message = '', deps = {}) {
 }
 
 export default {
+  configureFightHistoryStore,
   getFighterHistory,
   fetchAndStoreUpcomingFights,
   extractFighterNamesFromMessage,

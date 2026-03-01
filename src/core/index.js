@@ -8,12 +8,17 @@ import * as webIntel from '../tools/webIntelTool.js';
 import { createBettingWizard } from '../agents/bettingWizard.js';
 import { createConversationStore } from './conversationStore.js';
 import { createSessionLogger } from './sessionLogger.js';
+import { startAutoSettlementMonitor } from './autoSettlement.js';
 import {
   getUserProfile,
   updateUserProfile,
   addBetRecord,
   getBetHistory,
   getLedgerSummary,
+  listUserBets,
+  previewBetMutation,
+  applyBetMutation,
+  undoLastBetMutation,
   addOddsSnapshot,
   getLatestOddsSnapshot,
   addUsageRecord,
@@ -22,6 +27,10 @@ import {
   addCredits,
   creditFromMercadoPagoPayment,
   getUsageCounters,
+  getFightHistoryCacheSnapshot,
+  upsertFightHistoryCacheSnapshot,
+  listPendingBetsForAutoSettlement,
+  getLatestChatIdForUser,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -255,6 +264,11 @@ function bootstrap() {
   const sessionLogger = createSessionLogger();
   console.log('[bootstrap] SQLite DB:', getDbPath());
 
+  fightsScalper.configureFightHistoryStore({
+    getCacheSnapshot: getFightHistoryCacheSnapshot,
+    upsertCacheSnapshot: upsertFightHistoryCacheSnapshot,
+  });
+
   fightsScalper.startFightHistorySync({
     intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
   });
@@ -270,6 +284,10 @@ function bootstrap() {
       addBetRecord,
       getBetHistory,
       getLedgerSummary,
+      listUserBets,
+      previewBetMutation,
+      applyBetMutation,
+      undoLastBetMutation,
       addOddsSnapshot,
       getLatestOddsSnapshot,
       recordUsage: addUsageRecord,
@@ -293,7 +311,19 @@ function bootstrap() {
     sessionLogger,
   });
 
-  startTelegramBot(router);
+  const telegram = startTelegramBot(router);
+
+  startAutoSettlementMonitor({
+    intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+    getFightHistoryCacheSnapshot,
+    listPendingBetsForAutoSettlement,
+    applyBetMutation,
+    getLatestChatIdForUser,
+    notify: async ({ chatId, text }) => {
+      if (!telegram?.sendSystemMessage) return;
+      await telegram.sendSystemMessage({ chatId, text });
+    },
+  });
 
   const port = Number(process.env.PORT || 3000);
   createHealthServer(port, { addCredits, creditFromMercadoPagoPayment });

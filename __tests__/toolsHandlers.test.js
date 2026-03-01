@@ -4,6 +4,9 @@ import {
   handleMessage as handleFightsMessage,
   extractFighterNamesFromMessage,
   getFighterHistory,
+  syncFightHistoryCache,
+  configureFightHistoryStore,
+  getFightHistoryCacheStatus,
 } from '../src/tools/fightsScalperTool.js';
 
 export async function runToolsHandlersTests() {
@@ -97,17 +100,102 @@ export async function runToolsHandlersTests() {
   });
 
   tests.push(async () => {
+    let dbSnapshot = {
+      cacheKey: 'default',
+      sheetId: 'sheet-test',
+      range: 'Fight History!A:Z',
+      rowCount: 2,
+      hash: 'abc',
+      rows: [
+        ['2026-02-21', 'UFC FN', 'Michel Pereira', 'Someone'],
+        ['2026-02-07', 'UFC 325', 'Fighter A', 'Fighter B'],
+      ],
+      lastSyncAt: '2026-02-22T01:00:00.000Z',
+      lastSyncUpdatedCache: true,
+      latestFightDate: '2026-02-21',
+      sheetAgeDays: 1,
+      potentialGap: false,
+    };
+
+    configureFightHistoryStore({
+      getCacheSnapshot: () => dbSnapshot,
+      upsertCacheSnapshot: (next) => {
+        dbSnapshot = { ...next };
+        return dbSnapshot;
+      },
+    });
+
+    try {
+      const result = await getFighterHistory({
+        sheetId: 'sheet-test',
+        fighters: ['Michel Pereira'],
+        strict: true,
+        message: 'historial de Michel Pereira',
+        readRangeImpl: async () => {
+          throw new Error('Should not read Google Sheet when sqlite cache exists');
+        },
+      });
+
+      assert.equal(result.rows.length, 1);
+      assert.match(result.rows[0][2], /Michel Pereira/);
+      const status = getFightHistoryCacheStatus();
+      assert.equal(status.latestFightDate, '2026-02-21');
+    } finally {
+      configureFightHistoryStore({});
+    }
+  });
+
+  tests.push(async () => {
+    let capturedUpsert = null;
+
+    configureFightHistoryStore({
+      getCacheSnapshot: () => null,
+      upsertCacheSnapshot: (next) => {
+        capturedUpsert = next;
+        return next;
+      },
+    });
+
+    try {
+      const result = await syncFightHistoryCache({
+        sheetId: 'sheet-test',
+        range: 'Fight History!A:Z',
+        readRangeImpl: async () => [
+          ['2026-02-21', 'UFC FN', 'Michel Pereira', 'Someone'],
+          ['2026-02-07', 'UFC 325', 'Fighter A', 'Fighter B'],
+        ],
+      });
+
+      assert.equal(result.rowCount, 2);
+      assert.equal(capturedUpsert.rowCount, 2);
+      assert.equal(capturedUpsert.latestFightDate, '2026-02-21');
+      assert.equal(Array.isArray(capturedUpsert.rows), true);
+    } finally {
+      configureFightHistoryStore({});
+    }
+  });
+
+  tests.push(async () => {
     const response = await handleFightsMessage('actualizar cartelera', {
       sheetId: 'sheet-test',
       syncFightHistoryCacheImpl: async ({ sheetId, range }) => {
         assert.equal(sheetId, 'sheet-test');
         assert.equal(range, 'Fight History!A:Z');
-        return { rowCount: 128, updated: true };
+        return {
+          rowCount: 128,
+          updated: true,
+          latestFightDate: '2026-02-07',
+          sheetAgeDays: 15,
+          potentialGap: true,
+        };
       },
     });
 
     assert.match(response, /Sync de Fight History completado/);
-    assert.match(response, /Cache actualizado/);
+    assert.match(response, /Cache local actualizado contra Google Sheets/);
+    assert.match(response, /NO scrapea web/);
+    assert.match(response, /Ultima fecha detectada en sheet: 2026-02-07/);
+    assert.match(response, /Posible hueco de eventos recientes/);
   });
 
   tests.push(async () => {

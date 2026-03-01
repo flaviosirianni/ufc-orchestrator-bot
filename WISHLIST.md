@@ -525,3 +525,304 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir politica por defecto de transaccion para operaciones mixtas.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+20. **Automatizar `history:sync` para rellenar la planilla sin ejecucion manual**
+   - **Objetivo:** asegurar que la sheet de Fight History se mantenga actualizada sin depender de que alguien ejecute el comando a mano.
+   - **Problema observado:** hoy existe `npm run history:sync`, pero su ejecucion depende de operacion manual.
+   - **Comportamiento deseado:**
+     - El proceso de relleno de faltantes corre automaticamente en un scheduler.
+     - Si falla, queda logueado y hay visibilidad operativa del fallo.
+   - **Diseno tecnico sugerido:**
+     - Agregar job programado (cron interno o scheduler externo) que ejecute `history:sync` con frecuencia configurable.
+     - Reusar dedupe existente (`history_scraper.log.jsonl` + dedupe por filas/evento) para idempotencia.
+     - Exponer metricas basicas por corrida:
+       - eventos procesados,
+       - filas agregadas,
+       - filas duplicadas salteadas,
+       - ultima corrida exitosa / ultima corrida fallida.
+     - Agregar alerta simple ante fallos consecutivos (ej: log con severidad + notificacion opcional a Telegram admin).
+   - **Criterios de aceptacion:**
+     - El job corre segun frecuencia definida sin intervencion manual.
+     - Corridas exitosas y fallidas quedan auditables.
+     - No se duplican filas por reintentos o corridas solapadas.
+   - **Pruebas de regresion necesarias:**
+     - Corrida automatica exitosa con append real.
+     - Reintento tras fallo temporal sin duplicar datos.
+     - Corridas concurrentes -> bloqueo de solapamiento (single-flight).
+   - **Riesgos y decisiones abiertas:**
+     - Definir si el scheduler vive dentro del bot o en infraestructura externa (cron/worker separado).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+21. **Reconciliar "ultimo evento UFC" vs cobertura real de la Sheet**
+   - **Objetivo:** evitar respuestas desactualizadas sobre calendario y detectar cuando la sheet esta atrasada respecto a eventos reales.
+   - **Problema observado:**
+     - Consultas tipo "cual fue el ultimo evento de UFC" pueden responder con memoria vieja si no se fuerza verificacion online.
+     - El sync del `fightsScalper` puede verse "ok" aunque solo haya sincronizado cache local con una sheet incompleta.
+   - **Comportamiento deseado:**
+     - Preguntas de recencia/calendario siempre se validan con web search antes de responder.
+     - El estado de sync informa explicitamente la ultima fecha encontrada en la sheet y alerta posible gap reciente.
+     - Debe existir un flujo de reconciliacion que compare "ultimo evento oficial" vs "ultimo evento en sheet".
+   - **Diseno tecnico sugerido:**
+     - En `bettingWizard`: ampliar clasificador de preguntas de calendario para cubrir "ultimo/reciente/fecha/cuando".
+     - En `fightsScalper`: incluir metadata de frescura (latest date + age in days + warning) y aclarar que el sync base no scrapea web.
+     - Agregar job/endpoint de reconciliacion:
+       - trae ultimo evento oficial por web,
+       - compara contra ultima fecha/evento en sheet,
+       - dispara `history:sync` si detecta atraso.
+   - **Criterios de aceptacion:**
+     - "Ultimo evento UFC" nunca sale sin validacion web.
+     - Si la sheet esta atrasada, el sistema lo declara explicitamente y propone/ejecuta backfill.
+     - El operador puede ver rapidamente si hay gap historico sin inspeccion manual.
+   - **Pruebas de regresion necesarias:**
+     - Caso pregunta de "ultimo evento" sin web_search -> fallback seguro.
+     - Caso sync con sheet vieja -> mensaje de posible hueco.
+     - Caso reconciliacion detecta faltantes y dispara relleno.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+22. **[PRIORIDAD CRITICA] Resolver "hoy/manana" con ventana de evento local (evitar falso "no hay evento" despues de medianoche)**
+   - **Objetivo de negocio/UX:** evitar respuestas incorrectas de calendario en horario nocturno que erosionan confianza justo en momento de apuesta en vivo.
+   - **Problema observado (ejemplo real):**
+     - En la sesion `1806836602:1806836602`, alrededor de `2026-03-01T01:50Z`, el usuario consulto "hay evento de UFC ahora en vivo" y el bot respondio "hoy, 1 de marzo de 2026, no hay evento", aunque el contexto era la noche local del `28/2` y habia cartelera reciente relevante.
+     - El bot recien corrigio al recibir insistencia explicita del usuario ("es la noche del 28/2! fijate bien").
+   - **Comportamiento deseado para el usuario final:**
+     - Si pregunta por "hoy/ahora/en vivo" cerca de medianoche, el bot interpreta fecha local del usuario y contempla la ventana nocturna del evento (noche anterior + madrugada).
+     - Antes de decir "no hay evento", valida tambien el dia local anterior y la franja inmediata siguiente.
+     - Si hay ambiguedad temporal, el bot aclara la fecha absoluta que esta usando.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `UserTimezoneResolver`: obtener timezone por usuario (`user_profiles.timezone`), fallback configurable por despliegue; si falta, preguntar 1 vez y persistir.
+     - `RelativeDateResolver`: convertir `hoy/manana/ahora` a `as_of_datetime_local` y `as_of_date_local` antes de consultar fuentes.
+     - `EventWindowPolicy` para intents de calendario/live:
+       - ventana minima: revisar `dia_local_actual`, `dia_local_anterior` y proximo bloque de horas.
+       - priorizar eventos `in_progress` o `finished_recently` antes de responder negativo.
+     - `NoEventClaimGuard`: bloquear respuestas tipo "no hay evento" si no se ejecutaron chequeos de ventana completa.
+     - `TemporalCorrectionMode`: si el usuario corrige fecha ("es la noche del 28/2"), forzar re-evaluacion con fecha absoluta en respuesta.
+   - **Criterios de aceptacion verificables:**
+     - Cero respuestas negativas falsas en escenarios de borde nocturno (23:00-02:00 local).
+     - Toda respuesta de calendario incluye fecha absoluta de referencia cuando el turno contiene fechas relativas.
+     - Una correccion temporal explicita del usuario dispara re-chequeo y correccion en el siguiente turno.
+   - **Pruebas de regresion necesarias:**
+     - Caso borde local: consulta a las 23:30 del dia del evento y a las 00:30 del dia siguiente.
+     - Caso "hoy/manana" con timezone distinto al del servidor.
+     - Caso de contradiccion del usuario sobre fecha con re-resolucion obligatoria.
+   - **Riesgos y decisiones abiertas:**
+     - Definir timezone por defecto inicial para usuarios sin perfil completo.
+     - Definir umbral exacto de "ventana nocturna" por tipo de evento.
+   - **Prioridad:** critico.
+   - **Estado:** pendiente.
+
+23. **Auto-monitoreo de apuestas abiertas + cierre automatico con notificacion al usuario**
+   - **Objetivo de negocio/UX:** reducir friccion post-apuesta y asegurar ledger actualizado sin depender de reporte manual del usuario.
+   - **Problema observado (ejemplo real):**
+     - Actualmente el flujo depende de que el usuario escriba el resultado de cada pelea para cerrar apuestas (`WON/LOST`), lo que genera demoras, olvidos y ledger incompleto.
+   - **Comportamiento deseado para el usuario final:**
+     - Si el usuario tiene apuestas abiertas y la pelea termina, el sistema detecta resultado, cierra la apuesta automaticamente y avisa en chat con receipt.
+     - Si hay incertidumbre o fuentes en conflicto, el bot no cierra solo y pide confirmacion.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `OpenBetWatcher` scheduler (polling configurable) que toma apuestas `pending` no archivadas cercanas a eventos activos/recientes.
+     - `FightResultProvider` desacoplado por fuentes (`primary`, `secondary`) con timestamp y trazabilidad de URL/fuente.
+     - `AutoSettlementEngine`:
+       - matchea apuesta->pelea por evento/fight normalizado,
+       - aplica mutacion de cierre idempotente (`bet_id + source_result_id`),
+       - escribe `result_source='auto_verified'` y metadata de verificacion.
+     - Guardrails:
+       - no cerrar si `match_confidence` bajo o fuentes conflictivas,
+       - no sobrescribir cierres manuales previos,
+       - usar ventana de reintento con backoff y limite de intentos.
+     - `SettlementNotifier` envia mensaje Telegram con resultado aplicado y comprobante.
+   - **Criterios de aceptacion verificables:**
+     - Una apuesta abierta elegible se cierra automaticamente dentro del SLA definido tras finalizar la pelea.
+     - El usuario recibe exactamente una notificacion por cierre aplicado.
+     - No hay auto-cierres cuando la confianza de matching queda debajo del umbral.
+   - **Pruebas de regresion necesarias:**
+     - Fin de pelea con resultado claro -> cierre automatico + notificacion.
+     - Fuentes conflictivas -> no cerrar, solicitar confirmacion manual.
+     - Reintento/idempotencia -> no duplicar cierres ni notificaciones.
+     - Apuesta ya cerrada manualmente -> watcher no reescribe resultado.
+   - **Riesgos y decisiones abiertas:**
+     - Definir fuente oficial primaria y secundaria para settlement automatico.
+     - Definir SLA de polling y costo operativo (frecuencia vs consumo).
+   - **Prioridad:** alta.
+   - **Estado:** en progreso (MVP implementado: monitor periodico + auto-cierre por match de historial + notificacion Telegram; falta hardening de fuentes/confianza).
+
+24. **Botones de acciones guiadas (sin perder chat libre) para reducir prompts ambiguos**
+   - **Objetivo de negocio/UX:** bajar errores operativos por lenguaje ambiguo y acelerar tareas recurrentes con flujos guiados.
+   - **Problema observado (ejemplo real):**
+     - Mensajes ambiguos como "vamos con esta apuesta ahora" disparan registros no deseados en ledger y luego requieren rollback/manual correction.
+     - El usuario necesita recordar formatos exactos para pedir analisis, registrar apuesta o cerrar resultados.
+   - **Comportamiento deseado para el usuario final:**
+     - El chat sigue siendo libre, pero el bot ofrece botones de "entrada rapida" para tareas frecuentes.
+     - Cada boton abre mini-instrucciones con checklist claro de datos requeridos y ejemplos.
+     - Se minimizan mutaciones accidentales del ledger por frases ambiguas.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `ActionMenuController` con teclado inline/contextual y fallback a texto libre.
+     - Set inicial propuesto de botones:
+       - `Analizar cuotas`
+       - `Registrar apuesta al ledger`
+       - `Ver apuestas pendientes`
+       - `Cerrar apuesta (WON/LOST)`
+       - `Corregir ultima accion`
+       - `Ver creditos`
+     - `FlowState` por chat en `conversationStore` (`idle`, `collecting_odds`, `collecting_bet_payload`, `settlement_selection`, `confirm_destructive`).
+     - Instrucciones guiadas por accion:
+       - `Analizar cuotas`: pedir screenshot completo o cuotas en texto (evento, pelea, mercado, cuota).
+       - `Registrar apuesta al ledger`: pedir `evento`, `pelea`, `pick`, `odds`, `stake/unidades`, `bookie/ref` opcional.
+       - `Cerrar apuesta`: listar apuestas abiertas con IDs y pedir seleccion + resultado.
+     - Guardrails:
+       - para acciones destructivas, siempre `preview + confirm`.
+       - si faltan campos obligatorios, no ejecutar y pedir solo lo faltante.
+       - timeout/cancel del flujo para volver a `idle`.
+   - **Criterios de aceptacion verificables:**
+     - Un usuario puede completar "analizar cuotas" y "registrar apuesta" usando botones sin prompt elaborado.
+     - Disminuyen registros accidentales en ledger por comandos ambiguos.
+     - El bot mantiene compatibilidad total con mensajes libres sin romper flujos existentes.
+   - **Pruebas de regresion necesarias:**
+     - Callback de cada boton enruta al flujo correcto y pide datos minimos.
+     - Flujo mixto (boton + mensaje libre) no pierde contexto.
+     - Doble tap/reintento de callback no duplica acciones.
+     - `preview + confirm` obligatorio en cierres/archivados.
+   - **Riesgos y decisiones abiertas:**
+     - Definir si el menu se muestra siempre o solo en respuestas clave.
+     - Definir copy final de instrucciones por boton para evitar ruido excesivo.
+   - **Prioridad:** alta.
+   - **Estado:** en progreso (botones base + instrucciones guiadas implementadas; falta cobertura completa de flujos y pruebas de callback expirado/doble tap).
+
+25. **Explicabilidad obligatoria: pedirle al bot que fundamente su eleccion de apuesta**
+   - **Objetivo de negocio/UX:** aumentar confianza del usuario y evitar ejecucion ciega de picks mostrando razonamiento auditable en cada recomendacion.
+   - **Problema observado (ejemplo real):**
+     - En varios turnos de recomendacion, el usuario necesita repreguntar "por que" o "fundamentalo" para entender edge, riesgo y condiciones de entrada.
+     - Cuando falta fundamento estructurado, es mas facil malinterpretar la recomendacion o sobreconfiar en picks con edge bajo.
+   - **Comportamiento deseado para el usuario final:**
+     - Cada pick recomendado incluye fundamento minimo estandar sin que el usuario tenga que pedirlo.
+     - El fundamento explica claramente: thesis, riesgos, cuota minima para tomar (`min_odds_to_take`) y escenario de no-bet.
+     - Si el usuario pide "fundamentalo mas", el bot responde una version extendida con supuestos y limites.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `PickRationaleSchema` obligatorio por recomendacion:
+       - `thesis` (2-4 bullets),
+       - `data_used` (fuentes/odds/historial),
+       - `edge_summary` (probabilidad estimada vs implied),
+       - `risk_flags` (correlacion, volatilidad, incertidumbre),
+       - `entry_rule` (cuota minima y stake sugerido),
+       - `no_bet_conditions`.
+     - `RecommendationFormatter`:
+       - version `short` por defecto (chat rapido),
+       - version `deep` al detectar intents "explica/fundamenta/por que".
+     - Guardrails:
+       - no emitir "pick final" si faltan datos criticos de cuota/mercado sin marcar incertidumbre.
+       - prohibir lenguaje de certeza absoluta; incluir nivel de confianza (`alta/media/baja`).
+       - exigir consistencia entre stake sugerido y fundamento de riesgo.
+     - Estado conversacional sugerido:
+       - `recommendation_drafted`,
+       - `rationale_ready`,
+       - `awaiting_user_confirm`.
+   - **Criterios de aceptacion verificables:**
+     - 100% de recomendaciones nuevas incluyen bloque de fundamento estandar.
+     - Ante pedido explicito de fundamento, el bot entrega version extendida en el mismo turno.
+     - Disminuyen repreguntas de aclaracion basica sobre "por que ese pick".
+   - **Pruebas de regresion necesarias:**
+     - Flujo con odds completas -> pick + fundamento + riesgo + min cuota.
+     - Flujo con odds incompletas -> no-bet o recomendacion condicional explicitando faltantes.
+     - Intent "fundamenta tu eleccion" -> salida `deep` sin perder consistencia con el pick original.
+     - Validacion de copy: no usar afirmaciones absolutas tipo "seguro", "garantizado".
+   - **Riesgos y decisiones abiertas:**
+     - Definir longitud maxima del fundamento por canal para evitar mensajes demasiado largos en Telegram.
+     - Definir si el modo `deep` consume mas creditos que el modo `short`.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+26. **Recalibrar stake minimo para evitar recomendaciones de monto irrisorio**
+   - **Objetivo de negocio/UX:** que los stakes recomendados sean operables en la practica del usuario y no generen percepcion de "apuesta simbolica".
+   - **Problema observado (ejemplo real):**
+     - El bot devuelve recomendaciones tipo `- Stake: 1.0u (=$400 ARS)` de forma recurrente.
+     - Feedback explicito del usuario: ese monto es demasiado bajo para su operativa real y reduce utilidad de la recomendacion.
+   - **Comportamiento deseado para el usuario final:**
+     - El stake sugerido debe respetar un piso minimo configurable por usuario/evento.
+     - Si el modelo propone un stake bajo por riesgo, debe explicarlo explicitamente (y opcionalmente ofrecer alternativa "no-bet").
+     - El usuario puede ajustar su preferencia de stake minimo desde chat sin friccion.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `StakeCalibrator` deterministico en backend, posterior al output del LLM:
+       - entrada: `bankroll`, `unitSize`, `eventBudget`, `riskProfile`, `confidenceTier`, `marketType`.
+       - salida: `recommendedUnits`, `recommendedStake`, `stakeReason`.
+     - Nuevos campos de perfil (persistidos):
+       - `min_stake_amount` (moneda del usuario),
+       - `min_units_per_bet`,
+       - `target_event_utilization_pct`.
+     - Guardrails de sizing:
+       - no sugerir stake por debajo de `max(min_stake_amount, min_units_per_bet * unitSize)` salvo excepcion marcada como `micro_stake_exception=true`.
+       - limitar sobre-exposicion con `max_units_per_pick` y `max_event_exposure`.
+       - si el edge es bajo y el piso fuerza sobre-riesgo, devolver `NO_BET` en lugar de stake artificial.
+     - UX conversacional:
+       - comando/intencion natural para ajustar piso: "mi stake minimo es $X" / "minimo 2u por pick".
+       - en cada pick mostrar: `stake final` + `motivo de sizing` en una linea.
+   - **Criterios de aceptacion verificables:**
+     - No se emiten stakes por debajo del piso configurado del usuario (salvo excepcion explicitada).
+     - Las recomendaciones reflejan mejor presupuesto y perfil de riesgo declarados.
+     - El usuario puede actualizar stake minimo y ver efecto en el siguiente pick.
+   - **Pruebas de regresion necesarias:**
+     - Perfil con `unitSize=400` y `min_stake_amount=2000` -> stake sugerido nunca menor a `$2000`.
+     - Caso edge bajo + piso alto -> salida `NO_BET` con justificacion (sin forzar pick).
+     - Cambio conversacional de preferencia ("minimo 3u") -> persiste y aplica en recomendaciones siguientes.
+     - Validacion de limites de exposicion por evento con multiples picks.
+   - **Riesgos y decisiones abiertas:**
+     - Definir piso por defecto para usuarios sin preferencia declarada.
+     - Definir jerarquia final entre `min_stake_amount` y `min_units_per_bet` cuando entran en conflicto.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+27. **Reducir confirmaciones de mutaciones de ledger cuando el target es inequivoco**
+   - **Objetivo de negocio/UX:** eliminar friccion innecesaria en operaciones de DB cuando la intencion del usuario es clara y segura.
+   - **Problema observado (ejemplo real):**
+     - El bot pide confirmacion explicita para archivar/eliminar apuestas en ledger incluso cuando el usuario ya indico `bet_id` puntual.
+     - Esto agrega pasos y entorpece flujo rapido de operacion en vivo.
+   - **Comportamiento deseado para el usuario final:**
+     - Si el target es inequivoco (ej: `bet_id` unico), ejecutar la mutacion directamente sin doble confirmacion.
+     - Solo pedir confirmacion o aclaracion cuando haya ambiguedad real (2+ candidatos o referencia vaga).
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `MutationConfidenceGate` antes de aplicar cambios:
+       - `high_confidence` (bet_id unico / selector exacto) -> ejecutar.
+       - `low_confidence` (referencias tipo "esa/anterior/las otras") -> pedir desambiguacion.
+     - Ajustar `previewBetMutation` / `applyBetMutation` para no forzar `requiresConfirmation` en operaciones con selector unico.
+     - Mantener recibo obligatorio post-mutacion (`bet_id`, estado previo, estado nuevo, timestamp).
+   - **Criterios de aceptacion verificables:**
+     - Mutaciones con `bet_id` unico se ejecutan en un solo paso.
+     - Mutaciones ambiguas siguen bloqueadas hasta aclaracion.
+     - Nunca se aplica cambio sobre una apuesta distinta a la pedida.
+   - **Pruebas de regresion necesarias:**
+     - `archivar bet_id 35` -> aplica sin confirmacion extra.
+     - `borra la anterior` -> bloquea y pide aclaracion.
+     - `cerra 33 como win` -> aplica directo y devuelve receipt.
+   - **Riesgos y decisiones abiertas:**
+     - Definir politica final para mutaciones masivas (siempre preview o no) cuando el usuario lista multiples IDs explicitos.
+   - **Prioridad:** alta.
+   - **Estado:** en progreso (mutaciones con target explicito ya no piden doble confirmacion; falta definir politica final para batch multi-ID).
+
+28. **Menu jerarquico en Telegram (submenus de Config y Apuestas)**
+   - **Objetivo de negocio/UX:** mejorar navegacion y descubribilidad de funciones sin depender de texto libre.
+   - **Problema observado:**
+     - El menu actual de botones es plano; faltan rutas rapidas para configuraciones y acciones de apuestas agrupadas.
+   - **Comportamiento deseado para el usuario final:**
+     - Tener menu principal con accesos a submenus:
+       - `Apuestas` -> abrir / cerrar / pendientes / historial.
+       - `Config` -> stake minimo / unidad / riesgo / timezone / creditos.
+     - Poder volver atras (`⬅ Volver`) sin perder contexto.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `InlineMenuRouter` por `callback_data` con convencion `menu:<scope>:<action>`.
+     - `MenuStateStore` por chat para recordar submenu activo y ultima accion.
+     - Renderizar menus por edicion de mensaje (`editMessageText`) o envio nuevo segun caso.
+     - Guardrails:
+       - validar callbacks expirados.
+       - idempotencia en taps repetidos.
+       - fallback a texto si callback falla.
+   - **Criterios de aceptacion verificables:**
+     - Usuario puede navegar principal -> submenu -> accion -> volver en <= 3 taps.
+     - Acciones frecuentes de ledger/config se disparan desde submenu sin prompts complejos.
+     - No se duplican ejecuciones por doble tap de botones.
+   - **Pruebas de regresion necesarias:**
+     - Navegacion completa `Main -> Config -> Stake minimo -> Volver`.
+     - Navegacion `Main -> Apuestas -> Pendientes`.
+     - Callback invalido/expirado -> fallback controlado.
+   - **Riesgos y decisiones abiertas:**
+     - Definir si conviene `editMessageText` (chat mas limpio) vs mensajes nuevos (trazabilidad completa).
+   - **Prioridad:** alta.
+   - **Estado:** en progreso (menu principal + submenus Apuestas/Config y persistencia de scope por chat implementados; falta evaluar `editMessageText` e idempotencia avanzada de taps).

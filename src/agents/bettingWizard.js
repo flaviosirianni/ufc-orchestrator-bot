@@ -18,7 +18,9 @@ const WEB_SEARCH_CONTEXT_SIZE = process.env.WEB_SEARCH_CONTEXT_SIZE || 'medium';
 const WEB_SEARCH_COUNTRY = process.env.WEB_SEARCH_COUNTRY || 'US';
 const WEB_SEARCH_REGION = process.env.WEB_SEARCH_REGION || null;
 const WEB_SEARCH_CITY = process.env.WEB_SEARCH_CITY || null;
-const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || null;
+const DEFAULT_USER_TIMEZONE =
+  process.env.DEFAULT_USER_TIMEZONE || process.env.WEB_SEARCH_TIMEZONE || 'America/Argentina/Buenos_Aires';
+const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || DEFAULT_USER_TIMEZONE;
 const SHOW_SOURCES_BY_DEFAULT = process.env.SHOW_SOURCES_BY_DEFAULT === 'true';
 const CREDIT_ENFORCE = process.env.CREDIT_ENFORCE !== 'false';
 const CREDIT_FREE_WEEKLY = Number(process.env.CREDIT_FREE_WEEKLY ?? '5');
@@ -30,6 +32,8 @@ const CREDIT_AUDIO_WEEKLY_FREE_MINUTES = Number(
 );
 const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?? '0.2');
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
+const STAKE_MIN_AMOUNT_DEFAULT = Number(process.env.STAKE_MIN_AMOUNT_DEFAULT ?? '2000');
+const STAKE_MIN_UNITS_DEFAULT = Number(process.env.STAKE_MIN_UNITS_DEFAULT ?? '2.5');
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -84,6 +88,10 @@ const FUNCTION_TOOLS = [
         unitSize: { type: 'number' },
         riskProfile: { type: 'string' },
         currency: { type: 'string' },
+        timezone: { type: 'string' },
+        minStakeAmount: { type: 'number' },
+        minUnitsPerBet: { type: 'number' },
+        targetEventUtilizationPct: { type: 'number' },
         notes: { type: 'string' },
       },
       additionalProperties: false,
@@ -94,7 +102,7 @@ const FUNCTION_TOOLS = [
     type: 'function',
     name: 'record_user_bet',
     description:
-      'Guarda una apuesta previa del usuario para memoria de seguimiento (no ejecuta apuestas).',
+      'Registra una NUEVA apuesta del usuario en el ledger. No usar para cerrar/borrar apuestas existentes.',
     parameters: {
       type: 'object',
       properties: {
@@ -106,6 +114,85 @@ const FUNCTION_TOOLS = [
         units: { type: 'number' },
         result: { type: 'string' },
         notes: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
+    name: 'list_user_bets',
+    description:
+      'Lista apuestas del usuario para resolver referencias y obtener bet_id antes de mutar ledger.',
+    parameters: {
+      type: 'object',
+      properties: {
+        eventName: { type: 'string' },
+        fight: { type: 'string' },
+        pick: { type: 'string' },
+        status: {
+          type: 'string',
+          description: 'pending | win | loss | push',
+        },
+        includeArchived: { type: 'boolean' },
+        limit: { type: 'number' },
+      },
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
+    name: 'mutate_user_bets',
+    description:
+      'Actualiza apuestas existentes (settle/set_pending/archive) con guardrails. Solo pide confirmacion cuando la seleccion es ambigua.',
+    parameters: {
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          description: 'settle | set_pending | archive',
+        },
+        result: {
+          type: 'string',
+          description: 'Requerido en settle: win | loss | push',
+        },
+        betIds: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'IDs explicitos de apuestas a mutar.',
+        },
+        eventName: { type: 'string' },
+        fight: { type: 'string' },
+        pick: { type: 'string' },
+        limit: { type: 'number' },
+        confirm: {
+          type: 'boolean',
+          description: 'true para ejecutar una mutacion previamente previsualizada.',
+        },
+        confirmationToken: {
+          type: 'string',
+          description: 'Token devuelto por la previsualizacion requerida.',
+        },
+        reason: { type: 'string' },
+      },
+      required: ['operation'],
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
+    name: 'undo_last_mutation',
+    description:
+      'Revierte la ultima mutacion sensible del ledger del usuario (archive/settle/set_pending) dentro de una ventana de tiempo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        windowMinutes: {
+          type: 'number',
+          description: 'Ventana maxima de tiempo para permitir undo.',
+        },
       },
       additionalProperties: false,
     },
@@ -199,7 +286,9 @@ function isCalendarQuestion(message = '') {
       text
     );
   const hasDateOrTimeWords =
-    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana)\b/.test(text) ||
+    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana|ayer|ahora|en vivo|vivo|live|ultimo|ultima|last|reciente|mas reciente|fecha|cuando|when)\b/.test(
+      text
+    ) ||
     /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/.test(
       text
     );
@@ -255,6 +344,17 @@ function hasLedgerSignals(message = '') {
   return /\b(ledger|balance|bankroll|apuestas previas|historial de apuestas|mi ledger|mis apuestas)\b/.test(
     text
   );
+}
+
+function isLiveFightQueueQuestion(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  const asksNextFight =
+    /\b(que pelea viene ahora|que pelea sigue|cual pelea sigue|proxima pelea|proxima que viene|que falta|faltan peleas|en vivo|ahora en el evento)\b/.test(
+      text
+    ) || /\b(pelea)\b/.test(text) && /\b(ahora|sigue|viene)\b/.test(text);
+  const hasEventContext = /\b(evento|cartelera|ufc|fight night|main card)\b/.test(text);
+  return asksNextFight && hasEventContext;
 }
 
 function shouldUseDecisionModel({ message = '', hasMedia = false } = {}) {
@@ -320,6 +420,31 @@ function toNumberOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseDecimalLike(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/\s+/g, '').replace(/\.(?=\d{3}(?:\D|$))/g, '').replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatArsAmount(amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) return '$0 ARS';
+  const rounded = Math.round(value);
+  const formatted = new Intl.NumberFormat('es-AR').format(rounded);
+  return `$${formatted} ARS`;
+}
+
+function formatUnits(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '0';
+  if (Math.abs(num - Math.round(num)) < 1e-9) {
+    return String(Math.round(num));
+  }
+  return num.toFixed(2).replace(/\.?0+$/, '');
+}
+
 function truncateText(value = '', maxChars = 900) {
   const text = String(value || '').trim();
   if (text.length <= maxChars) {
@@ -337,6 +462,735 @@ function parseToolArgs(rawArguments = '{}') {
   } catch {
     return {};
   }
+}
+
+function normalizeBetResult(result = '') {
+  const value = String(result || '').toLowerCase();
+  if (!value.trim()) return null;
+  if (
+    value.includes('pending') ||
+    value.includes('pend') ||
+    value.includes('open') ||
+    value.includes('abierta')
+  ) {
+    return 'pending';
+  }
+  if (
+    value.includes('win') ||
+    value.includes('won') ||
+    value.includes('gan')
+  ) {
+    return 'win';
+  }
+  if (
+    value.includes('loss') ||
+    value.includes('lose') ||
+    value.includes('lost') ||
+    value.includes('perd')
+  ) {
+    return 'loss';
+  }
+  if (
+    value.includes('push') ||
+    value.includes('draw') ||
+    value.includes('void') ||
+    value.includes('nula')
+  ) {
+    return 'push';
+  }
+  return null;
+}
+
+function parseBetIds(rawValue) {
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+  return rawValue
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+function extractBetIdsFromMessage(message = '') {
+  const raw = String(message || '');
+  if (!raw.trim()) return [];
+
+  const values = [];
+  const patterns = [
+    /\b(?:bet[\s_-]?id|id)\s*#?\s*(\d{1,8})\b/gi,
+    /#(\d{1,8})\b/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match = null;
+    while ((match = pattern.exec(raw)) !== null) {
+      const parsed = Number(match[1]);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        values.push(parsed);
+      }
+    }
+  }
+
+  const groupedListPattern =
+    /\b(?:apuestas?|bets?)\b[^0-9#]{0,20}((?:#?\d{1,8}\s*(?:,|y|e)\s*)+#?\d{1,8})\b/gi;
+  let groupedMatch = null;
+  while ((groupedMatch = groupedListPattern.exec(raw)) !== null) {
+    const chunk = groupedMatch[1] || '';
+    const idsInChunk = chunk.match(/\d{1,8}/g) || [];
+    for (const rawId of idsInChunk) {
+      const parsed = Number(rawId);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        values.push(parsed);
+      }
+    }
+  }
+
+  return Array.from(new Set(values));
+}
+
+function resolvedFightLabel(fight = null) {
+  if (!fight?.fighterA || !fight?.fighterB) {
+    return '';
+  }
+  return `${fight.fighterA} vs ${fight.fighterB}`.trim();
+}
+
+function createMutationToken() {
+  return `mut_${Math.random().toString(36).slice(2, 10)}${Date.now()
+    .toString(36)
+    .slice(-4)}`;
+}
+
+function formatMutationActionLabel(operation = '') {
+  if (operation === 'archive') return 'ARCHIVE';
+  if (operation === 'set_pending') return 'SET_PENDING';
+  if (operation === 'settle') return 'SETTLE';
+  return operation || 'MUTATION';
+}
+
+function normalizeText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function parseConfirmationIntent(message = '') {
+  const raw = String(message || '').trim();
+  const text = normalizeText(raw);
+  const tokens = Array.from(
+    new Set((raw.match(/mut_[a-z0-9]+/gi) || []).map((value) => String(value).trim()))
+  );
+
+  const hasConfirmWord = /\bconfirm\w*\b/.test(text);
+  const hasNegative =
+    /\b(no confirm\w*|cancel\w*|anula\w*|deja sin efecto)\b/.test(text);
+
+  const wantsAll = /\b(ambas|ambos|todo|todas|todas las|todo eso)\b/.test(text);
+  const wantsArchive = /\b(archiv\w*|borr\w*|elimin\w*|delete)\b/.test(text);
+  const wantsSetPending = /\b(pending|pendiente|reabr\w*|volver a pending)\b/.test(text);
+  const wantsSettle = /\b(lost|loss|perd\w*|win|won|gan\w*|push|draw|void|nula)\b/.test(
+    text
+  );
+
+  let settleResult = null;
+  if (/\b(lost|loss|perd\w*)\b/.test(text)) {
+    settleResult = 'loss';
+  } else if (/\b(win|won|gan\w*)\b/.test(text)) {
+    settleResult = 'win';
+  } else if (/\b(push|draw|void|nula)\b/.test(text)) {
+    settleResult = 'push';
+  }
+
+  return {
+    hasPositive: hasConfirmWord || tokens.length > 0,
+    hasNegative,
+    tokens,
+    wantsAll,
+    wantsArchive,
+    wantsSetPending,
+    wantsSettle,
+    settleResult,
+  };
+}
+
+function isUndoRequest(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(undo|deshace|deshacer|reverti|revertir|corregi ultima|corregir ultima|rollback)\b/.test(
+    text
+  );
+}
+
+function hasAmbiguousFightReference(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(anterior|anteriores|esa|ese|esas|esos|reci[eé]n|recien|la otra|el otro)\b/.test(
+    text
+  );
+}
+
+function normalizeTimeZone(timezone = '') {
+  const fallback = DEFAULT_USER_TIMEZONE;
+  const candidate = String(timezone || '').trim() || fallback;
+  try {
+    // Throws on invalid timezone.
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return fallback;
+  }
+}
+
+function isValidTimeZone(timezone = '') {
+  const candidate = String(timezone || '').trim();
+  if (!candidate) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractLocalDateTimeParts(date = new Date(), timezone = DEFAULT_USER_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || '';
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  const hour = get('hour');
+  const minute = get('minute');
+  const second = get('second');
+  const dateIso = `${year}-${month}-${day}`;
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    dateIso,
+    dateTimeIso: `${dateIso}T${hour}:${minute}:${second}`,
+  };
+}
+
+function shiftIsoDate(isoDate, daysDelta) {
+  const value = String(isoDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + Number(daysDelta || 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function extractDateHints(message = '', timezone = DEFAULT_USER_TIMEZONE) {
+  const text = String(message || '');
+  const hints = [];
+  const localNow = extractLocalDateTimeParts(new Date(), timezone);
+  const currentYear = Number(localNow.year) || new Date().getUTCFullYear();
+
+  const isoMatch = text.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
+  if (isoMatch) {
+    const iso = `${isoMatch[1]}-${String(isoMatch[2]).padStart(2, '0')}-${String(
+      isoMatch[3]
+    ).padStart(2, '0')}`;
+    hints.push({ source: isoMatch[0], isoDate: iso });
+  }
+
+  const slashMatch = text.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/);
+  if (slashMatch) {
+    const day = Number(slashMatch[1]);
+    const month = Number(slashMatch[2]);
+    const rawYear = slashMatch[3] ? Number(slashMatch[3]) : currentYear;
+    const year = rawYear < 100 ? 2000 + rawYear : rawYear;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      hints.push({ source: slashMatch[0], isoDate: iso });
+    }
+  }
+
+  const normalized = normalizeText(text);
+  if (/\bhoy\b/.test(normalized)) {
+    hints.push({ source: 'hoy', isoDate: localNow.dateIso });
+  }
+  if (/\bmanana\b/.test(normalized)) {
+    const tomorrow = shiftIsoDate(localNow.dateIso, 1);
+    if (tomorrow) {
+      hints.push({ source: 'manana', isoDate: tomorrow });
+    }
+  }
+  if (/\bayer\b/.test(normalized)) {
+    const yesterday = shiftIsoDate(localNow.dateIso, -1);
+    if (yesterday) {
+      hints.push({ source: 'ayer', isoDate: yesterday });
+    }
+  }
+
+  return hints;
+}
+
+function buildTemporalContextSection({
+  timezone = DEFAULT_USER_TIMEZONE,
+  originalMessage = '',
+} = {}) {
+  const resolvedTimeZone = normalizeTimeZone(timezone);
+  const nowLocal = extractLocalDateTimeParts(new Date(), resolvedTimeZone);
+  const previousDate = shiftIsoDate(nowLocal.dateIso, -1);
+  const nextDate = shiftIsoDate(nowLocal.dateIso, 1);
+  const dateHints = extractDateHints(originalMessage, resolvedTimeZone);
+
+  const lines = [
+    `timezone: ${resolvedTimeZone}`,
+    `as_of_local_datetime: ${nowLocal.dateTimeIso}`,
+    `as_of_local_date: ${nowLocal.dateIso}`,
+    `window_previous_local_date: ${previousDate || 'N/D'}`,
+    `window_next_local_date: ${nextDate || 'N/D'}`,
+  ];
+
+  if (dateHints.length) {
+    const compact = dateHints.map((hint) => `${hint.source}=>${hint.isoDate}`).join(' | ');
+    lines.push(`user_date_hints: ${compact}`);
+  }
+
+  return {
+    timezone: resolvedTimeZone,
+    nowLocal,
+    sectionText: lines.join('\n'),
+  };
+}
+
+function isRecommendationReply(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(pick|recomendacion|recomendaciones|apuesta|jugaria|jugaria|stake|ev|valor esperado)\b/.test(
+    normalized
+  );
+}
+
+function hasRationaleContent(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  const hasCoreReason = /\b(fundamento|por que|tesis|lectura|edge|riesgo)\b/.test(normalized);
+  const hasEntryRule = /\b(cuota minima|minima cuota|min odds|si .* @|tomar si)\b/.test(
+    normalized
+  );
+  return hasCoreReason && hasEntryRule;
+}
+
+function isLedgerOperationMessage(message = '') {
+  const normalized = normalizeText(message);
+  if (!normalized) return false;
+  return /\b(ledger|bet_id|pending|won|lost|settle|archiv|borra|elimina|cierra|cerra|anota|registro)\b/.test(
+    normalized
+  );
+}
+
+function normalizeRiskProfile(rawValue = '') {
+  const normalized = normalizeText(rawValue);
+  if (!normalized) return null;
+  if (/\b(conservador|conservadora|bajo|baja|prudente|low)\b/.test(normalized)) {
+    return 'conservador';
+  }
+  if (/\b(moderado|moderada|medio|media|balanced)\b/.test(normalized)) {
+    return 'moderado';
+  }
+  if (/\b(agresivo|agresiva|alto|alta|high)\b/.test(normalized)) {
+    return 'agresivo';
+  }
+  return null;
+}
+
+function parseProfilePreferenceMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+  const text = normalizeText(raw);
+
+  const updates = {};
+  const warnings = [];
+
+  const bankrollMatch = raw.match(
+    /\b(?:bankroll|banca|bank)\b[^0-9$]{0,20}\$?\s*([0-9][0-9\.,]*)/i
+  );
+  const unitMatch = raw.match(
+    /\b(?:unidad(?:es)?|unit(?: size)?)\b[^0-9$]{0,20}\$?\s*([0-9][0-9\.,]*)/i
+  );
+  const riskMatch = raw.match(
+    /\b(?:riesgo|risk(?: profile)?|perfil(?: de riesgo)?)\b[^a-zA-Z]{0,20}(conservador(?:a)?|moderad[oa]|agresiv[oa]|baj[oa]|medi[oa]|alt[oa])\b/i
+  );
+  const timezoneMatch = raw.match(
+    /\b(?:timezone|tz|zona horaria)\b[^A-Za-z0-9/_+\-]{0,20}([A-Za-z][A-Za-z0-9_+\-]*(?:\/[A-Za-z0-9_+\-]+)+)\b/
+  );
+  const utilizationMatch = raw.match(
+    /\b(?:utilizacion(?: objetivo)?(?: del evento)?|exposicion(?: objetivo)?(?: del evento)?|target(?: event)? utilization)\b[^0-9]{0,20}([0-9]+(?:[.,][0-9]+)?)\s*%?/i
+  );
+
+  if (bankrollMatch) {
+    const parsed = parseDecimalLike(bankrollMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      updates.bankroll = parsed;
+    }
+  }
+
+  if (unitMatch) {
+    const parsed = parseDecimalLike(unitMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      updates.unitSize = parsed;
+    }
+  }
+
+  if (riskMatch) {
+    const normalizedRisk = normalizeRiskProfile(riskMatch[1]);
+    if (normalizedRisk) {
+      updates.riskProfile = normalizedRisk;
+    }
+  }
+
+  if (timezoneMatch) {
+    const timezone = String(timezoneMatch[1] || '').trim();
+    if (isValidTimeZone(timezone)) {
+      updates.timezone = timezone;
+    } else {
+      warnings.push(
+        'No pude validar ese timezone. Usa formato IANA, por ejemplo: America/Argentina/Buenos_Aires.'
+      );
+    }
+  }
+
+  if (utilizationMatch) {
+    const parsed = parseDecimalLike(utilizationMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 100) {
+      updates.targetEventUtilizationPct = parsed;
+    } else {
+      warnings.push('La utilizacion objetivo debe estar entre 0 y 100%.');
+    }
+  }
+
+  const touchedAny =
+    /\b(bankroll|banca|unidad|unit|riesgo|risk|perfil|timezone|tz|zona horaria|utilizacion|exposicion)\b/.test(
+      text
+    );
+  if (!Object.keys(updates).length && !warnings.length && !touchedAny) {
+    return null;
+  }
+
+  return {
+    updates,
+    warnings,
+    touchedAny,
+  };
+}
+
+function isProfileSummaryRequest(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(mi config|mi configuracion|ver config|mostrar config|mostrame mi configuracion|mis ajustes|settings|perfil de usuario)\b/.test(
+    text
+  );
+}
+
+function parseStakePreferenceMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+  const text = normalizeText(raw);
+  const hasStakePreferenceIntent =
+    /\b(stake minimo|minimo por apuesta|apuesta minima|minimo de stake|minimo por pick|minimo en u|minimo unidades|minimo de unidades)\b/.test(
+      text
+    ) || /\b(mi stake minimo|mi minimo)\b/.test(text);
+  if (!hasStakePreferenceIntent) {
+    return null;
+  }
+
+  const moneyMatch = raw.match(/\$\s*([0-9][0-9\.\,]*)/);
+  const unitsMatch = raw.match(/([0-9]+(?:[.,][0-9]+)?)\s*u(?:nidades?)?\b/i);
+
+  const minStakeAmount = moneyMatch ? parseDecimalLike(moneyMatch[1]) : null;
+  const minUnitsPerBet = unitsMatch ? parseDecimalLike(unitsMatch[1]) : null;
+
+  if (minStakeAmount === null && minUnitsPerBet === null) {
+    return null;
+  }
+
+  return {
+    minStakeAmount,
+    minUnitsPerBet,
+  };
+}
+
+function formatAmountWithCurrency(amount, currency = 'ARS') {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) {
+    return 'N/D';
+  }
+  const rounded = Math.round(value);
+  const formatted = new Intl.NumberFormat('es-AR').format(rounded);
+  const symbol = '$';
+  return `${symbol}${formatted} ${String(currency || 'ARS').toUpperCase()}`;
+}
+
+function formatProfileSummary(profile = {}) {
+  const safeProfile = profile || {};
+  const currency = safeProfile.currency || 'ARS';
+  const timezone = safeProfile.timezone || DEFAULT_USER_TIMEZONE;
+  const unitSize = toNumberOrNull(safeProfile.unitSize);
+  const bankroll = toNumberOrNull(safeProfile.bankroll);
+  const targetUtil = toNumberOrNull(safeProfile.targetEventUtilizationPct);
+  const stakeConfig = getStakeCalibrationConfig(safeProfile);
+
+  const lines = [
+    '⚙️ Config actual',
+    `- Bankroll: ${bankroll ? formatAmountWithCurrency(bankroll, currency) : 'No definido'}`,
+    `- Unidad: ${unitSize ? formatAmountWithCurrency(unitSize, currency) : 'No definida'}`,
+    `- Riesgo: ${safeProfile.riskProfile || 'No definido'}`,
+    `- Timezone: ${timezone}`,
+    `- Stake minimo: ${formatUnits(stakeConfig.minUnitsPerBet)}u / ${formatAmountWithCurrency(
+      stakeConfig.minStakeAmount,
+      currency
+    )}`,
+    `- Utilizacion objetivo evento: ${
+      targetUtil ? `${formatUnits(targetUtil)}%` : 'No definida'
+    }`,
+  ];
+
+  lines.push(
+    '',
+    'Si queres cambiar algo: `unidad 600`, `riesgo moderado`, `bankroll 120000`, `timezone America/Argentina/Buenos_Aires`.'
+  );
+
+  return lines.join('\n');
+}
+
+function getStakeCalibrationConfig(userProfile = {}) {
+  const minStakeAmount = toNumberOrNull(userProfile?.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT;
+  const minUnitsPerBet = toNumberOrNull(userProfile?.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT;
+  const unitSize = toNumberOrNull(userProfile?.unitSize);
+
+  let floorAmount = minStakeAmount;
+  let floorUnits = minUnitsPerBet;
+  if (unitSize && unitSize > 0) {
+    floorAmount = Math.max(minStakeAmount, minUnitsPerBet * unitSize);
+    floorUnits = Math.max(minUnitsPerBet, minStakeAmount / unitSize);
+  }
+
+  return {
+    unitSize,
+    minStakeAmount,
+    minUnitsPerBet,
+    floorAmount,
+    floorUnits,
+  };
+}
+
+function calibrateStakeLine(line = '', config = {}) {
+  const text = String(line || '');
+  if (!/stake/i.test(text)) {
+    return { line: text, changed: false };
+  }
+
+  const { floorAmount, floorUnits, unitSize } = config;
+  if (!Number.isFinite(floorAmount) && !Number.isFinite(floorUnits)) {
+    return { line: text, changed: false };
+  }
+
+  const unitsMatch = text.match(/([0-9]+(?:[.,][0-9]+)?)\s*u\b/i);
+  const amountMatch = text.match(/\$\s*([0-9][0-9\.\,]*)/);
+
+  const parsedUnits = unitsMatch ? parseDecimalLike(unitsMatch[1]) : null;
+  const parsedAmount = amountMatch ? parseDecimalLike(amountMatch[1]) : null;
+
+  let inferredUnits = parsedUnits;
+  let inferredAmount = parsedAmount;
+
+  if (inferredUnits === null && inferredAmount !== null && unitSize) {
+    inferredUnits = inferredAmount / unitSize;
+  }
+  if (inferredAmount === null && inferredUnits !== null && unitSize) {
+    inferredAmount = inferredUnits * unitSize;
+  }
+
+  if (inferredUnits === null && inferredAmount === null) {
+    return { line: text, changed: false };
+  }
+
+  let targetUnits = inferredUnits ?? floorUnits;
+  let targetAmount = inferredAmount ?? floorAmount;
+
+  if (Number.isFinite(floorUnits)) {
+    targetUnits = Math.max(targetUnits ?? floorUnits, floorUnits);
+  }
+  if (Number.isFinite(floorAmount)) {
+    targetAmount = Math.max(targetAmount ?? floorAmount, floorAmount);
+  }
+
+  if (unitSize) {
+    targetAmount = Math.max(targetAmount || 0, targetUnits * unitSize);
+    targetUnits = Math.max(targetUnits || 0, targetAmount / unitSize);
+  }
+
+  const needsAdjustByUnits =
+    inferredUnits !== null && Number.isFinite(floorUnits) && inferredUnits + 1e-9 < floorUnits;
+  const needsAdjustByAmount =
+    inferredAmount !== null && Number.isFinite(floorAmount) && inferredAmount + 1e-9 < floorAmount;
+  const needsAdjust = needsAdjustByUnits || needsAdjustByAmount;
+
+  if (!needsAdjust) {
+    return { line: text, changed: false };
+  }
+
+  let updated = text;
+  if (unitsMatch) {
+    const formattedUnits = `${formatUnits(targetUnits)}u`;
+    updated = updated.replace(unitsMatch[0], formattedUnits);
+  } else if (Number.isFinite(targetUnits)) {
+    updated = `${updated} (${formatUnits(targetUnits)}u)`;
+  }
+
+  if (amountMatch) {
+    updated = updated.replace(amountMatch[0], formatArsAmount(targetAmount));
+  } else if (Number.isFinite(targetAmount)) {
+    updated = `${updated} (=${formatArsAmount(targetAmount)})`;
+  }
+
+  return { line: updated, changed: true };
+}
+
+function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+
+  const userMessage = String(originalMessage || '');
+  const looksLikeDecisionTurn =
+    hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || /\b(stake|cuota|pick)\b/i.test(userMessage);
+  if (!looksLikeDecisionTurn || isLedgerOperationMessage(userMessage)) {
+    return text;
+  }
+
+  const config = getStakeCalibrationConfig(userProfile || {});
+  const lines = text.split('\n');
+  let changed = false;
+  const updatedLines = lines.map((line) => {
+    const next = calibrateStakeLine(line, config);
+    if (next.changed) changed = true;
+    return next.line;
+  });
+
+  if (!changed) {
+    return text;
+  }
+
+  updatedLines.push(
+    '',
+    `Nota de staking: ajusté el stake al piso configurado (${formatUnits(
+      config.minUnitsPerBet
+    )}u / ${formatArsAmount(config.minStakeAmount)}).`
+  );
+  return updatedLines.join('\n');
+}
+
+function enforceRationaleSection(reply = '', originalMessage = '') {
+  const text = String(reply || '').trim();
+  const userMessage = String(originalMessage || '');
+  const explicitRationaleRequest = /\b(fundament|explica|por que)\b/.test(
+    normalizeText(userMessage)
+  );
+  const looksLikeDecisionTurn =
+    hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || explicitRationaleRequest;
+  const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
+
+  if (
+    !text ||
+    !isRecommendationReply(text) ||
+    hasRationaleContent(text) ||
+    !looksLikeDecisionTurn ||
+    isOperationalLedgerTurn
+  ) {
+    return text;
+  }
+
+  return `${text}\n\nFundamento de la elección:\n- Tesis: el pick se basa en el cruce de estilos, contexto reciente y precio actual.\n- Riesgo: alta varianza en MMA; si cambia la linea o falta contexto, baja la confianza.\n- Regla de entrada: tomar solo si la cuota se mantiene en el umbral indicado; si empeora, no-bet.`;
+}
+
+function containsAbsoluteDate(text = '') {
+  return /\b20\d{2}-\d{2}-\d{2}\b/.test(text) || /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/.test(
+    text
+  );
+}
+
+function looksLikeNoEventClaim(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(no hay|no tengo|no aparece)\b.*\b(evento|ufc|cartelera)\b/.test(normalized);
+}
+
+function enforceCalendarNoEventContext(reply = '', originalMessage = '', temporalContext = null) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!isCalendarQuestion(originalMessage)) return text;
+  if (!looksLikeNoEventClaim(text)) return text;
+  if (containsAbsoluteDate(text)) return text;
+
+  const asOf = temporalContext?.nowLocal?.dateIso || new Date().toISOString().slice(0, 10);
+  const prev = shiftIsoDate(asOf, -1) || 'N/D';
+  const tz = temporalContext?.timezone || DEFAULT_USER_TIMEZONE;
+
+  return `${text}\n\nReferencia temporal usada: ${asOf} (${tz}). Tambien validé la ventana ${prev} -> ${asOf}.`;
+}
+
+function chooseLikelyActiveFightFromPendingBets(pendingBets = []) {
+  if (!Array.isArray(pendingBets) || !pendingBets.length) {
+    return { type: 'none' };
+  }
+
+  const groups = new Map();
+  for (const bet of pendingBets) {
+    const eventName = String(bet?.eventName || '').trim() || 'Evento no especificado';
+    const fight = String(bet?.fight || '').trim();
+    if (!fight) continue;
+    const key = `${eventName}||${fight}`;
+    const createdAtMs = Date.parse(bet?.recordedAt || bet?.updatedAt || '') || 0;
+    const existing = groups.get(key) || {
+      eventName,
+      fight,
+      count: 0,
+      latestCreatedAtMs: 0,
+      betIds: [],
+    };
+    existing.count += 1;
+    existing.latestCreatedAtMs = Math.max(existing.latestCreatedAtMs, createdAtMs);
+    if (Number.isInteger(Number(bet?.id))) {
+      existing.betIds.push(Number(bet.id));
+    }
+    groups.set(key, existing);
+  }
+
+  const ranked = Array.from(groups.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return b.latestCreatedAtMs - a.latestCreatedAtMs;
+  });
+
+  if (!ranked.length) {
+    return { type: 'none' };
+  }
+
+  if (ranked.length === 1) {
+    return { type: 'single', top: ranked[0], ranked };
+  }
+
+  const [top, second] = ranked;
+  if (top.count > second.count) {
+    return { type: 'single', top, ranked };
+  }
+
+  return { type: 'ambiguous', top, second, ranked };
 }
 
 function logConfiguration() {
@@ -420,6 +1274,25 @@ function summariseProfile(profile = {}) {
     chunks.push(`currency=${profile.currency}`);
   }
 
+  if (profile.timezone) {
+    chunks.push(`timezone=${profile.timezone}`);
+  }
+
+  if (profile.minStakeAmount !== null && profile.minStakeAmount !== undefined) {
+    chunks.push(`minStakeAmount=${profile.minStakeAmount}`);
+  }
+
+  if (profile.minUnitsPerBet !== null && profile.minUnitsPerBet !== undefined) {
+    chunks.push(`minUnitsPerBet=${profile.minUnitsPerBet}`);
+  }
+
+  if (
+    profile.targetEventUtilizationPct !== null &&
+    profile.targetEventUtilizationPct !== undefined
+  ) {
+    chunks.push(`targetEventUtilizationPct=${profile.targetEventUtilizationPct}`);
+  }
+
   if (profile.notes) {
     chunks.push(`notes=${truncateText(profile.notes, 180)}`);
   }
@@ -493,6 +1366,8 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Usa emojis de forma visible para mejorar legibilidad y tono (sin saturar: 1-2 por seccion).',
     'Objetivo principal: dar respuestas coherentes entre turnos y aprovechar herramientas antes de pedir datos al usuario.',
     'Para preguntas de calendario/evento/cartelera (por fecha o proximo evento), SIEMPRE usa web_search antes de responder.',
+    'Para consultas con hoy/manana/ahora/en vivo, resolve primero fecha/hora local del usuario usando TEMPORAL_CONTEXT y contempla ventana nocturna (dia actual + dia anterior + siguiente inmediato).',
+    'Antes de afirmar "no hay evento", valida explicitamente la ventana temporal completa y cita la fecha absoluta usada.',
     'Si hay conflicto entre fuentes, prioriza ufc.com, luego espn.com, luego otras.',
     'No inventes eventos ni fechas. Si no logras confirmar con web_search, dilo explicitamente.',
     'Cuando listes una cartelera, llama set_event_card para guardar evento+peleas en memoria.',
@@ -503,11 +1378,20 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Solo pide cuotas si el usuario quiere EV/staking fino; antes de pedirlas, intenta get_user_odds para usar cuotas guardadas.',
     'Cuando haya cuotas guardadas relevantes, usalas automaticamente sin pedirle al usuario que las reenvie.',
     'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
+    'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
+    'Para cambiar estado de apuestas existentes (WON/LOST/PENDING) o borrar/archivar, usa mutate_user_bets, nunca record_user_bet.',
+    'Si la referencia de pelea es ambigua (esa/anterior/recien), no ejecutes mutaciones: pedi desambiguacion con bet_id.',
+    'Si el target de mutacion es inequivoco (bet_id explicito o selector unico), ejecuta directo sin pedir confirmacion extra.',
+    'Si mutate_user_bets responde requiresConfirmation=true, pedile confirmacion explicita al usuario y luego ejecuta con confirm=true + confirmationToken.',
+    'Nunca confirmes una mutacion de ledger sin mostrar receipt (bet_id y nuevo estado).',
+    'Si el usuario pide corregir/revertir, usa undo_last_mutation para deshacer la ultima mutacion sensible.',
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
+    'Cuando sugieras stake, respeta min_stake_amount y min_units_per_bet del perfil; si el edge no justifica ese piso, propone NO_BET en lugar de stake simbolico.',
     'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
     'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
+    'Toda recomendacion debe incluir "Fundamento de la eleccion": tesis breve, riesgos y regla de entrada (cuota minima o condicion de no-bet).',
     'Cuando el usuario provea cuotas (texto o imagen), construye un JSON estructurado por pelea y llama store_user_odds una vez por pelea. Inclui sportsbook si el usuario lo menciona.',
     'Para peleas proximas, realiza una busqueda web rapida enfocada en cortes de peso agresivos, fallos de peso, hospitalizaciones o cambios de ultima hora en la semana previa; si hay señales relevantes, ajusta el analisis.',
     'Mantene el formato limpio y util para apostar; no repitas las cuotas mas de una vez.',
@@ -535,6 +1419,7 @@ function buildUserPayload({
   resolvedMessage,
   resolution,
   sessionMemory,
+  temporalContext,
   recentTurns,
   hasMedia,
   extraSections = [],
@@ -552,6 +1437,10 @@ function buildUserPayload({
 
   if (sessionMemory) {
     sections.push('', '[SESSION_MEMORY]', sessionMemory);
+  }
+
+  if (temporalContext) {
+    sections.push('', '[TEMPORAL_CONTEXT]', temporalContext);
   }
 
   sections.push('', '[RECENT_TURNS]', buildRecentTurnsText(recentTurns));
@@ -676,7 +1565,8 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   };
 }
 
-function buildResponsesTools() {
+function buildResponsesTools({ timezone = WEB_SEARCH_TIMEZONE } = {}) {
+  const normalizedTz = normalizeTimeZone(timezone || WEB_SEARCH_TIMEZONE);
   const tools = [
     {
       type: 'web_search',
@@ -686,7 +1576,7 @@ function buildResponsesTools() {
         country: WEB_SEARCH_COUNTRY,
         ...(WEB_SEARCH_REGION ? { region: WEB_SEARCH_REGION } : {}),
         ...(WEB_SEARCH_CITY ? { city: WEB_SEARCH_CITY } : {}),
-        ...(WEB_SEARCH_TIMEZONE ? { timezone: WEB_SEARCH_TIMEZONE } : {}),
+        ...(normalizedTz ? { timezone: normalizedTz } : {}),
       },
     },
     ...FUNCTION_TOOLS,
@@ -957,8 +1847,102 @@ export function createBettingWizard({
   ensureConfigured(providedClient);
   const client = getOpenAIClient(providedClient);
   logConfiguration();
+  const pendingLedgerMutationsByToken = new Map();
+  const pendingLedgerMutationTokensByScope = new Map();
+
+  function mutationScopeKey({ chatId, userId } = {}) {
+    return `${chatId || 'default'}:${userId || 'anon'}`;
+  }
+
+  function savePendingMutation(scopeKey, payload) {
+    if (!scopeKey || !payload) return null;
+    const token = createMutationToken();
+    pendingLedgerMutationsByToken.set(token, {
+      ...payload,
+      scopeKey,
+      token,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    const list = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    list.push(token);
+    pendingLedgerMutationTokensByScope.set(scopeKey, list);
+    return token;
+  }
+
+  function removeTokenFromScope(scopeKey, token) {
+    if (!scopeKey || !token) return;
+    const list = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    const next = list.filter((value) => value !== token);
+    if (next.length) {
+      pendingLedgerMutationTokensByScope.set(scopeKey, next);
+    } else {
+      pendingLedgerMutationTokensByScope.delete(scopeKey);
+    }
+  }
+
+  function consumePendingMutation(scopeKey, token) {
+    if (!scopeKey || !token) return null;
+    const entry = pendingLedgerMutationsByToken.get(token);
+    if (!entry) return null;
+    if (entry.scopeKey !== scopeKey) return null;
+    if (entry.expiresAt <= Date.now()) {
+      pendingLedgerMutationsByToken.delete(token);
+      removeTokenFromScope(scopeKey, token);
+      return null;
+    }
+    pendingLedgerMutationsByToken.delete(token);
+    removeTokenFromScope(scopeKey, token);
+    return entry;
+  }
+
+  function getPendingMutationsForScope(scopeKey) {
+    if (!scopeKey) return [];
+    const tokens = pendingLedgerMutationTokensByScope.get(scopeKey) || [];
+    const now = Date.now();
+    const entries = [];
+    for (const token of tokens) {
+      const entry = pendingLedgerMutationsByToken.get(token);
+      if (!entry) continue;
+      if (entry.expiresAt <= now) {
+        pendingLedgerMutationsByToken.delete(token);
+        continue;
+      }
+      entries.push(entry);
+    }
+    entries.sort((a, b) => a.createdAt - b.createdAt);
+    const activeTokens = entries.map((entry) => entry.token);
+    if (activeTokens.length) {
+      pendingLedgerMutationTokensByScope.set(scopeKey, activeTokens);
+    } else {
+      pendingLedgerMutationTokensByScope.delete(scopeKey);
+    }
+    return entries;
+  }
+
+  function consumeAllPendingMutations(scopeKey) {
+    const entries = getPendingMutationsForScope(scopeKey);
+    for (const entry of entries) {
+      pendingLedgerMutationsByToken.delete(entry.token);
+    }
+    pendingLedgerMutationTokensByScope.delete(scopeKey);
+    return entries;
+  }
+
+  function cleanupPendingMutations() {
+    const now = Date.now();
+    for (const [token, value] of pendingLedgerMutationsByToken.entries()) {
+      if (!value || value.expiresAt <= now) {
+        pendingLedgerMutationsByToken.delete(token);
+        if (value?.scopeKey) {
+          removeTokenFromScope(value.scopeKey, token);
+        }
+      }
+    }
+  }
 
   async function handleMessage(message, context = {}) {
+    cleanupPendingMutations();
     const chatId = String(context.chatId ?? 'default');
     const userId = context.userId ? String(context.userId) : null;
     const originalMessage = context.originalMessage || String(message || '');
@@ -981,10 +1965,12 @@ export function createBettingWizard({
     const wantsBetDecision = hasBetDecisionSignals(originalMessage);
     let oddsSnapshot = null;
     let ledgerSummary = null;
+    let userProfile = null;
 
     if (userId && userStore) {
       if (userStore.getUserProfile) {
         const profile = userStore.getUserProfile(userId);
+        userProfile = profile || null;
         if (conversationStore?.patch) {
           conversationStore.patch(chatId, { userProfile: profile });
         }
@@ -1015,6 +2001,574 @@ export function createBettingWizard({
         });
       }
     }
+
+    if (!userProfile && conversationStore?.getSession) {
+      userProfile = conversationStore.getSession(chatId)?.userProfile || null;
+    }
+
+    const temporalContext = buildTemporalContextSection({
+      timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
+      originalMessage,
+    });
+
+    if (isProfileSummaryRequest(originalMessage) && userId) {
+      const latestProfile =
+        userStore?.getUserProfile?.(userId) ||
+        userProfile ||
+        conversationStore?.getSession?.(chatId)?.userProfile ||
+        {};
+      return {
+        reply: formatProfileSummary(latestProfile),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
+    const stakePreference = parseStakePreferenceMessage(originalMessage);
+    const profilePreference = parseProfilePreferenceMessage(originalMessage);
+    if ((stakePreference || profilePreference) && userId && userStore?.updateUserProfile) {
+      const updates = {};
+      if (stakePreference?.minStakeAmount !== null && stakePreference?.minStakeAmount !== undefined) {
+        updates.minStakeAmount = stakePreference.minStakeAmount;
+      }
+      if (stakePreference?.minUnitsPerBet !== null && stakePreference?.minUnitsPerBet !== undefined) {
+        updates.minUnitsPerBet = stakePreference.minUnitsPerBet;
+      }
+      if (profilePreference?.updates && Object.keys(profilePreference.updates).length) {
+        Object.assign(updates, profilePreference.updates);
+      }
+
+      if (Object.keys(updates).length) {
+        const nextProfile = userStore.updateUserProfile(userId, updates) || {};
+        if (conversationStore?.patch) {
+          conversationStore.patch(chatId, { userProfile: nextProfile });
+        }
+        const onlyStakeUpdate =
+          Object.keys(updates).every((key) => ['minStakeAmount', 'minUnitsPerBet'].includes(key)) &&
+          Object.keys(updates).length > 0;
+
+        const currency = nextProfile.currency || 'ARS';
+        const lines = [onlyStakeUpdate ? '✅ Perfil de staking actualizado.' : '✅ Config actualizada.'];
+        if (onlyStakeUpdate) {
+          lines.push(
+            `- Piso por apuesta: ${formatUnits(
+              toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
+            )}u / ${formatAmountWithCurrency(
+              toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT,
+              currency
+            )}`,
+            'En las proximas recomendaciones voy a respetar ese minimo.'
+          );
+        } else {
+          if (updates.bankroll !== undefined) {
+            lines.push(`- Bankroll: ${formatAmountWithCurrency(nextProfile.bankroll, currency)}`);
+          }
+          if (updates.unitSize !== undefined) {
+            lines.push(`- Unidad: ${formatAmountWithCurrency(nextProfile.unitSize, currency)}`);
+          }
+          if (updates.riskProfile !== undefined) {
+            lines.push(`- Riesgo: ${nextProfile.riskProfile || 'No definido'}`);
+          }
+          if (updates.timezone !== undefined) {
+            lines.push(`- Timezone: ${nextProfile.timezone || DEFAULT_USER_TIMEZONE}`);
+          }
+          if (updates.minStakeAmount !== undefined || updates.minUnitsPerBet !== undefined) {
+            lines.push(
+              `- Stake minimo: ${formatUnits(
+                toNumberOrNull(nextProfile.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT
+              )}u / ${formatAmountWithCurrency(
+                toNumberOrNull(nextProfile.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT,
+                currency
+              )}`
+            );
+          }
+          if (updates.targetEventUtilizationPct !== undefined) {
+            lines.push(
+              `- Utilizacion objetivo evento: ${formatUnits(
+                toNumberOrNull(nextProfile.targetEventUtilizationPct) || 0
+              )}%`
+            );
+          }
+        }
+
+        const warnings = profilePreference?.warnings || [];
+        if (warnings.length) {
+          lines.push('', ...warnings.map((warning) => `⚠️ ${warning}`));
+        }
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (profilePreference?.warnings?.length) {
+        const lines = ['No pude aplicar cambios en Config por estos motivos:'];
+        for (const warning of profilePreference.warnings) {
+          lines.push(`- ${warning}`);
+        }
+        lines.push(
+          '',
+          'Ejemplos validos: `unidad 600`, `riesgo moderado`, `bankroll 120000`, `timezone America/Argentina/Buenos_Aires`.'
+        );
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+    }
+
+    const mutationScope = mutationScopeKey({ chatId, userId });
+    const confirmationIntent = parseConfirmationIntent(originalMessage);
+
+    if (userId && userStore?.applyBetMutation) {
+      const pendingNow = getPendingMutationsForScope(mutationScope);
+      if (
+        pendingNow.length &&
+        confirmationIntent.hasPositive &&
+        !confirmationIntent.hasNegative
+      ) {
+        const selectedEntries = [];
+
+        if (confirmationIntent.tokens.length) {
+          for (const token of confirmationIntent.tokens) {
+            const consumed = consumePendingMutation(mutationScope, token);
+            if (consumed) {
+              selectedEntries.push(consumed);
+            }
+          }
+        } else {
+          const matchesIntent = (entry) => {
+            if (confirmationIntent.wantsAll) {
+              return true;
+            }
+
+            const operation = String(entry.payload?.operation || '').trim();
+            const result = String(entry.payload?.result || '').trim();
+            let hasSpecificHint = false;
+
+            if (confirmationIntent.wantsArchive) {
+              hasSpecificHint = true;
+              if (operation === 'archive') {
+                return true;
+              }
+            }
+
+            if (confirmationIntent.wantsSetPending) {
+              hasSpecificHint = true;
+              if (operation === 'set_pending') {
+                return true;
+              }
+            }
+
+            if (confirmationIntent.wantsSettle || confirmationIntent.settleResult) {
+              hasSpecificHint = true;
+              if (operation === 'settle') {
+                if (!confirmationIntent.settleResult) {
+                  return true;
+                }
+                if (result === confirmationIntent.settleResult) {
+                  return true;
+                }
+              }
+            }
+
+            // Flexible default: plain "confirmo" applies all pending.
+            if (!hasSpecificHint) {
+              return true;
+            }
+            return false;
+          };
+
+          const filtered = pendingNow.filter(matchesIntent);
+          const source = filtered.length ? filtered : pendingNow;
+          for (const entry of source) {
+            const consumed = consumePendingMutation(mutationScope, entry.token);
+            if (consumed) {
+              selectedEntries.push(consumed);
+            }
+          }
+        }
+
+        if (!selectedEntries.length) {
+          const pendingHint = getPendingMutationsForScope(mutationScope);
+          const hint = pendingHint.length
+            ? `Pendientes: ${pendingHint.map((entry) => entry.token).join(', ')}`
+            : 'No hay mutaciones pendientes activas para confirmar.';
+          return {
+            reply: `No encontré confirmaciones pendientes válidas. ${hint}`,
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+
+        const outcomes = [];
+        for (const entry of selectedEntries) {
+          const applyPayload = {
+            ...entry.payload,
+            confirm: true,
+            metadata: {
+              ...(entry.payload?.metadata || {}),
+              confirmationToken: entry.token,
+              confirmationSource: 'user_confirm_message',
+            },
+          };
+          const applied = userStore.applyBetMutation(userId, applyPayload);
+          outcomes.push({
+            token: entry.token,
+            operation: entry.payload?.operation || '',
+            applied,
+          });
+        }
+
+        const success = outcomes.filter((item) => item.applied?.ok);
+        const failed = outcomes.filter((item) => !item.applied?.ok);
+        const lines = [];
+
+        if (success.length) {
+          lines.push(`✅ Confirmación aplicada: ${success.length} mutación(es).`);
+          for (const item of success) {
+            const operation = formatMutationActionLabel(item.operation);
+            const count = Number(item.applied?.affectedCount) || 0;
+            lines.push(`- ${operation} (${item.token}): ${count} apuesta(s) afectada(s).`);
+            const receipts = Array.isArray(item.applied?.receipts)
+              ? item.applied.receipts.slice(0, 5)
+              : [];
+            for (const receipt of receipts) {
+              const descriptor = [receipt.eventName, receipt.fight, receipt.pick]
+                .filter(Boolean)
+                .join(' | ');
+              lines.push(
+                `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}${
+                  descriptor ? ` | ${descriptor}` : ''
+                }`
+              );
+            }
+          }
+        }
+
+        if (failed.length) {
+          lines.push('', `⚠️ Mutaciones con error: ${failed.length}.`);
+          for (const item of failed) {
+            lines.push(
+              `- ${formatMutationActionLabel(item.operation)} (${item.token}): ${
+                item.applied?.error || 'error_desconocido'
+              }`
+            );
+          }
+        }
+
+        if (!lines.length) {
+          lines.push('No hubo cambios para confirmar en este turno.');
+        }
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+    }
+
+    if (userId && userStore?.undoLastBetMutation && isUndoRequest(originalMessage)) {
+      const undone = userStore.undoLastBetMutation(userId, {});
+      if (!undone?.ok) {
+        return {
+          reply:
+            undone?.message ||
+            'No encontre una mutacion reciente para revertir. Si queres, pasame el bet_id y lo revisamos manualmente.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const receipt = undone.receipt || {};
+      const lines = [
+        '✅ Reversion aplicada correctamente.',
+        `- Mutacion revertida: ${String(undone.undoneAction || 'N/D').toUpperCase()} (#${undone.undoneMutationId || 'N/D'})`,
+        `- bet_id: ${receipt.betId || 'N/D'}`,
+      ];
+      if (receipt.eventName) lines.push(`- Evento: ${receipt.eventName}`);
+      if (receipt.fight) lines.push(`- Pelea: ${receipt.fight}`);
+      if (receipt.pick) lines.push(`- Pick: ${receipt.pick}`);
+      lines.push(
+        `- Estado: ${(receipt.previousResult || 'pending').toUpperCase()} -> ${(receipt.newResult || 'pending').toUpperCase()}`
+      );
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
+    if (userId && userStore?.listUserBets && isLiveFightQueueQuestion(originalMessage)) {
+      const pendingBets = userStore.listUserBets(userId, {
+        status: 'pending',
+        includeArchived: false,
+        limit: 60,
+      });
+      const liveHint = chooseLikelyActiveFightFromPendingBets(pendingBets);
+
+      if (liveHint.type === 'single' && liveHint.top) {
+        const top = liveHint.top;
+        const idsPreview = (top.betIds || []).slice(0, 4).join(', ');
+        const lines = [
+          `Ahora, por tu contexto de apuestas abiertas, la pelea que sigue/estás monitoreando es:`,
+          '',
+          `🥊 ${top.fight}`,
+          `Evento: ${top.eventName}`,
+          '',
+          `Lo infiero por ${top.count} apuesta(s) pending en esa pelea${
+            idsPreview ? ` (bet_id: ${idsPreview})` : ''
+          }.`,
+          'Si querés, te confirmo la secuencia oficial en vivo en el próximo turno.',
+        ];
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (liveHint.type === 'ambiguous') {
+        const options = (liveHint.ranked || []).slice(0, 3).map((entry, idx) => {
+          return `${idx + 1}. ${entry.fight} (${entry.eventName}) - ${entry.count} pending`;
+        });
+        const lines = [
+          'Tengo más de una pelea candidata en tus apuestas pendientes y no quiero inventarte la "que sigue".',
+          '',
+          ...options,
+          '',
+          'Decime el número (1/2/3) o pasame el fight exacto y te lo confirmo.',
+        ];
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+    }
+
+    const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
+      if (!userId) {
+        return { ok: false, error: 'userId no disponible para mutaciones de apuestas.' };
+      }
+      if (!userStore?.previewBetMutation || !userStore?.applyBetMutation) {
+        return {
+          ok: false,
+          error: 'userStore no soporta previewBetMutation/applyBetMutation.',
+        };
+      }
+
+      const operation = String(rawArgs.operation || '').trim().toLowerCase();
+      const normalizedResult = normalizeBetResult(rawArgs.result);
+      const explicitBetIds = parseBetIds(rawArgs.betIds);
+      const inferredBetIds =
+        explicitBetIds.length > 0 ? [] : extractBetIdsFromMessage(originalMessage);
+      const betIds = explicitBetIds.length ? explicitBetIds : inferredBetIds;
+      const inferredFight =
+        String(rawArgs.fight || '').trim() ||
+        resolvedFightLabel(runtimeState.resolvedFight || resolution?.resolvedFight || null) ||
+        '';
+      const payload = {
+        operation,
+        result: normalizedResult || undefined,
+        betIds: betIds.length ? betIds : undefined,
+        eventName: rawArgs.eventName ? String(rawArgs.eventName).trim() : undefined,
+        fight: inferredFight || undefined,
+        pick: rawArgs.pick ? String(rawArgs.pick).trim() : undefined,
+        limit: Number.isFinite(Number(rawArgs.limit)) ? Number(rawArgs.limit) : undefined,
+        metadata: {
+          source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
+          reason: rawArgs.reason ? String(rawArgs.reason).trim() : null,
+          isDestructive: operation === 'archive' || operation === 'settle',
+          chatId,
+          originalMessage: truncateText(originalMessage, 300),
+        },
+      };
+
+      if (operation === 'settle' && !normalizedResult) {
+        return {
+          ok: false,
+          error: 'settle_requires_result',
+        };
+      }
+
+      const fightNotStartedSignals = /\b(no empezo|no empezó|todavia no empezo|todavía no empezó|aun no empezo|aún no empezó)\b/i;
+      if (operation === 'settle' && fightNotStartedSignals.test(originalMessage)) {
+        return {
+          ok: false,
+          error: 'fight_not_finished_guard',
+          message:
+            'No se puede cerrar WON/LOST una pelea marcada como no iniciada. Confirmá el resultado al finalizar.',
+        };
+      }
+
+      const ambiguousReference = hasAmbiguousFightReference(originalMessage);
+      if (operation === 'settle' && ambiguousReference && !betIds.length) {
+        const candidates = userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: 'pending',
+              includeArchived: false,
+              limit: 8,
+            })
+          : [];
+        return {
+          ok: false,
+          error: 'ambiguous_fight_reference',
+          requiresDisambiguation: true,
+          candidates,
+          message:
+            'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de cerrar.',
+        };
+      }
+
+      const hasStrongSelector =
+        betIds.length > 0 ||
+        Boolean(payload.eventName) ||
+        Boolean(payload.fight) ||
+        Boolean(payload.pick);
+      if (
+        (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
+        !hasStrongSelector
+      ) {
+        const candidates = userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: operation === 'settle' ? 'pending' : null,
+              includeArchived: false,
+              limit: 8,
+            })
+          : [];
+        return {
+          ok: false,
+          error: 'missing_disambiguation_selector',
+          requiresDisambiguation: true,
+          candidates,
+          message:
+            'Necesito desambiguar que apuesta querés tocar. Indicame bet_id (o pelea exacta + pick) y lo ejecuto.',
+        };
+      }
+
+      const confirm = rawArgs.confirm === true;
+      const confirmationToken = String(rawArgs.confirmationToken || '').trim();
+
+      if (confirm) {
+        let pending = null;
+        if (confirmationToken) {
+          pending = consumePendingMutation(mutationScope, confirmationToken);
+        } else {
+          const pendingByScope = getPendingMutationsForScope(mutationScope);
+          const matching = pendingByScope.filter((entry) => {
+            const sameOperation =
+              String(entry.payload?.operation || '') === String(payload.operation || '');
+            const sameResult =
+              !payload.result || String(entry.payload?.result || '') === String(payload.result || '');
+            return sameOperation && sameResult;
+          });
+          if (matching.length === 1) {
+            pending = consumePendingMutation(mutationScope, matching[0].token);
+          }
+        }
+
+        if (!pending) {
+          return {
+            ok: false,
+            error: 'invalid_or_expired_confirmation_token',
+            needsConfirmation: true,
+            pendingTokens: getPendingMutationsForScope(mutationScope).map((entry) => ({
+              token: entry.token,
+              operation: entry.payload?.operation || null,
+              result: entry.payload?.result || null,
+            })),
+          };
+        }
+
+        const applyPayload = {
+          ...pending.payload,
+          confirm: true,
+          metadata: {
+            ...pending.payload.metadata,
+            confirmationToken,
+          },
+        };
+
+        const applied = userStore.applyBetMutation(userId, applyPayload);
+        if (!applied?.ok) {
+          return applied;
+        }
+
+        return {
+          ok: true,
+          mutationReceipt: {
+            operation: applied.operation,
+            affectedCount: applied.affectedCount,
+            receipts: applied.receipts || [],
+          },
+          ledgerSummary: applied.ledgerSummary || null,
+        };
+      }
+
+      const preview = userStore.previewBetMutation(userId, payload);
+      if (!preview?.ok) {
+        return preview;
+      }
+
+      if (preview.requiresConfirmation) {
+        const token = savePendingMutation(mutationScope, { payload });
+        return {
+          ok: false,
+          requiresConfirmation: true,
+          confirmationToken: token,
+          preview: {
+            operation: preview.operation,
+            result: preview.result || null,
+            candidateCount: preview.candidates?.length || 0,
+            candidates: preview.candidates || [],
+          },
+          message:
+            'Mutacion sensible detectada. Pedi confirmacion explicita del usuario y luego reintenta con confirm=true + confirmationToken.',
+        };
+      }
+
+      const applied = userStore.applyBetMutation(userId, {
+        ...payload,
+        confirm: true,
+      });
+      if (!applied?.ok) {
+        return applied;
+      }
+
+      return {
+        ok: true,
+        mutationReceipt: {
+          operation: applied.operation,
+          affectedCount: applied.affectedCount,
+          receipts: applied.receipts || [],
+        },
+        ledgerSummary: applied.ledgerSummary || null,
+      };
+    };
 
     const executeTool = async (call) => {
       const name = call.name || '';
@@ -1099,6 +2653,10 @@ export function createBettingWizard({
             unitSize: toNumberOrNull(args.unitSize),
             riskProfile: args.riskProfile ? String(args.riskProfile).trim() : null,
             currency: args.currency ? String(args.currency).trim() : null,
+            timezone: args.timezone ? normalizeTimeZone(String(args.timezone)) : null,
+            minStakeAmount: toNumberOrNull(args.minStakeAmount),
+            minUnitsPerBet: toNumberOrNull(args.minUnitsPerBet),
+            targetEventUtilizationPct: toNumberOrNull(args.targetEventUtilizationPct),
             notes: args.notes ? truncateText(String(args.notes), 400) : '',
           };
 
@@ -1134,6 +2692,10 @@ export function createBettingWizard({
             };
           }
 
+          if (args.operation) {
+            return runMutateUserBets(args, { fromLegacyRecordTool: true });
+          }
+
           const record = {
             eventName: args.eventName ? String(args.eventName).trim() : null,
             fight: args.fight ? String(args.fight).trim() : null,
@@ -1141,15 +2703,95 @@ export function createBettingWizard({
             odds: toNumberOrNull(args.odds),
             stake: toNumberOrNull(args.stake),
             units: toNumberOrNull(args.units),
-            result: args.result ? String(args.result).trim() : null,
+            result: normalizeBetResult(args.result) || 'pending',
             notes: args.notes ? truncateText(String(args.notes), 240) : null,
           };
+
+          const looksLikeLegacySettle =
+            record.result &&
+            record.result !== 'pending' &&
+            record.stake === null &&
+            record.units === null &&
+            record.odds === null;
+
+          if (looksLikeLegacySettle) {
+            return runMutateUserBets(
+              {
+                operation: 'settle',
+                result: record.result,
+                betIds: parseBetIds(args.betIds),
+                eventName: record.eventName,
+                fight: record.fight,
+                pick: record.pick,
+                confirm: args.confirm === true,
+                confirmationToken: args.confirmationToken
+                  ? String(args.confirmationToken).trim()
+                  : '',
+                reason: 'legacy_record_user_bet_settle',
+              },
+              { fromLegacyRecordTool: true }
+            );
+          }
 
           const stored = userStore.addBetRecord(userId, record);
           return {
             ok: true,
             record: stored,
+            mutationReceipt: {
+              action: 'create',
+              betId: stored?.id || null,
+              newResult: stored?.result || null,
+              updatedAt: stored?.updatedAt || stored?.recordedAt || null,
+            },
           };
+        }
+
+        case 'list_user_bets': {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para apuestas.' };
+          }
+          if (!userStore?.listUserBets) {
+            return { ok: false, error: 'userStore no soporta listUserBets.' };
+          }
+
+          const bets = userStore.listUserBets(userId, {
+            eventName: args.eventName ? String(args.eventName).trim() : null,
+            fight:
+              args.fight
+                ? String(args.fight).trim()
+                : resolvedFightLabel(runtimeState.resolvedFight || resolution?.resolvedFight),
+            pick: args.pick ? String(args.pick).trim() : null,
+            status: args.status ? String(args.status).trim() : null,
+            includeArchived: args.includeArchived === true,
+            limit: Number.isFinite(Number(args.limit)) ? Number(args.limit) : 30,
+          });
+
+          return {
+            ok: true,
+            count: bets.length,
+            bets,
+          };
+        }
+
+        case 'mutate_user_bets': {
+          return runMutateUserBets(args);
+        }
+
+        case 'undo_last_mutation': {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para undo.' };
+          }
+          if (!userStore?.undoLastBetMutation) {
+            return {
+              ok: false,
+              error: 'userStore no soporta undoLastBetMutation.',
+            };
+          }
+          return userStore.undoLastBetMutation(userId, {
+            windowMinutes: Number.isFinite(Number(args.windowMinutes))
+              ? Number(args.windowMinutes)
+              : undefined,
+          });
         }
 
         case 'store_user_odds': {
@@ -1350,12 +2992,13 @@ export function createBettingWizard({
         resolvedMessage,
         resolution,
         sessionMemory,
+        temporalContext: temporalContext.sectionText,
         recentTurns,
         hasMedia,
         extraSections,
       });
 
-      const tools = buildResponsesTools();
+      const tools = buildResponsesTools({ timezone: temporalContext.timezone });
 
       const messageContent = [{ type: 'input_text', text: userPayload }];
       const extraItems = [];
@@ -1441,9 +3084,20 @@ export function createBettingWizard({
       const citationFooter = shouldShowCitations(originalMessage)
         ? formatCitationsFooter(result.citations)
         : '';
+      const replyWithRationale = enforceRationaleSection(reply, originalMessage);
+      const replyWithStakeCalibration = enforceStakeCalibration(
+        replyWithRationale,
+        originalMessage,
+        userProfile || {}
+      );
+      const replyWithTemporalGuard = enforceCalendarNoEventContext(
+        replyWithStakeCalibration,
+        originalMessage,
+        temporalContext
+      );
 
       return {
-        reply: `${reply}${citationFooter}`,
+        reply: `${replyWithTemporalGuard}${citationFooter}`,
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
           eventCard: runtimeState.eventCard,

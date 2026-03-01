@@ -10,6 +10,13 @@ Objetivo: atacar primero riesgo de integridad de datos y luego mejorar precision
 - Mover reglas criticas a codigo deterministico (no solo prompt).
 - Cada PR debe incluir pruebas de regresion de incidentes reales.
 
+## Progreso
+
+- 2026-02-22: PR1 en avance.
+  - Implementado: base de mutaciones seguras (`preview/apply`), auditoria append-only (`bet_mutations`), receipts de escritura y nuevas tools de ledger (`list_user_bets`, `mutate_user_bets`).
+  - Implementado: confirmacion por token para mutaciones sensibles y guardrail inicial para no cerrar peleas marcadas como "no empezo".
+  - Implementado: pruebas de regresion nuevas en `__tests__/bettingWizard.test.js` para confirmacion y settle legacy ambiguo.
+
 ## PR 1 - Ledger Safety Core (Bloqueante)
 
 Prioridad: Critica  

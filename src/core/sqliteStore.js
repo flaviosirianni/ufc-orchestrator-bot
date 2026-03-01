@@ -6,6 +6,7 @@ import '../core/env.js';
 
 const DB_PATH =
   process.env.DB_PATH || path.resolve(process.cwd(), 'data', 'bot.db');
+const LEDGER_UNDO_WINDOW_MINUTES = Number(process.env.LEDGER_UNDO_WINDOW_MINUTES ?? '30');
 
 let dbInstance = null;
 
@@ -61,6 +62,10 @@ function initSchema(db) {
       unit_size REAL,
       risk_profile TEXT,
       currency TEXT,
+      timezone TEXT,
+      min_stake_amount REAL,
+      min_units_per_bet REAL,
+      target_event_utilization_pct REAL,
       notes TEXT,
       updated_at TEXT
     );
@@ -76,8 +81,32 @@ function initSchema(db) {
       units REAL,
       result TEXT,
       notes TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      settled_at TEXT,
+      archived_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bets_user_created
+      ON bets (telegram_user_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS bet_mutations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT,
+      bet_id INTEGER,
+      action TEXT,
+      prev_result TEXT,
+      new_result TEXT,
+      prev_archived_at TEXT,
+      new_archived_at TEXT,
+      metadata TEXT,
       created_at TEXT
     );
+
+    CREATE INDEX IF NOT EXISTS idx_bet_mutations_user_time
+      ON bet_mutations (telegram_user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_bet_mutations_bet_time
+      ON bet_mutations (bet_id, created_at);
 
     CREATE TABLE IF NOT EXISTS ledger_summary (
       telegram_user_id TEXT PRIMARY KEY,
@@ -115,6 +144,23 @@ function initSchema(db) {
       ON odds_snapshots (telegram_user_id, odds_hash);
     CREATE INDEX IF NOT EXISTS idx_odds_user_fight
       ON odds_snapshots (telegram_user_id, fight_id);
+
+    CREATE TABLE IF NOT EXISTS fight_history_cache (
+      cache_key TEXT PRIMARY KEY,
+      sheet_id TEXT,
+      range_name TEXT,
+      row_count INTEGER DEFAULT 0,
+      hash TEXT,
+      rows_json TEXT,
+      last_sync_at TEXT,
+      last_sync_updated_cache INTEGER DEFAULT 0,
+      latest_fight_date TEXT,
+      sheet_age_days INTEGER,
+      potential_gap INTEGER DEFAULT 0,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fight_history_cache_updated
+      ON fight_history_cache (updated_at);
 
     CREATE TABLE IF NOT EXISTS usage_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +218,51 @@ function initSchema(db) {
   `);
 }
 
+function ensureBetSchema(db) {
+  const columns = db.prepare("PRAGMA table_info('bets')").all();
+  const names = new Set(columns.map((row) => row?.name).filter(Boolean));
+
+  if (!names.has('updated_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN updated_at TEXT');
+  }
+  if (!names.has('settled_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN settled_at TEXT');
+  }
+  if (!names.has('archived_at')) {
+    db.exec('ALTER TABLE bets ADD COLUMN archived_at TEXT');
+  }
+
+  db.exec(
+    "UPDATE bets SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL"
+  );
+  db.exec(
+    "UPDATE bets SET result = 'pending' WHERE result IS NULL OR TRIM(result) = ''"
+  );
+
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_bets_user_active
+      ON bets (telegram_user_id, archived_at, created_at)`
+  );
+}
+
+function ensureUserProfileSchema(db) {
+  const columns = db.prepare("PRAGMA table_info('user_profiles')").all();
+  const names = new Set(columns.map((row) => row?.name).filter(Boolean));
+
+  if (!names.has('timezone')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN timezone TEXT');
+  }
+  if (!names.has('min_stake_amount')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN min_stake_amount REAL');
+  }
+  if (!names.has('min_units_per_bet')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN min_units_per_bet REAL');
+  }
+  if (!names.has('target_event_utilization_pct')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN target_event_utilization_pct REAL');
+  }
+}
+
 export function getDb() {
   if (dbInstance) {
     return dbInstance;
@@ -182,6 +273,8 @@ export function getDb() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   initSchema(db);
+  ensureBetSchema(db);
+  ensureUserProfileSchema(db);
   dbInstance = db;
   return dbInstance;
 }
@@ -317,12 +410,19 @@ export function getUserProfile(userId) {
       riskProfile: null,
       currency: null,
       notes: '',
+      timezone: null,
+      minStakeAmount: null,
+      minUnitsPerBet: null,
+      targetEventUtilizationPct: null,
     };
   }
   const db = getDb();
   const row = db
     .prepare(
-      'SELECT bankroll, unit_size, risk_profile, currency, notes FROM user_profiles WHERE telegram_user_id = ?'
+      `SELECT bankroll, unit_size, risk_profile, currency, timezone,
+              min_stake_amount, min_units_per_bet, target_event_utilization_pct, notes
+       FROM user_profiles
+       WHERE telegram_user_id = ?`
     )
     .get(userId);
   return {
@@ -330,6 +430,10 @@ export function getUserProfile(userId) {
     unitSize: row?.unit_size ?? null,
     riskProfile: row?.risk_profile ?? null,
     currency: row?.currency ?? null,
+    timezone: row?.timezone ?? null,
+    minStakeAmount: row?.min_stake_amount ?? null,
+    minUnitsPerBet: row?.min_units_per_bet ?? null,
+    targetEventUtilizationPct: row?.target_event_utilization_pct ?? null,
     notes: row?.notes ?? '',
   };
 }
@@ -343,17 +447,29 @@ export function updateUserProfile(userId, updates = {}) {
     unitSize: updates.unitSize ?? current.unitSize,
     riskProfile: updates.riskProfile ?? current.riskProfile,
     currency: updates.currency ?? current.currency,
+    timezone: updates.timezone ?? current.timezone,
+    minStakeAmount: updates.minStakeAmount ?? current.minStakeAmount,
+    minUnitsPerBet: updates.minUnitsPerBet ?? current.minUnitsPerBet,
+    targetEventUtilizationPct:
+      updates.targetEventUtilizationPct ?? current.targetEventUtilizationPct,
     notes: updates.notes ?? current.notes,
   };
 
   db.prepare(
-    `INSERT INTO user_profiles (telegram_user_id, bankroll, unit_size, risk_profile, currency, notes, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO user_profiles (
+      telegram_user_id, bankroll, unit_size, risk_profile, currency, timezone,
+      min_stake_amount, min_units_per_bet, target_event_utilization_pct, notes, updated_at
+    )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        bankroll = excluded.bankroll,
        unit_size = excluded.unit_size,
        risk_profile = excluded.risk_profile,
        currency = excluded.currency,
+       timezone = excluded.timezone,
+       min_stake_amount = excluded.min_stake_amount,
+       min_units_per_bet = excluded.min_units_per_bet,
+       target_event_utilization_pct = excluded.target_event_utilization_pct,
        notes = excluded.notes,
        updated_at = excluded.updated_at`
   ).run(
@@ -362,6 +478,10 @@ export function updateUserProfile(userId, updates = {}) {
     next.unitSize,
     next.riskProfile,
     next.currency,
+    next.timezone,
+    next.minStakeAmount,
+    next.minUnitsPerBet,
+    next.targetEventUtilizationPct,
     next.notes,
     nowIso()
   );
@@ -371,44 +491,222 @@ export function updateUserProfile(userId, updates = {}) {
 
 function normalizeResult(result = '') {
   const value = String(result || '').toLowerCase();
-  if (value.includes('win') || value.includes('won')) return 'win';
-  if (value.includes('loss') || value.includes('lose')) return 'loss';
-  if (value.includes('push') || value.includes('draw')) return 'push';
+  if (!value.trim()) return 'pending';
+  if (
+    value.includes('pending') ||
+    value.includes('pend') ||
+    value.includes('open') ||
+    value.includes('abierta')
+  ) {
+    return 'pending';
+  }
+  if (
+    value.includes('win') ||
+    value.includes('won') ||
+    value.includes('gan')
+  ) {
+    return 'win';
+  }
+  if (
+    value.includes('loss') ||
+    value.includes('lose') ||
+    value.includes('lost') ||
+    value.includes('perd')
+  ) {
+    return 'loss';
+  }
+  if (
+    value.includes('push') ||
+    value.includes('draw') ||
+    value.includes('void') ||
+    value.includes('nula')
+  ) {
+    return 'push';
+  }
   return null;
 }
 
-export function addBetRecord(userId, record = {}) {
+function normalizeLooseText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isSettledResult(result = '') {
+  return result === 'win' || result === 'loss' || result === 'push';
+}
+
+function mapBetRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    eventName: row.event_name,
+    fight: row.fight,
+    pick: row.pick,
+    odds: row.odds,
+    stake: row.stake,
+    units: row.units,
+    result: normalizeResult(row.result) || 'pending',
+    notes: row.notes,
+    recordedAt: row.created_at,
+    updatedAt: row.updated_at || row.created_at,
+    settledAt: row.settled_at || null,
+    archivedAt: row.archived_at || null,
+  };
+}
+
+function mapPendingBetForAuto(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    telegramUserId: row.telegram_user_id ? String(row.telegram_user_id) : null,
+    eventName: row.event_name || null,
+    fight: row.fight || null,
+    pick: row.pick || null,
+    odds: row.odds ?? null,
+    stake: row.stake ?? null,
+    units: row.units ?? null,
+    result: normalizeResult(row.result) || 'pending',
+    recordedAt: row.created_at || null,
+    updatedAt: row.updated_at || row.created_at || null,
+  };
+}
+
+function listBetRowsForUser(
+  db,
+  userId,
+  { includeArchived = false, limit = 300 } = {}
+) {
+  if (!userId) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
+       FROM bets
+       WHERE telegram_user_id = ?
+       ORDER BY id DESC
+       LIMIT ?`
+    )
+    .all(userId, Math.max(1, Number(limit) || 300));
+
+  if (includeArchived) {
+    return rows;
+  }
+  return rows.filter((row) => !row.archived_at);
+}
+
+function filterBetRows(rows = [], filter = {}) {
+  const eventNameNorm = normalizeLooseText(filter.eventName || '');
+  const fightNorm = normalizeLooseText(filter.fight || '');
+  const pickNorm = normalizeLooseText(filter.pick || '');
+  const rawStatus = String(filter.status ?? '').trim();
+  const wantedStatus = rawStatus ? normalizeResult(rawStatus) : null;
+  const wantedIds = new Set(
+    Array.isArray(filter.betIds)
+      ? filter.betIds
+          .map((value) => Number(value))
+          .filter((value) => Number.isInteger(value) && value > 0)
+      : []
+  );
+
+  return rows.filter((row) => {
+    if (wantedIds.size && !wantedIds.has(Number(row.id))) {
+      return false;
+    }
+
+    if (eventNameNorm) {
+      const rowEvent = normalizeLooseText(row.event_name || '');
+      if (!rowEvent.includes(eventNameNorm)) {
+        return false;
+      }
+    }
+
+    if (fightNorm) {
+      const rowFight = normalizeLooseText(row.fight || '');
+      if (!rowFight.includes(fightNorm)) {
+        return false;
+      }
+    }
+
+    if (pickNorm) {
+      const rowPick = normalizeLooseText(row.pick || '');
+      if (!rowPick.includes(pickNorm)) {
+        return false;
+      }
+    }
+
+    if (wantedStatus) {
+      const rowStatus = normalizeResult(row.result) || 'pending';
+      if (rowStatus !== wantedStatus) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function logBetMutation(db, {
+  userId,
+  betId,
+  action,
+  prevResult = null,
+  nextResult = null,
+  prevArchivedAt = null,
+  nextArchivedAt = null,
+  metadata = null,
+  at = nowIso(),
+} = {}) {
+  db.prepare(
+    `INSERT INTO bet_mutations
+      (telegram_user_id, bet_id, action, prev_result, new_result, prev_archived_at, new_archived_at, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    userId || null,
+    betId || null,
+    action || null,
+    prevResult || null,
+    nextResult || null,
+    prevArchivedAt || null,
+    nextArchivedAt || null,
+    metadata ? JSON.stringify(metadata) : null,
+    at
+  );
+}
+
+function parseJsonSafe(value, fallback = null) {
+  if (!value || typeof value !== 'string') return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+export function rebuildLedgerSummary(userId) {
   if (!userId) return null;
   const db = getDb();
   const ts = nowIso();
-  db.prepare(
-    `INSERT INTO bets
-      (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    userId,
-    record.eventName || null,
-    record.fight || null,
-    record.pick || null,
-    record.odds ?? null,
-    record.stake ?? null,
-    record.units ?? null,
-    record.result || null,
-    record.notes || null,
-    ts
-  );
+  const rows = listBetRowsForUser(db, userId, { includeArchived: false, limit: 2000 });
 
-  const normalizedResult = normalizeResult(record.result);
-  const existing = db
-    .prepare('SELECT * FROM ledger_summary WHERE telegram_user_id = ?')
-    .get(userId);
+  let totalStaked = 0;
+  let totalUnits = 0;
+  let wins = 0;
+  let losses = 0;
+  let pushes = 0;
 
-  const totalStaked = (existing?.total_staked || 0) + (Number(record.stake) || 0);
-  const totalUnits = (existing?.total_units || 0) + (Number(record.units) || 0);
-  const totalBets = (existing?.total_bets || 0) + 1;
-  const wins = (existing?.wins || 0) + (normalizedResult === 'win' ? 1 : 0);
-  const losses = (existing?.losses || 0) + (normalizedResult === 'loss' ? 1 : 0);
-  const pushes = (existing?.pushes || 0) + (normalizedResult === 'push' ? 1 : 0);
+  for (const row of rows) {
+    totalStaked += Number(row.stake) || 0;
+    totalUnits += Number(row.units) || 0;
+    const status = normalizeResult(row.result) || 'pending';
+    if (status === 'win') wins += 1;
+    if (status === 'loss') losses += 1;
+    if (status === 'push') pushes += 1;
+  }
+
+  const totalBets = rows.length;
 
   db.prepare(
     `INSERT INTO ledger_summary
@@ -425,46 +723,471 @@ export function addBetRecord(userId, record = {}) {
   ).run(userId, totalStaked, totalUnits, totalBets, wins, losses, pushes, ts);
 
   return {
-    ...record,
-    recordedAt: ts,
+    totalStaked,
+    totalUnits,
+    totalBets,
+    wins,
+    losses,
+    pushes,
+    lastUpdatedAt: ts,
   };
 }
 
-export function getBetHistory(userId, limit = 20) {
+export function listUserBets(userId, options = {}) {
   if (!userId) return [];
   const db = getDb();
+  const rows = listBetRowsForUser(db, userId, {
+    includeArchived: Boolean(options.includeArchived),
+    limit: options.limit ?? 300,
+  });
+  const filtered = filterBetRows(rows, options);
+  const limit = Math.max(1, Number(options.limit) || 50);
+  return filtered.slice(0, limit).map(mapBetRow);
+}
+
+export function listPendingBetsForAutoSettlement({ limit = 300 } = {}) {
+  const db = getDb();
+  const max = Math.max(1, Number(limit) || 300);
   const rows = db
     .prepare(
-      `SELECT event_name, fight, pick, odds, stake, units, result, notes, created_at
-       FROM bets WHERE telegram_user_id = ?
+      `SELECT id, telegram_user_id, event_name, fight, pick, odds, stake, units, result, created_at, updated_at
+       FROM bets
+       WHERE archived_at IS NULL
+         AND lower(coalesce(result, 'pending')) IN ('pending', 'open')
        ORDER BY created_at DESC
        LIMIT ?`
     )
-    .all(userId, limit);
+    .all(max);
 
-  return rows.map((row) => ({
-    eventName: row.event_name,
-    fight: row.fight,
-    pick: row.pick,
-    odds: row.odds,
-    stake: row.stake,
-    units: row.units,
-    result: row.result,
-    notes: row.notes,
-    recordedAt: row.created_at,
-  }));
+  return rows.map(mapPendingBetForAuto).filter(Boolean);
+}
+
+export function getLatestChatIdForUser(userId) {
+  if (!userId) return null;
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT chat_id
+       FROM sessions
+       WHERE telegram_user_id = ?
+         AND chat_id IS NOT NULL
+         AND trim(chat_id) <> ''
+       ORDER BY last_activity_at DESC
+       LIMIT 1`
+    )
+    .get(String(userId));
+
+  return row?.chat_id ? String(row.chat_id) : null;
+}
+
+function buildMutationPreview(userId, payload = {}) {
+  const operation = String(payload.operation || '').trim().toLowerCase();
+  if (!operation) {
+    return { ok: false, error: 'missing_operation' };
+  }
+
+  if (!['settle', 'set_pending', 'archive'].includes(operation)) {
+    return { ok: false, error: 'invalid_operation' };
+  }
+
+  const normalizedResult = normalizeResult(payload.result);
+  if (operation === 'settle' && !isSettledResult(normalizedResult)) {
+    return { ok: false, error: 'invalid_settle_result' };
+  }
+
+  const rawStatus = String(payload.status ?? '').trim();
+  const explicitStatus = rawStatus ? normalizeResult(rawStatus) : null;
+  const statusFilter =
+    operation === 'settle'
+      ? (explicitStatus || 'pending')
+      : explicitStatus;
+
+  const explicitIds = Array.isArray(payload.betIds)
+    ? payload.betIds
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+  const explicitIdsSet = new Set(explicitIds);
+
+  const candidates = listUserBets(userId, {
+    includeArchived: false,
+    betIds: payload.betIds,
+    eventName: payload.eventName,
+    fight: payload.fight,
+    pick: payload.pick,
+    status: statusFilter,
+    limit: payload.limit ?? 100,
+  });
+
+  if (!candidates.length) {
+    return {
+      ok: false,
+      error: 'no_matching_bets',
+      operation,
+      statusFilter,
+    };
+  }
+
+  const hasExplicitIds = explicitIdsSet.size > 0;
+  if (hasExplicitIds) {
+    const matched = new Set(
+      candidates
+        .map((item) => Number(item?.id))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+    const missingIds = explicitIds.filter((id) => !matched.has(id));
+    if (missingIds.length) {
+      return {
+        ok: false,
+        error: 'explicit_ids_not_found',
+        missingIds,
+        operation,
+      };
+    }
+  }
+
+  const requiresConfirmation = !hasExplicitIds && candidates.length > 1;
+
+  return {
+    ok: true,
+    operation,
+    result: normalizedResult || null,
+    requiresConfirmation,
+    hasExplicitIds,
+    candidates,
+  };
+}
+
+export function previewBetMutation(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+  return buildMutationPreview(userId, payload);
+}
+
+export function applyBetMutation(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+  const preview = buildMutationPreview(userId, payload);
+  if (!preview.ok) {
+    return preview;
+  }
+
+  if (preview.requiresConfirmation && !payload.confirm) {
+    return {
+      ok: false,
+      error: 'confirmation_required',
+      preview,
+    };
+  }
+
+  const db = getDb();
+  const ts = nowIso();
+  const operation = preview.operation;
+  const nextResult =
+    operation === 'settle'
+      ? preview.result
+      : operation === 'set_pending'
+      ? 'pending'
+      : null;
+
+  const apply = db.transaction(() => {
+    const receipts = [];
+    for (const candidate of preview.candidates) {
+      const before = db
+        .prepare(
+          `SELECT id, result, archived_at
+           FROM bets
+           WHERE id = ? AND telegram_user_id = ?`
+        )
+        .get(candidate.id, userId);
+      if (!before) continue;
+
+      if (operation === 'archive') {
+        db.prepare(
+          `UPDATE bets
+           SET archived_at = ?, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run(ts, ts, candidate.id, userId);
+      } else if (operation === 'set_pending') {
+        db.prepare(
+          `UPDATE bets
+           SET result = ?, settled_at = NULL, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run('pending', ts, candidate.id, userId);
+      } else {
+        db.prepare(
+          `UPDATE bets
+           SET result = ?, settled_at = ?, updated_at = ?
+           WHERE id = ? AND telegram_user_id = ?`
+        ).run(nextResult, ts, ts, candidate.id, userId);
+      }
+
+      const after = db
+        .prepare(
+          `SELECT id, event_name, fight, pick, result, archived_at, updated_at
+           FROM bets
+           WHERE id = ? AND telegram_user_id = ?`
+        )
+        .get(candidate.id, userId);
+
+      logBetMutation(db, {
+        userId,
+        betId: candidate.id,
+        action: operation,
+        prevResult: normalizeResult(before.result) || 'pending',
+        nextResult: normalizeResult(after?.result) || 'pending',
+        prevArchivedAt: before.archived_at || null,
+        nextArchivedAt: after?.archived_at || null,
+        metadata: payload.metadata || null,
+        at: ts,
+      });
+
+      receipts.push({
+        action: operation,
+        betId: candidate.id,
+        eventName: after?.event_name || null,
+        fight: after?.fight || null,
+        pick: after?.pick || null,
+        previousResult: normalizeResult(before.result) || 'pending',
+        newResult: normalizeResult(after?.result) || 'pending',
+        previousArchivedAt: before.archived_at || null,
+        newArchivedAt: after?.archived_at || null,
+        updatedAt: after?.updated_at || ts,
+      });
+    }
+
+    return receipts;
+  });
+
+  const receipts = apply();
+  const ledgerSummary = rebuildLedgerSummary(userId);
+
+  return {
+    ok: true,
+    operation,
+    affectedCount: receipts.length,
+    receipts,
+    ledgerSummary,
+  };
+}
+
+export function undoLastBetMutation(
+  userId,
+  { windowMinutes = LEDGER_UNDO_WINDOW_MINUTES } = {}
+) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+
+  const db = getDb();
+  const now = nowIso();
+  const windowMs = Math.max(1, Number(windowMinutes) || LEDGER_UNDO_WINDOW_MINUTES) * 60 * 1000;
+  const minCreatedAtMs = Date.now() - windowMs;
+
+  const undoRows = db
+    .prepare(
+      `SELECT metadata
+       FROM bet_mutations
+       WHERE telegram_user_id = ? AND action = 'undo'
+       ORDER BY id DESC
+       LIMIT 200`
+    )
+    .all(userId);
+  const undoneMutationIds = new Set();
+  for (const row of undoRows) {
+    const metadata = parseJsonSafe(row?.metadata, {});
+    const undoneId = Number(metadata?.undoneMutationId);
+    if (Number.isInteger(undoneId) && undoneId > 0) {
+      undoneMutationIds.add(undoneId);
+    }
+  }
+
+  const candidates = db
+    .prepare(
+      `SELECT id, bet_id, action, prev_result, new_result, prev_archived_at, new_archived_at, metadata, created_at
+       FROM bet_mutations
+       WHERE telegram_user_id = ?
+         AND action IN ('archive', 'settle', 'set_pending')
+       ORDER BY id DESC
+       LIMIT 200`
+    )
+    .all(userId);
+
+  const target = candidates.find((row) => {
+    if (undoneMutationIds.has(Number(row.id))) {
+      return false;
+    }
+    const createdAtMs = Date.parse(row.created_at || '');
+    if (!Number.isFinite(createdAtMs)) {
+      return false;
+    }
+    return createdAtMs >= minCreatedAtMs;
+  });
+
+  if (!target) {
+    return {
+      ok: false,
+      error: 'no_undo_candidate',
+      message: 'No encontre una mutacion reciente reversible dentro de la ventana permitida.',
+    };
+  }
+
+  const betId = Number(target.bet_id);
+  if (!Number.isInteger(betId) || betId <= 0) {
+    return {
+      ok: false,
+      error: 'invalid_target_bet',
+    };
+  }
+
+  const current = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, result, archived_at, settled_at, updated_at
+       FROM bets
+       WHERE id = ? AND telegram_user_id = ?`
+    )
+    .get(betId, userId);
+
+  if (!current) {
+    return {
+      ok: false,
+      error: 'target_bet_not_found',
+    };
+  }
+
+  const nextResult = normalizeResult(target.prev_result) || 'pending';
+  const nextArchivedAt = target.prev_archived_at || null;
+  const nextSettledAt = isSettledResult(nextResult) ? current.settled_at || now : null;
+
+  const applyUndo = db.transaction(() => {
+    db.prepare(
+      `UPDATE bets
+       SET result = ?, archived_at = ?, settled_at = ?, updated_at = ?
+       WHERE id = ? AND telegram_user_id = ?`
+    ).run(nextResult, nextArchivedAt, nextSettledAt, now, betId, userId);
+
+    const undoMetadata = {
+      undoneMutationId: Number(target.id),
+      undoneAction: target.action,
+      undoneCreatedAt: target.created_at,
+      originalMetadata: parseJsonSafe(target.metadata, null),
+    };
+
+    logBetMutation(db, {
+      userId,
+      betId,
+      action: 'undo',
+      prevResult: normalizeResult(current.result) || 'pending',
+      nextResult,
+      prevArchivedAt: current.archived_at || null,
+      nextArchivedAt,
+      metadata: undoMetadata,
+      at: now,
+    });
+
+    return db
+      .prepare(
+        `SELECT id, event_name, fight, pick, result, archived_at, updated_at
+         FROM bets
+         WHERE id = ? AND telegram_user_id = ?`
+      )
+      .get(betId, userId);
+  });
+
+  const after = applyUndo();
+  const ledgerSummary = rebuildLedgerSummary(userId);
+
+  return {
+    ok: true,
+    undoneMutationId: Number(target.id),
+    undoneAction: target.action,
+    receipt: {
+      action: 'undo',
+      betId,
+      eventName: after?.event_name || null,
+      fight: after?.fight || null,
+      pick: after?.pick || null,
+      previousResult: normalizeResult(current.result) || 'pending',
+      newResult: normalizeResult(after?.result) || 'pending',
+      previousArchivedAt: current.archived_at || null,
+      newArchivedAt: after?.archived_at || null,
+      updatedAt: after?.updated_at || now,
+    },
+    ledgerSummary,
+  };
+}
+
+export function addBetRecord(userId, record = {}) {
+  if (!userId) return null;
+  const db = getDb();
+  const ts = nowIso();
+  const normalizedResult = normalizeResult(record.result) || 'pending';
+  const settledAt = isSettledResult(normalizedResult) ? ts : null;
+
+  const result = db.prepare(
+    `INSERT INTO bets
+      (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+  ).run(
+    userId,
+    record.eventName || null,
+    record.fight || null,
+    record.pick || null,
+    record.odds ?? null,
+    record.stake ?? null,
+    record.units ?? null,
+    normalizedResult,
+    record.notes || null,
+    ts,
+    ts,
+    settledAt
+  );
+
+  const betId = Number(result.lastInsertRowid);
+  logBetMutation(db, {
+    userId,
+    betId,
+    action: 'create',
+    prevResult: null,
+    nextResult: normalizedResult,
+    prevArchivedAt: null,
+    nextArchivedAt: null,
+    metadata: { source: 'record_user_bet' },
+    at: ts,
+  });
+
+  rebuildLedgerSummary(userId);
+
+  const row = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
+       FROM bets
+       WHERE id = ? AND telegram_user_id = ?`
+    )
+    .get(betId, userId);
+
+  return mapBetRow(row);
+}
+
+export function getBetHistory(userId, limit = 20, options = {}) {
+  if (!userId) return [];
+  const bets = listUserBets(userId, {
+    includeArchived: Boolean(options.includeArchived),
+    limit,
+  });
+  return bets;
 }
 
 export function getLedgerSummary(userId) {
   if (!userId) return null;
   const db = getDb();
-  const row = db
+  let row = db
     .prepare(
       `SELECT total_staked, total_units, total_bets, wins, losses, pushes, last_updated_at
        FROM ledger_summary WHERE telegram_user_id = ?`
     )
     .get(userId);
-  if (!row) return null;
+
+  if (!row) {
+    return rebuildLedgerSummary(userId);
+  }
+
   return {
     totalStaked: row.total_staked,
     totalUnits: row.total_units,
@@ -944,6 +1667,92 @@ export function getLatestOddsSnapshot(userId, query = {}) {
   }
 
   return null;
+}
+
+function parseFightHistoryCacheRow(row) {
+  if (!row) return null;
+  let rows = [];
+  try {
+    rows = row.rows_json ? JSON.parse(row.rows_json) : [];
+  } catch {
+    rows = [];
+  }
+
+  return {
+    cacheKey: row.cache_key,
+    sheetId: row.sheet_id || null,
+    range: row.range_name || null,
+    rowCount: Number(row.row_count) || 0,
+    hash: row.hash || null,
+    rows: Array.isArray(rows) ? rows : [],
+    lastSyncAt: row.last_sync_at || null,
+    lastSyncUpdatedCache: Boolean(row.last_sync_updated_cache),
+    latestFightDate: row.latest_fight_date || null,
+    sheetAgeDays:
+      row.sheet_age_days === null || row.sheet_age_days === undefined
+        ? null
+        : Number(row.sheet_age_days),
+    potentialGap: Boolean(row.potential_gap),
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function getFightHistoryCacheSnapshot(cacheKey = 'default') {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT cache_key, sheet_id, range_name, row_count, hash, rows_json, last_sync_at,
+              last_sync_updated_cache, latest_fight_date, sheet_age_days, potential_gap, updated_at
+       FROM fight_history_cache
+       WHERE cache_key = ?`
+    )
+    .get(String(cacheKey || 'default'));
+  return parseFightHistoryCacheRow(row);
+}
+
+export function upsertFightHistoryCacheSnapshot(snapshot = {}, cacheKey = 'default') {
+  const db = getDb();
+  const ts = nowIso();
+  const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+  const rowCount = Number.isFinite(Number(snapshot.rowCount))
+    ? Number(snapshot.rowCount)
+    : rows.length;
+
+  db.prepare(
+    `INSERT INTO fight_history_cache
+      (cache_key, sheet_id, range_name, row_count, hash, rows_json, last_sync_at,
+       last_sync_updated_cache, latest_fight_date, sheet_age_days, potential_gap, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       sheet_id = excluded.sheet_id,
+       range_name = excluded.range_name,
+       row_count = excluded.row_count,
+       hash = excluded.hash,
+       rows_json = excluded.rows_json,
+       last_sync_at = excluded.last_sync_at,
+       last_sync_updated_cache = excluded.last_sync_updated_cache,
+       latest_fight_date = excluded.latest_fight_date,
+       sheet_age_days = excluded.sheet_age_days,
+       potential_gap = excluded.potential_gap,
+       updated_at = excluded.updated_at`
+  ).run(
+    String(cacheKey || 'default'),
+    snapshot.sheetId || null,
+    snapshot.range || null,
+    rowCount,
+    snapshot.hash || null,
+    JSON.stringify(rows),
+    snapshot.lastSyncAt || ts,
+    snapshot.lastSyncUpdatedCache ? 1 : 0,
+    snapshot.latestFightDate || null,
+    snapshot.sheetAgeDays === null || snapshot.sheetAgeDays === undefined
+      ? null
+      : Number(snapshot.sheetAgeDays),
+    snapshot.potentialGap ? 1 : 0,
+    ts
+  );
+
+  return getFightHistoryCacheSnapshot(cacheKey);
 }
 
 export function getDbPath() {
