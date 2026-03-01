@@ -341,6 +341,17 @@ function hasLedgerSignals(message = '') {
   );
 }
 
+function isLiveFightQueueQuestion(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  const asksNextFight =
+    /\b(que pelea viene ahora|que pelea sigue|cual pelea sigue|proxima pelea|proxima que viene|que falta|faltan peleas|en vivo|ahora en el evento)\b/.test(
+      text
+    ) || /\b(pelea)\b/.test(text) && /\b(ahora|sigue|viene)\b/.test(text);
+  const hasEventContext = /\b(evento|cartelera|ufc|fight night|main card)\b/.test(text);
+  return asksNextFight && hasEventContext;
+}
+
 function shouldUseDecisionModel({ message = '', hasMedia = false } = {}) {
   if (!DECISION_MODEL) {
     return false;
@@ -698,9 +709,31 @@ function hasRationaleContent(text = '') {
   return hasCoreReason && hasEntryRule;
 }
 
-function enforceRationaleSection(reply = '') {
+function isLedgerOperationMessage(message = '') {
+  const normalized = normalizeText(message);
+  if (!normalized) return false;
+  return /\b(ledger|bet_id|pending|won|lost|settle|archiv|borra|elimina|cierra|cerra|anota|registro)\b/.test(
+    normalized
+  );
+}
+
+function enforceRationaleSection(reply = '', originalMessage = '') {
   const text = String(reply || '').trim();
-  if (!text || !isRecommendationReply(text) || hasRationaleContent(text)) {
+  const userMessage = String(originalMessage || '');
+  const explicitRationaleRequest = /\b(fundament|explica|por que)\b/.test(
+    normalizeText(userMessage)
+  );
+  const looksLikeDecisionTurn =
+    hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || explicitRationaleRequest;
+  const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
+
+  if (
+    !text ||
+    !isRecommendationReply(text) ||
+    hasRationaleContent(text) ||
+    !looksLikeDecisionTurn ||
+    isOperationalLedgerTurn
+  ) {
     return text;
   }
 
@@ -731,6 +764,54 @@ function enforceCalendarNoEventContext(reply = '', originalMessage = '', tempora
   const tz = temporalContext?.timezone || DEFAULT_USER_TIMEZONE;
 
   return `${text}\n\nReferencia temporal usada: ${asOf} (${tz}). Tambien validé la ventana ${prev} -> ${asOf}.`;
+}
+
+function chooseLikelyActiveFightFromPendingBets(pendingBets = []) {
+  if (!Array.isArray(pendingBets) || !pendingBets.length) {
+    return { type: 'none' };
+  }
+
+  const groups = new Map();
+  for (const bet of pendingBets) {
+    const eventName = String(bet?.eventName || '').trim() || 'Evento no especificado';
+    const fight = String(bet?.fight || '').trim();
+    if (!fight) continue;
+    const key = `${eventName}||${fight}`;
+    const createdAtMs = Date.parse(bet?.recordedAt || bet?.updatedAt || '') || 0;
+    const existing = groups.get(key) || {
+      eventName,
+      fight,
+      count: 0,
+      latestCreatedAtMs: 0,
+      betIds: [],
+    };
+    existing.count += 1;
+    existing.latestCreatedAtMs = Math.max(existing.latestCreatedAtMs, createdAtMs);
+    if (Number.isInteger(Number(bet?.id))) {
+      existing.betIds.push(Number(bet.id));
+    }
+    groups.set(key, existing);
+  }
+
+  const ranked = Array.from(groups.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return b.latestCreatedAtMs - a.latestCreatedAtMs;
+  });
+
+  if (!ranked.length) {
+    return { type: 'none' };
+  }
+
+  if (ranked.length === 1) {
+    return { type: 'single', top: ranked[0], ranked };
+  }
+
+  const [top, second] = ranked;
+  if (top.count > second.count) {
+    return { type: 'single', top, ranked };
+  }
+
+  return { type: 'ambiguous', top, second, ranked };
 }
 
 function logConfiguration() {
@@ -1726,6 +1807,58 @@ export function createBettingWizard({
       };
     }
 
+    if (userId && userStore?.listUserBets && isLiveFightQueueQuestion(originalMessage)) {
+      const pendingBets = userStore.listUserBets(userId, {
+        status: 'pending',
+        includeArchived: false,
+        limit: 60,
+      });
+      const liveHint = chooseLikelyActiveFightFromPendingBets(pendingBets);
+
+      if (liveHint.type === 'single' && liveHint.top) {
+        const top = liveHint.top;
+        const idsPreview = (top.betIds || []).slice(0, 4).join(', ');
+        const lines = [
+          `Ahora, por tu contexto de apuestas abiertas, la pelea que sigue/estás monitoreando es:`,
+          '',
+          `🥊 ${top.fight}`,
+          `Evento: ${top.eventName}`,
+          '',
+          `Lo infiero por ${top.count} apuesta(s) pending en esa pelea${
+            idsPreview ? ` (bet_id: ${idsPreview})` : ''
+          }.`,
+          'Si querés, te confirmo la secuencia oficial en vivo en el próximo turno.',
+        ];
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (liveHint.type === 'ambiguous') {
+        const options = (liveHint.ranked || []).slice(0, 3).map((entry, idx) => {
+          return `${idx + 1}. ${entry.fight} (${entry.eventName}) - ${entry.count} pending`;
+        });
+        const lines = [
+          'Tengo más de una pelea candidata en tus apuestas pendientes y no quiero inventarte la "que sigue".',
+          '',
+          ...options,
+          '',
+          'Decime el número (1/2/3) o pasame el fight exacto y te lo confirmo.',
+        ];
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+    }
+
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
       if (!userId) {
         return { ok: false, error: 'userId no disponible para mutaciones de apuestas.' };
@@ -2434,7 +2567,7 @@ export function createBettingWizard({
       const citationFooter = shouldShowCitations(originalMessage)
         ? formatCitationsFooter(result.citations)
         : '';
-      const replyWithRationale = enforceRationaleSection(reply);
+      const replyWithRationale = enforceRationaleSection(reply, originalMessage);
       const replyWithTemporalGuard = enforceCalendarNoEventContext(
         replyWithRationale,
         originalMessage,

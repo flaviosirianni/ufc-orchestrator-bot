@@ -730,3 +730,42 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si el modo `deep` consume mas creditos que el modo `short`.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+26. **Recalibrar stake minimo para evitar recomendaciones de monto irrisorio**
+   - **Objetivo de negocio/UX:** que los stakes recomendados sean operables en la practica del usuario y no generen percepcion de "apuesta simbolica".
+   - **Problema observado (ejemplo real):**
+     - El bot devuelve recomendaciones tipo `- Stake: 1.0u (=$400 ARS)` de forma recurrente.
+     - Feedback explicito del usuario: ese monto es demasiado bajo para su operativa real y reduce utilidad de la recomendacion.
+   - **Comportamiento deseado para el usuario final:**
+     - El stake sugerido debe respetar un piso minimo configurable por usuario/evento.
+     - Si el modelo propone un stake bajo por riesgo, debe explicarlo explicitamente (y opcionalmente ofrecer alternativa "no-bet").
+     - El usuario puede ajustar su preferencia de stake minimo desde chat sin friccion.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `StakeCalibrator` deterministico en backend, posterior al output del LLM:
+       - entrada: `bankroll`, `unitSize`, `eventBudget`, `riskProfile`, `confidenceTier`, `marketType`.
+       - salida: `recommendedUnits`, `recommendedStake`, `stakeReason`.
+     - Nuevos campos de perfil (persistidos):
+       - `min_stake_amount` (moneda del usuario),
+       - `min_units_per_bet`,
+       - `target_event_utilization_pct`.
+     - Guardrails de sizing:
+       - no sugerir stake por debajo de `max(min_stake_amount, min_units_per_bet * unitSize)` salvo excepcion marcada como `micro_stake_exception=true`.
+       - limitar sobre-exposicion con `max_units_per_pick` y `max_event_exposure`.
+       - si el edge es bajo y el piso fuerza sobre-riesgo, devolver `NO_BET` en lugar de stake artificial.
+     - UX conversacional:
+       - comando/intencion natural para ajustar piso: "mi stake minimo es $X" / "minimo 2u por pick".
+       - en cada pick mostrar: `stake final` + `motivo de sizing` en una linea.
+   - **Criterios de aceptacion verificables:**
+     - No se emiten stakes por debajo del piso configurado del usuario (salvo excepcion explicitada).
+     - Las recomendaciones reflejan mejor presupuesto y perfil de riesgo declarados.
+     - El usuario puede actualizar stake minimo y ver efecto en el siguiente pick.
+   - **Pruebas de regresion necesarias:**
+     - Perfil con `unitSize=400` y `min_stake_amount=2000` -> stake sugerido nunca menor a `$2000`.
+     - Caso edge bajo + piso alto -> salida `NO_BET` con justificacion (sin forzar pick).
+     - Cambio conversacional de preferencia ("minimo 3u") -> persiste y aplica en recomendaciones siguientes.
+     - Validacion de limites de exposicion por evento con multiples picks.
+   - **Riesgos y decisiones abiertas:**
+     - Definir piso por defecto para usuarios sin preferencia declarada.
+     - Definir jerarquia final entre `min_stake_amount` y `min_units_per_bet` cuando entran en conflicto.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.

@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import OpenAI, { toFile } from 'openai';
 import ffmpegPath from 'ffmpeg-static';
+import { toTelegramHtml, toTelegramPlainText } from './messageFormatter.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,7 @@ const MAX_AUDIO_TRANSCRIPT_CHARS = Number(
 );
 const MEDIA_GROUP_FLUSH_MS = Number(process.env.MEDIA_GROUP_FLUSH_MS ?? '900');
 const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
+const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?? '4500');
 
 const QUICK_ACTION_ROWS = [
   [
@@ -173,6 +175,7 @@ export function startTelegramBot(router) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const bot = new TelegramBot(token, { polling: true });
   const pendingMediaGroups = new Map();
+  const inFlightByChat = new Set();
 
   function buildQuickActionsMarkup() {
     return {
@@ -181,9 +184,24 @@ export function startTelegramBot(router) {
   }
 
   async function sendBotMessage(chatId, text) {
-    return bot.sendMessage(chatId, text, {
-      reply_markup: buildQuickActionsMarkup(),
-    });
+    const rawText = String(text || '');
+    const htmlText = toTelegramHtml(rawText);
+    const plainText = toTelegramPlainText(rawText);
+    const replyMarkup = buildQuickActionsMarkup();
+
+    try {
+      return await bot.sendMessage(chatId, htmlText || plainText || ' ', {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup,
+      });
+    } catch (error) {
+      console.error('⚠️ Telegram parse_mode HTML failed, fallback to plain text:', error);
+      return bot.sendMessage(chatId, plainText || rawText || ' ', {
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup,
+      });
+    }
   }
 
   async function routeSyntheticAction(query, syntheticMessage = '') {
@@ -229,6 +247,14 @@ export function startTelegramBot(router) {
     const cleanMessage = String(userMessage || '').trim();
     const hasMedia = Array.isArray(inputItems) && inputItems.length > 0;
 
+    if (inFlightByChat.has(chatId)) {
+      await sendBotMessage(
+        chatId,
+        '⏳ Estoy respondiendo tu mensaje anterior. Esperá mi respuesta y seguimos.'
+      );
+      return;
+    }
+
     if (!cleanMessage && !hasMedia) {
       await sendBotMessage(
         chatId,
@@ -241,26 +267,40 @@ export function startTelegramBot(router) {
       `📩 Mensaje recibido${isAlbum ? ' (album)' : ''}: ${cleanMessage || '[sin texto]'}`
     );
 
-    const reply = await router.routeMessage({
-      chatId: String(chatId),
-      message: cleanMessage,
-      telegramMessageId: msg.message_id,
-      inputItems,
-      mediaStats,
-      user: {
-        id: from.id ? String(from.id) : null,
-        username: from.username || null,
-        firstName: from.first_name || null,
-        lastName: from.last_name || null,
-      },
-      chat: {
-        id: chatInfo.id ? String(chatInfo.id) : null,
-        type: chatInfo.type || null,
-        title: chatInfo.title || null,
-      },
-    });
+    inFlightByChat.add(chatId);
+    let typingTimer = null;
+    try {
+      await bot.sendChatAction(chatId, 'typing');
+      typingTimer = setInterval(() => {
+        bot.sendChatAction(chatId, 'typing').catch(() => {});
+      }, TYPING_ACTION_INTERVAL_MS);
 
-    await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
+      const reply = await router.routeMessage({
+        chatId: String(chatId),
+        message: cleanMessage,
+        telegramMessageId: msg.message_id,
+        inputItems,
+        mediaStats,
+        user: {
+          id: from.id ? String(from.id) : null,
+          username: from.username || null,
+          firstName: from.first_name || null,
+          lastName: from.last_name || null,
+        },
+        chat: {
+          id: chatInfo.id ? String(chatInfo.id) : null,
+          type: chatInfo.type || null,
+          title: chatInfo.title || null,
+        },
+      });
+
+      await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
+    } finally {
+      if (typingTimer) {
+        clearInterval(typingTimer);
+      }
+      inFlightByChat.delete(chatId);
+    }
   }
 
   async function processSingleMessage(msg) {

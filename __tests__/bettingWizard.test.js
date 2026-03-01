@@ -909,6 +909,104 @@ export async function runBettingWizardTests() {
     );
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [
+            {
+              id: 33,
+              eventName: 'UFC Fight Night: Moreno vs. Kavanagh (2026-02-28)',
+              fight: 'Daniel Zellhuber vs King Green',
+              result: 'pending',
+            },
+            {
+              id: 34,
+              eventName: 'UFC Fight Night: Moreno vs. Kavanagh (2026-02-28)',
+              fight: 'Daniel Zellhuber vs King Green',
+              result: 'pending',
+            },
+            {
+              id: 35,
+              eventName: 'UFC Fight Night: Moreno vs. Kavanagh (2026-02-28)',
+              fight: 'Marlon Vera vs David Martinez',
+              result: 'pending',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('que pelea viene ahora en el evento?', {
+      chatId: 'chat-live-1',
+      userId: 'u-live-1',
+      originalMessage: 'que pelea viene ahora en el evento?',
+      resolution: {
+        resolvedMessage: 'que pelea viene ahora en el evento?',
+      },
+    });
+
+    assert.match(result.reply, /Daniel Zellhuber vs King Green/);
+    assert.match(result.reply, /2 apuesta\(s\) pending/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [
+            {
+              id: 40,
+              eventName: 'UFC FN',
+              fight: 'Fight A vs Fight B',
+              result: 'pending',
+            },
+            {
+              id: 41,
+              eventName: 'UFC FN',
+              fight: 'Fight C vs Fight D',
+              result: 'pending',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('que pelea sigue ahora en el evento?', {
+      chatId: 'chat-live-2',
+      userId: 'u-live-2',
+      originalMessage: 'que pelea sigue ahora en el evento?',
+      resolution: {
+        resolvedMessage: 'que pelea sigue ahora en el evento?',
+      },
+    });
+
+    assert.match(result.reply, /más de una pelea candidata/i);
+    assert.match(result.reply, /1\./);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }
