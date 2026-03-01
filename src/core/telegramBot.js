@@ -30,6 +30,7 @@ const MAIN_MENU_ROWS = [
   ],
   [
     { text: 'Registrar apuesta', callback_data: 'qa:record_bet' },
+    { text: 'Ayuda', callback_data: 'qa:help' },
   ],
 ];
 
@@ -39,7 +40,7 @@ const BETS_MENU_ROWS = [
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
   ],
   [
-    { text: 'Abrir', callback_data: 'act:bet_open' },
+    { text: 'Abrir (setup)', callback_data: 'act:bet_open' },
     { text: 'Registrar', callback_data: 'act:bet_record' },
   ],
   [
@@ -48,6 +49,9 @@ const BETS_MENU_ROWS = [
   ],
   [
     { text: 'Corregir ultima', callback_data: 'qa:undo_last' },
+    { text: 'Ayuda', callback_data: 'qa:help' },
+  ],
+  [
     { text: '⬅ Volver', callback_data: 'menu:main' },
   ],
 ];
@@ -70,6 +74,7 @@ const CONFIG_MENU_ROWS = [
     { text: 'Creditos', callback_data: 'qa:view_credits' },
   ],
   [
+    { text: 'Ayuda', callback_data: 'qa:help' },
     { text: '⬅ Volver', callback_data: 'menu:main' },
   ],
 ];
@@ -87,6 +92,13 @@ const QUICK_ACTION_HINTS = {
     'Mandame screenshot completo de la pelea/evento (ML + O/U + metodo si aparece).',
     'Si preferis texto: evento, pelea, mercado, cuota.',
     'Con eso te devuelvo lectura + EV + stake sugerido.',
+  ].join('\n'),
+  bet_open: [
+    '🚪 Abrir apuesta (setup, sin registrar todavía)',
+    'Usalo para preparar la jugada antes de guardarla en ledger.',
+    'Pasame: pelea + mercado + idea de entrada.',
+    'Ejemplo: `Zellhuber vs Green, Under 2.5, entrar solo si @1.80+`.',
+    'Te devuelvo plan de entrada (escenario, riesgos y trigger), pero no lo registra.',
   ].join('\n'),
   record_bet: [
     '🧾 Registrar apuesta al ledger',
@@ -149,6 +161,25 @@ const QUICK_ACTION_HINTS = {
     'Mandame un mensaje como:',
     '- `utilizacion objetivo 35%`',
     '- `exposicion objetivo evento 40`',
+  ].join('\n'),
+  help: [
+    '🆘 Ayuda de botones',
+    '',
+    '📚 Apuestas',
+    '- `Analizar pelea`: lectura cualitativa (sin cuotas).',
+    '- `Analizar cuotas`: lectura + EV con odds/quotes.',
+    '- `Abrir (setup)`: plan de entrada y riesgos sin registrar en ledger.',
+    '- `Registrar`: guarda la apuesta en ledger.',
+    '- `Pendientes`: lista apuestas abiertas con bet_id.',
+    '- `Cerrar`: cierra una apuesta (`bet_id + WON/LOST`).',
+    '- `Corregir ultima`: revierte la última mutación sensible.',
+    '',
+    '⚙️ Config',
+    '- `Ver config`: muestra tus ajustes actuales.',
+    '- `Stake minimo / Unidad / Riesgo / Bankroll / Timezone / Exposicion %`: actualizan tu perfil.',
+    '- `Creditos`: muestra saldo y movimientos.',
+    '',
+    'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
 };
 
@@ -628,6 +659,11 @@ export function startTelegramBot(router) {
       return;
     }
 
+    if (data === 'qa:help') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.help, { menuScope: getMenuScope(chatId) });
+      return;
+    }
+
     if (data === 'qa:record_bet') {
       await sendBotMessage(chatId, QUICK_ACTION_HINTS.record_bet, { menuScope: 'bets' });
       return;
@@ -639,7 +675,7 @@ export function startTelegramBot(router) {
     }
 
     if (data === 'act:bet_open') {
-      await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'bets' });
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.bet_open, { menuScope: 'bets' });
       return;
     }
 
