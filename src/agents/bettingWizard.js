@@ -34,6 +34,16 @@ const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const STAKE_MIN_AMOUNT_DEFAULT = Number(process.env.STAKE_MIN_AMOUNT_DEFAULT ?? '2000');
 const STAKE_MIN_UNITS_DEFAULT = Number(process.env.STAKE_MIN_UNITS_DEFAULT ?? '2.5');
+const PICK_COMMITTEE_ENABLED = process.env.BETTING_PICK_COMMITTEE === 'true';
+const PICK_COMMITTEE_MODEL =
+  process.env.BETTING_PICK_COMMITTEE_MODEL || DECISION_MODEL || MODEL;
+const PICK_COMMITTEE_MIN_EDGE_PCT = Number(process.env.BETTING_MIN_EDGE_PCT ?? '4');
+const PICK_COMMITTEE_MIN_CONFIDENCE = Number(
+  process.env.BETTING_MIN_CONFIDENCE ?? '58'
+);
+const PICK_COMMITTEE_MAX_PENALTY = Number(
+  process.env.BETTING_MAX_CONFIDENCE_PENALTY ?? '45'
+);
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -1206,6 +1216,10 @@ function logConfiguration() {
     usesResponsesAPI: true,
     webSearchContextSize: WEB_SEARCH_CONTEXT_SIZE,
     creditEnforce: CREDIT_ENFORCE,
+    pickCommitteeEnabled: PICK_COMMITTEE_ENABLED,
+    pickCommitteeModel: PICK_COMMITTEE_MODEL || null,
+    pickCommitteeMinEdgePct: PICK_COMMITTEE_MIN_EDGE_PCT,
+    pickCommitteeMinConfidence: PICK_COMMITTEE_MIN_CONFIDENCE,
   });
 }
 
@@ -1708,6 +1722,350 @@ function shouldShowCitations(userMessage = '') {
   return /\b(fuente|fuentes|source|sources|cita|citas|citation|citations|referencia|referencias|link|links|url|urls)\b/.test(
     text
   );
+}
+
+function extractFirstJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // fall through
+  }
+
+  const start = raw.indexOf('{');
+  if (start < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let idx = start; idx < raw.length; idx += 1) {
+    const ch = raw[idx];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = raw.slice(start, idx + 1);
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function clampNumber(value, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return min;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function parseCommitteeProAnalysis(raw = {}) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const pick = String(raw.pick || '').trim();
+  const market = String(raw.market || '').trim();
+  const entryRule = String(raw.entry_rule || '').trim();
+  const verdict = String(raw.verdict || '').trim().toLowerCase();
+  const confidence = clampNumber(raw.confidence, 0, 100);
+  const edgePct = Number(raw.edge_pct);
+  const thesis = Array.isArray(raw.thesis)
+    ? raw.thesis.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5)
+    : [];
+  const riskFlags = Array.isArray(raw.risk_flags)
+    ? raw.risk_flags.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5)
+    : [];
+
+  if (!pick && !market) {
+    return null;
+  }
+
+  return {
+    verdict: verdict === 'bet' ? 'bet' : 'no_bet',
+    pick,
+    market,
+    entryRule,
+    confidence,
+    edgePct: Number.isFinite(edgePct) ? edgePct : 0,
+    thesis,
+    riskFlags,
+  };
+}
+
+function parseCommitteeContraAnalysis(raw = {}) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const verdict = String(raw.verdict || '').trim().toLowerCase();
+  const block = raw.block === true || verdict === 'block';
+  const confidencePenalty = clampNumber(raw.confidence_penalty, 0, PICK_COMMITTEE_MAX_PENALTY);
+  const concerns = Array.isArray(raw.concerns)
+    ? raw.concerns.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 6)
+    : [];
+  const requiredChecks = Array.isArray(raw.required_checks)
+    ? raw.required_checks
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
+
+  return {
+    block,
+    confidencePenalty,
+    concerns,
+    requiredChecks,
+  };
+}
+
+function shouldRunPickCommittee({
+  enabled = false,
+  wantsBetDecision = false,
+  originalMessage = '',
+  reply = '',
+}) {
+  if (!enabled || !wantsBetDecision) {
+    return false;
+  }
+  if (!isRecommendationReply(reply)) {
+    return false;
+  }
+  if (isLedgerOperationMessage(originalMessage)) {
+    return false;
+  }
+  return true;
+}
+
+function buildCommitteeOutcome({
+  pro = null,
+  contra = null,
+  minEdgePct = PICK_COMMITTEE_MIN_EDGE_PCT,
+  minConfidence = PICK_COMMITTEE_MIN_CONFIDENCE,
+}) {
+  if (!pro || !contra) {
+    return null;
+  }
+
+  const adjustedConfidence = clampNumber(
+    Number(pro.confidence) - Number(contra.confidencePenalty),
+    0,
+    100
+  );
+  const edgeOk = Number(pro.edgePct) >= Number(minEdgePct);
+  const confidenceOk = adjustedConfidence >= Number(minConfidence);
+  const blocked = contra.block === true;
+  const proWantsBet = pro.verdict === 'bet';
+
+  const approved = proWantsBet && edgeOk && confidenceOk && !blocked;
+  const reasons = [];
+  if (!proWantsBet) reasons.push('El analista pro no encontró edge suficiente para entrar.');
+  if (!edgeOk)
+    reasons.push(
+      `Edge estimado ${Number.isFinite(Number(pro.edgePct)) ? Number(pro.edgePct).toFixed(1) : 'N/D'}% por debajo del mínimo (${Number(minEdgePct).toFixed(1)}%).`
+    );
+  if (!confidenceOk)
+    reasons.push(
+      `Confianza ajustada ${adjustedConfidence.toFixed(0)} por debajo del umbral (${Number(minConfidence).toFixed(0)}).`
+    );
+  if (blocked)
+    reasons.push(
+      contra.concerns?.[0] || 'El analista de riesgo marcó incertidumbre material.'
+    );
+
+  return {
+    approved,
+    adjustedConfidence,
+    edgePct: Number.isFinite(Number(pro.edgePct)) ? Number(pro.edgePct) : 0,
+    reasons,
+    pro,
+    contra,
+  };
+}
+
+function renderCommitteeFooter(outcome = null) {
+  if (!outcome) return '';
+
+  if (!outcome.approved) {
+    const lines = [
+      '⛔ Control de riesgo: NO_BET',
+      `- Edge estimado: ${outcome.edgePct.toFixed(1)}%`,
+      `- Confianza ajustada: ${outcome.adjustedConfidence.toFixed(0)}`,
+    ];
+    for (const reason of outcome.reasons.slice(0, 3)) {
+      lines.push(`- ${reason}`);
+    }
+    const requiredChecks = outcome.contra?.requiredChecks || [];
+    if (requiredChecks.length) {
+      lines.push('- Para re-evaluar, faltaría:', ...requiredChecks.slice(0, 3).map((item) => `  • ${item}`));
+    }
+    return lines.join('\n');
+  }
+
+  const lines = [
+    '✅ Control de riesgo: Aprobado',
+    `- Edge estimado: ${outcome.edgePct.toFixed(1)}%`,
+    `- Confianza ajustada: ${outcome.adjustedConfidence.toFixed(0)}`,
+  ];
+  const concerns = outcome.contra?.concerns || [];
+  if (concerns.length) {
+    lines.push('- Riesgos a vigilar:', ...concerns.slice(0, 3).map((item) => `  • ${item}`));
+  }
+
+  return lines.join('\n');
+}
+
+function mergeCitations(base = [], extra = []) {
+  const map = new Map();
+  for (const item of [...(Array.isArray(base) ? base : []), ...(Array.isArray(extra) ? extra : [])]) {
+    if (!item?.url) continue;
+    const url = String(item.url).trim();
+    if (!url) continue;
+    map.set(url, {
+      title: item.title || item.url,
+      url,
+    });
+  }
+  return Array.from(map.values());
+}
+
+async function fetchRecentFightNewsBrief({
+  client,
+  message = '',
+  temporalContext = '',
+  timezone = WEB_SEARCH_TIMEZONE,
+  model = PICK_COMMITTEE_MODEL,
+}) {
+  const tools = [
+    {
+      type: 'web_search',
+      search_context_size: 'high',
+      user_location: {
+        type: 'approximate',
+        country: WEB_SEARCH_COUNTRY,
+        ...(WEB_SEARCH_REGION ? { region: WEB_SEARCH_REGION } : {}),
+        ...(WEB_SEARCH_CITY ? { city: WEB_SEARCH_CITY } : {}),
+        ...(timezone ? { timezone } : {}),
+      },
+    },
+  ];
+
+  const instructions = [
+    'Sos un scout de riesgo pre-fight en MMA.',
+    'Buscá SOLO señales relevantes de los últimos 10 días para los peleadores involucrados.',
+    'Priorizá: corte de peso, fallos de peso, lesiones, cambios de campamento, short notice, hospitalizaciones, problemas de viaje/visado.',
+    'Devolvé un resumen corto en bullets.',
+    'Si no hay señales fuertes, decilo explícitamente.',
+    'No inventes ni extrapoles.',
+  ].join(' ');
+
+  const input = [
+    '[REQUEST]',
+    String(message || '').trim() || 'Analizar pelea UFC actual',
+    '',
+    '[TEMPORAL_CONTEXT]',
+    String(temporalContext || '').trim() || 'N/D',
+  ].join('\n');
+
+  const response = await client.responses.create({
+    model: model || MODEL,
+    temperature: 0.1,
+    instructions,
+    input,
+    tools,
+    include: INCLUDE_FIELDS,
+    tool_choice: 'auto',
+  });
+
+  return {
+    brief: extractResponseText(response),
+    citations: extractCitationsFromResponse(response),
+    usedWebSearch: hasWebSearchCall(response),
+  };
+}
+
+async function runCommitteeAgent({
+  client,
+  model = PICK_COMMITTEE_MODEL,
+  role = 'pro',
+  userMessage = '',
+  baseReply = '',
+  temporalContext = '',
+  newsBrief = '',
+}) {
+  const isPro = role === 'pro';
+  const instructions = isPro
+    ? [
+        'Sos Analyst A (pro-pick) para MMA betting.',
+        'Tomá la tesis más fuerte posible PERO sin inventar datos.',
+        'Devolvé SOLO un JSON válido con esta forma exacta:',
+        '{"verdict":"bet|no_bet","pick":"string","market":"string","edge_pct":number,"confidence":number,"entry_rule":"string","thesis":["string"],"risk_flags":["string"]}',
+        'Si no hay edge suficiente, verdict debe ser "no_bet".',
+      ].join(' ')
+    : [
+        'Sos Analyst B (risk/challenge) para MMA betting.',
+        'Intentá romper la tesis de Analyst A y encontrar riesgos materiales.',
+        'Devolvé SOLO un JSON válido con esta forma exacta:',
+        '{"verdict":"block|allow","block":boolean,"confidence_penalty":number,"concerns":["string"],"required_checks":["string"]}',
+        'Usá block=true cuando la incertidumbre sea alta o la señal sea débil.',
+      ].join(' ');
+
+  const input = [
+    '[USER_MESSAGE]',
+    String(userMessage || '').trim() || 'N/D',
+    '',
+    '[BASE_ANALYSIS]',
+    String(baseReply || '').trim() || 'N/D',
+    '',
+    '[RECENT_NEWS_BRIEF]',
+    String(newsBrief || '').trim() || 'Sin novedades relevantes',
+    '',
+    '[TEMPORAL_CONTEXT]',
+    String(temporalContext || '').trim() || 'N/D',
+  ].join('\n');
+
+  const response = await client.responses.create({
+    model: model || MODEL,
+    temperature: 0.2,
+    instructions,
+    input,
+  });
+
+  const text = extractResponseText(response);
+  const parsed = extractFirstJsonObject(text);
+
+  return isPro ? parseCommitteeProAnalysis(parsed) : parseCommitteeContraAnalysis(parsed);
 }
 
 async function runResponsesWithTools({
@@ -3081,15 +3439,84 @@ export function createBettingWizard({
         };
       }
 
+      let workingReply = reply;
+      let committeeBlocked = false;
+      let citations = Array.isArray(result.citations) ? result.citations : [];
+
+      if (
+        shouldRunPickCommittee({
+          enabled: PICK_COMMITTEE_ENABLED,
+          wantsBetDecision,
+          originalMessage,
+          reply: workingReply,
+        })
+      ) {
+        try {
+          const news = await fetchRecentFightNewsBrief({
+            client,
+            message: originalMessage,
+            temporalContext: temporalContext.sectionText,
+            timezone: temporalContext.timezone,
+            model: PICK_COMMITTEE_MODEL,
+          });
+          citations = mergeCitations(citations, news.citations);
+
+          const pro = await runCommitteeAgent({
+            client,
+            model: PICK_COMMITTEE_MODEL,
+            role: 'pro',
+            userMessage: originalMessage,
+            baseReply: workingReply,
+            temporalContext: temporalContext.sectionText,
+            newsBrief: news.brief,
+          });
+
+          const contra = await runCommitteeAgent({
+            client,
+            model: PICK_COMMITTEE_MODEL,
+            role: 'contra',
+            userMessage: originalMessage,
+            baseReply: workingReply,
+            temporalContext: temporalContext.sectionText,
+            newsBrief: news.brief,
+          });
+
+          const outcome = buildCommitteeOutcome({
+            pro,
+            contra,
+            minEdgePct: PICK_COMMITTEE_MIN_EDGE_PCT,
+            minConfidence: PICK_COMMITTEE_MIN_CONFIDENCE,
+          });
+
+          const committeeFooter = renderCommitteeFooter(outcome);
+          if (committeeFooter) {
+            if (outcome?.approved === false) {
+              committeeBlocked = true;
+              workingReply = [
+                'No la tomaría como apuesta ejecutable ahora mismo.',
+                '',
+                committeeFooter,
+                '',
+                'Si querés, te la reformulo como entrada condicional (qué tendría que pasar para entrar).',
+              ].join('\n');
+            } else {
+              workingReply = `${workingReply}\n\n${committeeFooter}`;
+            }
+          }
+        } catch (committeeError) {
+          console.error('⚠️ Pick committee fallback (se mantiene analisis base):', committeeError);
+        }
+      }
+
       const citationFooter = shouldShowCitations(originalMessage)
-        ? formatCitationsFooter(result.citations)
+        ? formatCitationsFooter(citations)
         : '';
-      const replyWithRationale = enforceRationaleSection(reply, originalMessage);
-      const replyWithStakeCalibration = enforceStakeCalibration(
-        replyWithRationale,
-        originalMessage,
-        userProfile || {}
-      );
+      const replyWithRationale = committeeBlocked
+        ? workingReply
+        : enforceRationaleSection(workingReply, originalMessage);
+      const replyWithStakeCalibration = committeeBlocked
+        ? replyWithRationale
+        : enforceStakeCalibration(replyWithRationale, originalMessage, userProfile || {});
       const replyWithTemporalGuard = enforceCalendarNoEventContext(
         replyWithStakeCalibration,
         originalMessage,
