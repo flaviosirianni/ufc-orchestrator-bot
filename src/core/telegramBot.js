@@ -25,12 +25,19 @@ const MAIN_MENU_ROWS = [
     { text: 'Config', callback_data: 'menu:config' },
   ],
   [
+    { text: 'Analizar pelea', callback_data: 'qa:analyze_fight' },
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+  ],
+  [
     { text: 'Registrar apuesta', callback_data: 'qa:record_bet' },
   ],
 ];
 
 const BETS_MENU_ROWS = [
+  [
+    { text: 'Analizar pelea', callback_data: 'qa:analyze_fight' },
+    { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+  ],
   [
     { text: 'Abrir', callback_data: 'act:bet_open' },
     { text: 'Registrar', callback_data: 'act:bet_record' },
@@ -68,6 +75,13 @@ const CONFIG_MENU_ROWS = [
 ];
 
 const QUICK_ACTION_HINTS = {
+  analyze_fight: [
+    '🥊 Analizar pelea (sin cuotas)',
+    'Pasame pelea y, si queres, evento.',
+    'Ejemplo: `Zellhuber vs Green`',
+    'Con eso te doy: escenario probable, claves tacticas, riesgos y lean principal.',
+    'No hace falta mandar cuotas para este modo.',
+  ].join('\n'),
   analyze_quotes: [
     '📸 Analizar cuotas',
     'Mandame screenshot completo de la pelea/evento (ML + O/U + metodo si aparece).',
@@ -606,6 +620,11 @@ export function startTelegramBot(router) {
 
     if (data === 'qa:analyze_quotes') {
       await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'bets' });
+      return;
+    }
+
+    if (data === 'qa:analyze_fight') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_fight, { menuScope: 'bets' });
       return;
     }
 

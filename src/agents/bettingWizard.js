@@ -1390,6 +1390,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'No menciones el backend, caches ni herramientas internas al usuario.',
     'No pidas historial de peleadores al usuario si la herramienta puede obtenerlo.',
     'Solo pide cuotas si el usuario quiere EV/staking fino; antes de pedirlas, intenta get_user_odds para usar cuotas guardadas.',
+    'Si el usuario pide "analizar pelea" o "sin cuotas", no pidas odds: entrega lectura tecnica, escenarios probables, riesgos y lean cualitativo.',
     'Cuando haya cuotas guardadas relevantes, usalas automaticamente sin pedirle al usuario que las reenvie.',
     'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
     'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
