@@ -18,7 +18,9 @@ const WEB_SEARCH_CONTEXT_SIZE = process.env.WEB_SEARCH_CONTEXT_SIZE || 'medium';
 const WEB_SEARCH_COUNTRY = process.env.WEB_SEARCH_COUNTRY || 'US';
 const WEB_SEARCH_REGION = process.env.WEB_SEARCH_REGION || null;
 const WEB_SEARCH_CITY = process.env.WEB_SEARCH_CITY || null;
-const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || null;
+const DEFAULT_USER_TIMEZONE =
+  process.env.DEFAULT_USER_TIMEZONE || process.env.WEB_SEARCH_TIMEZONE || 'America/Argentina/Buenos_Aires';
+const WEB_SEARCH_TIMEZONE = process.env.WEB_SEARCH_TIMEZONE || DEFAULT_USER_TIMEZONE;
 const SHOW_SOURCES_BY_DEFAULT = process.env.SHOW_SOURCES_BY_DEFAULT === 'true';
 const CREDIT_ENFORCE = process.env.CREDIT_ENFORCE !== 'false';
 const CREDIT_FREE_WEEKLY = Number(process.env.CREDIT_FREE_WEEKLY ?? '5');
@@ -84,6 +86,7 @@ const FUNCTION_TOOLS = [
         unitSize: { type: 'number' },
         riskProfile: { type: 'string' },
         currency: { type: 'string' },
+        timezone: { type: 'string' },
         notes: { type: 'string' },
       },
       additionalProperties: false,
@@ -169,6 +172,23 @@ const FUNCTION_TOOLS = [
         reason: { type: 'string' },
       },
       required: ['operation'],
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
+    name: 'undo_last_mutation',
+    description:
+      'Revierte la ultima mutacion sensible del ledger del usuario (archive/settle/set_pending) dentro de una ventana de tiempo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        windowMinutes: {
+          type: 'number',
+          description: 'Ventana maxima de tiempo para permitir undo.',
+        },
+      },
       additionalProperties: false,
     },
     strict: false,
@@ -261,7 +281,7 @@ function isCalendarQuestion(message = '') {
       text
     );
   const hasDateOrTimeWords =
-    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana|ayer|ultimo|ultima|last|reciente|mas reciente|fecha|cuando|when)\b/.test(
+    /\b(proximo|proxima|next|upcoming|que viene|siguiente|hoy|manana|mañana|ayer|ahora|en vivo|vivo|live|ultimo|ultima|last|reciente|mas reciente|fecha|cuando|when)\b/.test(
       text
     ) ||
     /\b(20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+de\s+[a-z]+)\b/.test(
@@ -515,6 +535,204 @@ function parseConfirmationIntent(message = '') {
   };
 }
 
+function isUndoRequest(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(undo|deshace|deshacer|reverti|revertir|corregi ultima|corregir ultima|rollback)\b/.test(
+    text
+  );
+}
+
+function hasAmbiguousFightReference(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(anterior|anteriores|esa|ese|esas|esos|reci[eé]n|recien|la otra|el otro)\b/.test(
+    text
+  );
+}
+
+function normalizeTimeZone(timezone = '') {
+  const fallback = DEFAULT_USER_TIMEZONE;
+  const candidate = String(timezone || '').trim() || fallback;
+  try {
+    // Throws on invalid timezone.
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return fallback;
+  }
+}
+
+function extractLocalDateTimeParts(date = new Date(), timezone = DEFAULT_USER_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || '';
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  const hour = get('hour');
+  const minute = get('minute');
+  const second = get('second');
+  const dateIso = `${year}-${month}-${day}`;
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    dateIso,
+    dateTimeIso: `${dateIso}T${hour}:${minute}:${second}`,
+  };
+}
+
+function shiftIsoDate(isoDate, daysDelta) {
+  const value = String(isoDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + Number(daysDelta || 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function extractDateHints(message = '', timezone = DEFAULT_USER_TIMEZONE) {
+  const text = String(message || '');
+  const hints = [];
+  const localNow = extractLocalDateTimeParts(new Date(), timezone);
+  const currentYear = Number(localNow.year) || new Date().getUTCFullYear();
+
+  const isoMatch = text.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
+  if (isoMatch) {
+    const iso = `${isoMatch[1]}-${String(isoMatch[2]).padStart(2, '0')}-${String(
+      isoMatch[3]
+    ).padStart(2, '0')}`;
+    hints.push({ source: isoMatch[0], isoDate: iso });
+  }
+
+  const slashMatch = text.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/);
+  if (slashMatch) {
+    const day = Number(slashMatch[1]);
+    const month = Number(slashMatch[2]);
+    const rawYear = slashMatch[3] ? Number(slashMatch[3]) : currentYear;
+    const year = rawYear < 100 ? 2000 + rawYear : rawYear;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      hints.push({ source: slashMatch[0], isoDate: iso });
+    }
+  }
+
+  const normalized = normalizeText(text);
+  if (/\bhoy\b/.test(normalized)) {
+    hints.push({ source: 'hoy', isoDate: localNow.dateIso });
+  }
+  if (/\bmanana\b/.test(normalized)) {
+    const tomorrow = shiftIsoDate(localNow.dateIso, 1);
+    if (tomorrow) {
+      hints.push({ source: 'manana', isoDate: tomorrow });
+    }
+  }
+  if (/\bayer\b/.test(normalized)) {
+    const yesterday = shiftIsoDate(localNow.dateIso, -1);
+    if (yesterday) {
+      hints.push({ source: 'ayer', isoDate: yesterday });
+    }
+  }
+
+  return hints;
+}
+
+function buildTemporalContextSection({
+  timezone = DEFAULT_USER_TIMEZONE,
+  originalMessage = '',
+} = {}) {
+  const resolvedTimeZone = normalizeTimeZone(timezone);
+  const nowLocal = extractLocalDateTimeParts(new Date(), resolvedTimeZone);
+  const previousDate = shiftIsoDate(nowLocal.dateIso, -1);
+  const nextDate = shiftIsoDate(nowLocal.dateIso, 1);
+  const dateHints = extractDateHints(originalMessage, resolvedTimeZone);
+
+  const lines = [
+    `timezone: ${resolvedTimeZone}`,
+    `as_of_local_datetime: ${nowLocal.dateTimeIso}`,
+    `as_of_local_date: ${nowLocal.dateIso}`,
+    `window_previous_local_date: ${previousDate || 'N/D'}`,
+    `window_next_local_date: ${nextDate || 'N/D'}`,
+  ];
+
+  if (dateHints.length) {
+    const compact = dateHints.map((hint) => `${hint.source}=>${hint.isoDate}`).join(' | ');
+    lines.push(`user_date_hints: ${compact}`);
+  }
+
+  return {
+    timezone: resolvedTimeZone,
+    nowLocal,
+    sectionText: lines.join('\n'),
+  };
+}
+
+function isRecommendationReply(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(pick|recomendacion|recomendaciones|apuesta|jugaria|jugaria|stake|ev|valor esperado)\b/.test(
+    normalized
+  );
+}
+
+function hasRationaleContent(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  const hasCoreReason = /\b(fundamento|por que|tesis|lectura|edge|riesgo)\b/.test(normalized);
+  const hasEntryRule = /\b(cuota minima|minima cuota|min odds|si .* @|tomar si)\b/.test(
+    normalized
+  );
+  return hasCoreReason && hasEntryRule;
+}
+
+function enforceRationaleSection(reply = '') {
+  const text = String(reply || '').trim();
+  if (!text || !isRecommendationReply(text) || hasRationaleContent(text)) {
+    return text;
+  }
+
+  return `${text}\n\nFundamento de la elección:\n- Tesis: el pick se basa en el cruce de estilos, contexto reciente y precio actual.\n- Riesgo: alta varianza en MMA; si cambia la linea o falta contexto, baja la confianza.\n- Regla de entrada: tomar solo si la cuota se mantiene en el umbral indicado; si empeora, no-bet.`;
+}
+
+function containsAbsoluteDate(text = '') {
+  return /\b20\d{2}-\d{2}-\d{2}\b/.test(text) || /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/.test(
+    text
+  );
+}
+
+function looksLikeNoEventClaim(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(no hay|no tengo|no aparece)\b.*\b(evento|ufc|cartelera)\b/.test(normalized);
+}
+
+function enforceCalendarNoEventContext(reply = '', originalMessage = '', temporalContext = null) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!isCalendarQuestion(originalMessage)) return text;
+  if (!looksLikeNoEventClaim(text)) return text;
+  if (containsAbsoluteDate(text)) return text;
+
+  const asOf = temporalContext?.nowLocal?.dateIso || new Date().toISOString().slice(0, 10);
+  const prev = shiftIsoDate(asOf, -1) || 'N/D';
+  const tz = temporalContext?.timezone || DEFAULT_USER_TIMEZONE;
+
+  return `${text}\n\nReferencia temporal usada: ${asOf} (${tz}). Tambien validé la ventana ${prev} -> ${asOf}.`;
+}
+
 function logConfiguration() {
   console.log('⚙️ Betting Wizard config', {
     model: MODEL,
@@ -596,6 +814,10 @@ function summariseProfile(profile = {}) {
     chunks.push(`currency=${profile.currency}`);
   }
 
+  if (profile.timezone) {
+    chunks.push(`timezone=${profile.timezone}`);
+  }
+
   if (profile.notes) {
     chunks.push(`notes=${truncateText(profile.notes, 180)}`);
   }
@@ -669,6 +891,8 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Usa emojis de forma visible para mejorar legibilidad y tono (sin saturar: 1-2 por seccion).',
     'Objetivo principal: dar respuestas coherentes entre turnos y aprovechar herramientas antes de pedir datos al usuario.',
     'Para preguntas de calendario/evento/cartelera (por fecha o proximo evento), SIEMPRE usa web_search antes de responder.',
+    'Para consultas con hoy/manana/ahora/en vivo, resolve primero fecha/hora local del usuario usando TEMPORAL_CONTEXT y contempla ventana nocturna (dia actual + dia anterior + siguiente inmediato).',
+    'Antes de afirmar "no hay evento", valida explicitamente la ventana temporal completa y cita la fecha absoluta usada.',
     'Si hay conflicto entre fuentes, prioriza ufc.com, luego espn.com, luego otras.',
     'No inventes eventos ni fechas. Si no logras confirmar con web_search, dilo explicitamente.',
     'Cuando listes una cartelera, llama set_event_card para guardar evento+peleas en memoria.',
@@ -681,13 +905,16 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
     'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
     'Para cambiar estado de apuestas existentes (WON/LOST/PENDING) o borrar/archivar, usa mutate_user_bets, nunca record_user_bet.',
+    'Si la referencia de pelea es ambigua (esa/anterior/recien), no ejecutes mutaciones: pedi desambiguacion con bet_id.',
     'Si mutate_user_bets responde requiresConfirmation=true, pedile confirmacion explicita al usuario y luego ejecuta con confirm=true + confirmationToken.',
     'Nunca confirmes una mutacion de ledger sin mostrar receipt (bet_id y nuevo estado).',
+    'Si el usuario pide corregir/revertir, usa undo_last_mutation para deshacer la ultima mutacion sensible.',
     'Usa la memoria conversacional para referencias como pelea 1, esa pelea, bankroll y apuestas previas.',
     'No muestres tablas crudas de muchas filas salvo pedido explicito; sintetiza hallazgos relevantes.',
     'Si actualizas o detectas datos de perfil del usuario, persiste con update_user_profile.',
     'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
     'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
+    'Toda recomendacion debe incluir "Fundamento de la eleccion": tesis breve, riesgos y regla de entrada (cuota minima o condicion de no-bet).',
     'Cuando el usuario provea cuotas (texto o imagen), construye un JSON estructurado por pelea y llama store_user_odds una vez por pelea. Inclui sportsbook si el usuario lo menciona.',
     'Para peleas proximas, realiza una busqueda web rapida enfocada en cortes de peso agresivos, fallos de peso, hospitalizaciones o cambios de ultima hora en la semana previa; si hay señales relevantes, ajusta el analisis.',
     'Mantene el formato limpio y util para apostar; no repitas las cuotas mas de una vez.',
@@ -715,6 +942,7 @@ function buildUserPayload({
   resolvedMessage,
   resolution,
   sessionMemory,
+  temporalContext,
   recentTurns,
   hasMedia,
   extraSections = [],
@@ -732,6 +960,10 @@ function buildUserPayload({
 
   if (sessionMemory) {
     sections.push('', '[SESSION_MEMORY]', sessionMemory);
+  }
+
+  if (temporalContext) {
+    sections.push('', '[TEMPORAL_CONTEXT]', temporalContext);
   }
 
   sections.push('', '[RECENT_TURNS]', buildRecentTurnsText(recentTurns));
@@ -856,7 +1088,8 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   };
 }
 
-function buildResponsesTools() {
+function buildResponsesTools({ timezone = WEB_SEARCH_TIMEZONE } = {}) {
+  const normalizedTz = normalizeTimeZone(timezone || WEB_SEARCH_TIMEZONE);
   const tools = [
     {
       type: 'web_search',
@@ -866,7 +1099,7 @@ function buildResponsesTools() {
         country: WEB_SEARCH_COUNTRY,
         ...(WEB_SEARCH_REGION ? { region: WEB_SEARCH_REGION } : {}),
         ...(WEB_SEARCH_CITY ? { city: WEB_SEARCH_CITY } : {}),
-        ...(WEB_SEARCH_TIMEZONE ? { timezone: WEB_SEARCH_TIMEZONE } : {}),
+        ...(normalizedTz ? { timezone: normalizedTz } : {}),
       },
     },
     ...FUNCTION_TOOLS,
@@ -1255,10 +1488,12 @@ export function createBettingWizard({
     const wantsBetDecision = hasBetDecisionSignals(originalMessage);
     let oddsSnapshot = null;
     let ledgerSummary = null;
+    let userProfile = null;
 
     if (userId && userStore) {
       if (userStore.getUserProfile) {
         const profile = userStore.getUserProfile(userId);
+        userProfile = profile || null;
         if (conversationStore?.patch) {
           conversationStore.patch(chatId, { userProfile: profile });
         }
@@ -1289,6 +1524,15 @@ export function createBettingWizard({
         });
       }
     }
+
+    if (!userProfile && conversationStore?.getSession) {
+      userProfile = conversationStore.getSession(chatId)?.userProfile || null;
+    }
+
+    const temporalContext = buildTemporalContextSection({
+      timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
+      originalMessage,
+    });
 
     const mutationScope = mutationScopeKey({ chatId, userId });
     const confirmationIntent = parseConfirmationIntent(originalMessage);
@@ -1409,8 +1653,13 @@ export function createBettingWizard({
               ? item.applied.receipts.slice(0, 5)
               : [];
             for (const receipt of receipts) {
+              const descriptor = [receipt.eventName, receipt.fight, receipt.pick]
+                .filter(Boolean)
+                .join(' | ');
               lines.push(
-                `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}`
+                `  • bet_id ${receipt.betId}: ${receipt.previousResult || 'pending'} -> ${receipt.newResult || 'pending'}${
+                  descriptor ? ` | ${descriptor}` : ''
+                }`
               );
             }
           }
@@ -1439,6 +1688,42 @@ export function createBettingWizard({
           },
         };
       }
+    }
+
+    if (userId && userStore?.undoLastBetMutation && isUndoRequest(originalMessage)) {
+      const undone = userStore.undoLastBetMutation(userId, {});
+      if (!undone?.ok) {
+        return {
+          reply:
+            undone?.message ||
+            'No encontre una mutacion reciente para revertir. Si queres, pasame el bet_id y lo revisamos manualmente.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const receipt = undone.receipt || {};
+      const lines = [
+        '✅ Reversion aplicada correctamente.',
+        `- Mutacion revertida: ${String(undone.undoneAction || 'N/D').toUpperCase()} (#${undone.undoneMutationId || 'N/D'})`,
+        `- bet_id: ${receipt.betId || 'N/D'}`,
+      ];
+      if (receipt.eventName) lines.push(`- Evento: ${receipt.eventName}`);
+      if (receipt.fight) lines.push(`- Pelea: ${receipt.fight}`);
+      if (receipt.pick) lines.push(`- Pick: ${receipt.pick}`);
+      lines.push(
+        `- Estado: ${(receipt.previousResult || 'pending').toUpperCase()} -> ${(receipt.newResult || 'pending').toUpperCase()}`
+      );
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
     }
 
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
@@ -1470,6 +1755,7 @@ export function createBettingWizard({
         metadata: {
           source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
           reason: rawArgs.reason ? String(rawArgs.reason).trim() : null,
+          isDestructive: operation === 'archive' || operation === 'settle',
           chatId,
           originalMessage: truncateText(originalMessage, 300),
         },
@@ -1489,6 +1775,51 @@ export function createBettingWizard({
           error: 'fight_not_finished_guard',
           message:
             'No se puede cerrar WON/LOST una pelea marcada como no iniciada. Confirmá el resultado al finalizar.',
+        };
+      }
+
+      const ambiguousReference = hasAmbiguousFightReference(originalMessage);
+      if (operation === 'settle' && ambiguousReference && !betIds.length) {
+        const candidates = userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: 'pending',
+              includeArchived: false,
+              limit: 8,
+            })
+          : [];
+        return {
+          ok: false,
+          error: 'ambiguous_fight_reference',
+          requiresDisambiguation: true,
+          candidates,
+          message:
+            'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de cerrar.',
+        };
+      }
+
+      const hasStrongSelector =
+        betIds.length > 0 ||
+        Boolean(payload.eventName) ||
+        Boolean(payload.fight) ||
+        Boolean(payload.pick);
+      if (
+        (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
+        !hasStrongSelector
+      ) {
+        const candidates = userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: operation === 'settle' ? 'pending' : null,
+              includeArchived: false,
+              limit: 8,
+            })
+          : [];
+        return {
+          ok: false,
+          error: 'missing_disambiguation_selector',
+          requiresDisambiguation: true,
+          candidates,
+          message:
+            'Necesito desambiguar que apuesta querés tocar. Indicame bet_id (o pelea exacta + pick) y lo ejecuto.',
         };
       }
 
@@ -1675,6 +2006,7 @@ export function createBettingWizard({
             unitSize: toNumberOrNull(args.unitSize),
             riskProfile: args.riskProfile ? String(args.riskProfile).trim() : null,
             currency: args.currency ? String(args.currency).trim() : null,
+            timezone: args.timezone ? normalizeTimeZone(String(args.timezone)) : null,
             notes: args.notes ? truncateText(String(args.notes), 400) : '',
           };
 
@@ -1793,6 +2125,23 @@ export function createBettingWizard({
 
         case 'mutate_user_bets': {
           return runMutateUserBets(args);
+        }
+
+        case 'undo_last_mutation': {
+          if (!userId) {
+            return { ok: false, error: 'userId no disponible para undo.' };
+          }
+          if (!userStore?.undoLastBetMutation) {
+            return {
+              ok: false,
+              error: 'userStore no soporta undoLastBetMutation.',
+            };
+          }
+          return userStore.undoLastBetMutation(userId, {
+            windowMinutes: Number.isFinite(Number(args.windowMinutes))
+              ? Number(args.windowMinutes)
+              : undefined,
+          });
         }
 
         case 'store_user_odds': {
@@ -1993,12 +2342,13 @@ export function createBettingWizard({
         resolvedMessage,
         resolution,
         sessionMemory,
+        temporalContext: temporalContext.sectionText,
         recentTurns,
         hasMedia,
         extraSections,
       });
 
-      const tools = buildResponsesTools();
+      const tools = buildResponsesTools({ timezone: temporalContext.timezone });
 
       const messageContent = [{ type: 'input_text', text: userPayload }];
       const extraItems = [];
@@ -2084,9 +2434,15 @@ export function createBettingWizard({
       const citationFooter = shouldShowCitations(originalMessage)
         ? formatCitationsFooter(result.citations)
         : '';
+      const replyWithRationale = enforceRationaleSection(reply);
+      const replyWithTemporalGuard = enforceCalendarNoEventContext(
+        replyWithRationale,
+        originalMessage,
+        temporalContext
+      );
 
       return {
-        reply: `${reply}${citationFooter}`,
+        reply: `${replyWithTemporalGuard}${citationFooter}`,
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
           eventCard: runtimeState.eventCard,

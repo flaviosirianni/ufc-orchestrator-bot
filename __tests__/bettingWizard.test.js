@@ -718,6 +718,197 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 4);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería usarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        undoLastBetMutation() {
+          return {
+            ok: true,
+            undoneMutationId: 501,
+            undoneAction: 'settle',
+            receipt: {
+              betId: 44,
+              eventName: 'UFC FN',
+              fight: 'A vs B',
+              pick: 'Under 2.5',
+              previousResult: 'loss',
+              newResult: 'pending',
+            },
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('deshace la ultima accion', {
+      chatId: 'chat-undo-1',
+      userId: 'u-undo-1',
+      originalMessage: 'deshace la ultima accion',
+      resolution: {
+        resolvedMessage: 'deshace la ultima accion',
+      },
+    });
+
+    assert.match(result.reply, /Reversion aplicada/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          operation: 'settle',
+          result: 'loss',
+        },
+        'call_ambiguous_settle'
+      ),
+      responseWithText('Necesito bet_id para evitar errores.'),
+    ]);
+
+    let previewCalls = 0;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [{ id: 99, fight: 'A vs B', result: 'pending' }];
+        },
+        previewBetMutation() {
+          previewCalls += 1;
+          return { ok: true, operation: 'settle', candidates: [] };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return { ok: true, operation: 'settle', affectedCount: 1, receipts: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('marcala perdida, la anterior', {
+      chatId: 'chat-amb-1',
+      userId: 'u-amb-1',
+      originalMessage: 'marcala perdida, la anterior',
+      resolution: {
+        resolvedMessage: 'marcala perdida, la anterior',
+      },
+    });
+
+    assert.match(result.reply, /bet_id/i);
+    assert.equal(previewCalls, 0);
+    assert.equal(applyCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('Pick principal: Over 2.5 @1.90.')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick para esta pelea', {
+      chatId: 'chat-rationale-1',
+      originalMessage: 'dame un pick para esta pelea',
+      resolution: {
+        resolvedMessage: 'dame un pick para esta pelea',
+      },
+    });
+
+    assert.match(result.reply, /Fundamento de la elección/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('No hay evento de UFC ahora mismo.', { includeWebSearch: true }),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('hay evento de ufc ahora en vivo?', {
+      chatId: 'chat-timeguard-1',
+      originalMessage: 'hay evento de ufc ahora en vivo?',
+      resolution: {
+        resolvedMessage: 'hay evento de ufc ahora en vivo?',
+      },
+    });
+
+    assert.match(result.reply, /Referencia temporal usada/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('todo bien')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            bankroll: null,
+            unitSize: null,
+            riskProfile: null,
+            currency: null,
+            timezone: 'America/New_York',
+            notes: '',
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('hola', {
+      chatId: 'chat-tz-1',
+      userId: 'u-tz-1',
+      originalMessage: 'hola',
+      resolution: {
+        resolvedMessage: 'hola',
+      },
+    });
+
+    assert.equal(
+      fakeClient.calls[0]?.tools?.[0]?.user_location?.timezone,
+      'America/New_York'
+    );
+  });
+
   for (const test of tests) {
     await test();
   }

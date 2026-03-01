@@ -6,6 +6,7 @@ import '../core/env.js';
 
 const DB_PATH =
   process.env.DB_PATH || path.resolve(process.cwd(), 'data', 'bot.db');
+const LEDGER_UNDO_WINDOW_MINUTES = Number(process.env.LEDGER_UNDO_WINDOW_MINUTES ?? '30');
 
 let dbInstance = null;
 
@@ -61,6 +62,7 @@ function initSchema(db) {
       unit_size REAL,
       risk_profile TEXT,
       currency TEXT,
+      timezone TEXT,
       notes TEXT,
       updated_at TEXT
     );
@@ -240,6 +242,15 @@ function ensureBetSchema(db) {
   );
 }
 
+function ensureUserProfileSchema(db) {
+  const columns = db.prepare("PRAGMA table_info('user_profiles')").all();
+  const names = new Set(columns.map((row) => row?.name).filter(Boolean));
+
+  if (!names.has('timezone')) {
+    db.exec('ALTER TABLE user_profiles ADD COLUMN timezone TEXT');
+  }
+}
+
 export function getDb() {
   if (dbInstance) {
     return dbInstance;
@@ -251,6 +262,7 @@ export function getDb() {
   db.pragma('foreign_keys = ON');
   initSchema(db);
   ensureBetSchema(db);
+  ensureUserProfileSchema(db);
   dbInstance = db;
   return dbInstance;
 }
@@ -391,7 +403,7 @@ export function getUserProfile(userId) {
   const db = getDb();
   const row = db
     .prepare(
-      'SELECT bankroll, unit_size, risk_profile, currency, notes FROM user_profiles WHERE telegram_user_id = ?'
+      'SELECT bankroll, unit_size, risk_profile, currency, timezone, notes FROM user_profiles WHERE telegram_user_id = ?'
     )
     .get(userId);
   return {
@@ -399,6 +411,7 @@ export function getUserProfile(userId) {
     unitSize: row?.unit_size ?? null,
     riskProfile: row?.risk_profile ?? null,
     currency: row?.currency ?? null,
+    timezone: row?.timezone ?? null,
     notes: row?.notes ?? '',
   };
 }
@@ -412,17 +425,19 @@ export function updateUserProfile(userId, updates = {}) {
     unitSize: updates.unitSize ?? current.unitSize,
     riskProfile: updates.riskProfile ?? current.riskProfile,
     currency: updates.currency ?? current.currency,
+    timezone: updates.timezone ?? current.timezone,
     notes: updates.notes ?? current.notes,
   };
 
   db.prepare(
-    `INSERT INTO user_profiles (telegram_user_id, bankroll, unit_size, risk_profile, currency, notes, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO user_profiles (telegram_user_id, bankroll, unit_size, risk_profile, currency, timezone, notes, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(telegram_user_id) DO UPDATE SET
        bankroll = excluded.bankroll,
        unit_size = excluded.unit_size,
        risk_profile = excluded.risk_profile,
        currency = excluded.currency,
+       timezone = excluded.timezone,
        notes = excluded.notes,
        updated_at = excluded.updated_at`
   ).run(
@@ -431,6 +446,7 @@ export function updateUserProfile(userId, updates = {}) {
     next.unitSize,
     next.riskProfile,
     next.currency,
+    next.timezone,
     next.notes,
     nowIso()
   );
@@ -606,6 +622,15 @@ function logBetMutation(db, {
     metadata ? JSON.stringify(metadata) : null,
     at
   );
+}
+
+function parseJsonSafe(value, fallback = null) {
+  if (!value || typeof value !== 'string') return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 export function rebuildLedgerSummary(userId) {
@@ -832,6 +857,150 @@ export function applyBetMutation(userId, payload = {}) {
     operation,
     affectedCount: receipts.length,
     receipts,
+    ledgerSummary,
+  };
+}
+
+export function undoLastBetMutation(
+  userId,
+  { windowMinutes = LEDGER_UNDO_WINDOW_MINUTES } = {}
+) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+
+  const db = getDb();
+  const now = nowIso();
+  const windowMs = Math.max(1, Number(windowMinutes) || LEDGER_UNDO_WINDOW_MINUTES) * 60 * 1000;
+  const minCreatedAtMs = Date.now() - windowMs;
+
+  const undoRows = db
+    .prepare(
+      `SELECT metadata
+       FROM bet_mutations
+       WHERE telegram_user_id = ? AND action = 'undo'
+       ORDER BY id DESC
+       LIMIT 200`
+    )
+    .all(userId);
+  const undoneMutationIds = new Set();
+  for (const row of undoRows) {
+    const metadata = parseJsonSafe(row?.metadata, {});
+    const undoneId = Number(metadata?.undoneMutationId);
+    if (Number.isInteger(undoneId) && undoneId > 0) {
+      undoneMutationIds.add(undoneId);
+    }
+  }
+
+  const candidates = db
+    .prepare(
+      `SELECT id, bet_id, action, prev_result, new_result, prev_archived_at, new_archived_at, metadata, created_at
+       FROM bet_mutations
+       WHERE telegram_user_id = ?
+         AND action IN ('archive', 'settle', 'set_pending')
+       ORDER BY id DESC
+       LIMIT 200`
+    )
+    .all(userId);
+
+  const target = candidates.find((row) => {
+    if (undoneMutationIds.has(Number(row.id))) {
+      return false;
+    }
+    const createdAtMs = Date.parse(row.created_at || '');
+    if (!Number.isFinite(createdAtMs)) {
+      return false;
+    }
+    return createdAtMs >= minCreatedAtMs;
+  });
+
+  if (!target) {
+    return {
+      ok: false,
+      error: 'no_undo_candidate',
+      message: 'No encontre una mutacion reciente reversible dentro de la ventana permitida.',
+    };
+  }
+
+  const betId = Number(target.bet_id);
+  if (!Number.isInteger(betId) || betId <= 0) {
+    return {
+      ok: false,
+      error: 'invalid_target_bet',
+    };
+  }
+
+  const current = db
+    .prepare(
+      `SELECT id, event_name, fight, pick, result, archived_at, settled_at, updated_at
+       FROM bets
+       WHERE id = ? AND telegram_user_id = ?`
+    )
+    .get(betId, userId);
+
+  if (!current) {
+    return {
+      ok: false,
+      error: 'target_bet_not_found',
+    };
+  }
+
+  const nextResult = normalizeResult(target.prev_result) || 'pending';
+  const nextArchivedAt = target.prev_archived_at || null;
+  const nextSettledAt = isSettledResult(nextResult) ? current.settled_at || now : null;
+
+  const applyUndo = db.transaction(() => {
+    db.prepare(
+      `UPDATE bets
+       SET result = ?, archived_at = ?, settled_at = ?, updated_at = ?
+       WHERE id = ? AND telegram_user_id = ?`
+    ).run(nextResult, nextArchivedAt, nextSettledAt, now, betId, userId);
+
+    const undoMetadata = {
+      undoneMutationId: Number(target.id),
+      undoneAction: target.action,
+      undoneCreatedAt: target.created_at,
+      originalMetadata: parseJsonSafe(target.metadata, null),
+    };
+
+    logBetMutation(db, {
+      userId,
+      betId,
+      action: 'undo',
+      prevResult: normalizeResult(current.result) || 'pending',
+      nextResult,
+      prevArchivedAt: current.archived_at || null,
+      nextArchivedAt,
+      metadata: undoMetadata,
+      at: now,
+    });
+
+    return db
+      .prepare(
+        `SELECT id, event_name, fight, pick, result, archived_at, updated_at
+         FROM bets
+         WHERE id = ? AND telegram_user_id = ?`
+      )
+      .get(betId, userId);
+  });
+
+  const after = applyUndo();
+  const ledgerSummary = rebuildLedgerSummary(userId);
+
+  return {
+    ok: true,
+    undoneMutationId: Number(target.id),
+    undoneAction: target.action,
+    receipt: {
+      action: 'undo',
+      betId,
+      eventName: after?.event_name || null,
+      fight: after?.fight || null,
+      pick: after?.pick || null,
+      previousResult: normalizeResult(current.result) || 'pending',
+      newResult: normalizeResult(after?.result) || 'pending',
+      previousArchivedAt: current.archived_at || null,
+      newArchivedAt: after?.archived_at || null,
+      updatedAt: after?.updated_at || now,
+    },
     ledgerSummary,
   };
 }

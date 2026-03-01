@@ -36,7 +36,13 @@ function createSession(chatId, ttlMs) {
       unitSize: null,
       riskProfile: null,
       currency: null,
+      timezone: null,
       notes: '',
+    },
+    flowState: {
+      status: 'idle',
+      action: null,
+      updatedAt: now,
     },
     betHistory: [],
     ledgerSummary: null,
@@ -193,6 +199,23 @@ export class ConversationStore {
     session.updatedAt = nowMs();
     session.expiresAt = session.updatedAt + this.ttlMs;
     return session.userProfile;
+  }
+
+  setFlowState(chatId, flowState = {}) {
+    const session = this.getSession(chatId);
+    session.flowState = {
+      status: flowState.status || 'idle',
+      action: flowState.action || null,
+      updatedAt: nowMs(),
+    };
+    session.updatedAt = nowMs();
+    session.expiresAt = session.updatedAt + this.ttlMs;
+    return session.flowState;
+  }
+
+  getFlowState(chatId) {
+    const session = this.getSession(chatId);
+    return { ...(session.flowState || { status: 'idle', action: null }) };
   }
 
   addBetRecord(chatId, record = {}) {

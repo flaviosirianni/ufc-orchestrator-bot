@@ -17,6 +17,46 @@ const MAX_AUDIO_TRANSCRIPT_CHARS = Number(
 const MEDIA_GROUP_FLUSH_MS = Number(process.env.MEDIA_GROUP_FLUSH_MS ?? '900');
 const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
 
+const QUICK_ACTION_ROWS = [
+  [
+    { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+    { text: 'Registrar apuesta', callback_data: 'qa:record_bet' },
+  ],
+  [
+    { text: 'Ver pendientes', callback_data: 'qa:list_pending' },
+    { text: 'Cerrar apuesta', callback_data: 'qa:settle_bet' },
+  ],
+  [
+    { text: 'Corregir ultima accion', callback_data: 'qa:undo_last' },
+    { text: 'Ver creditos', callback_data: 'qa:view_credits' },
+  ],
+];
+
+const QUICK_ACTION_HINTS = {
+  analyze_quotes: [
+    '📸 Analizar cuotas',
+    'Mandame screenshot completo de la pelea/evento (ML + O/U + metodo si aparece).',
+    'Si preferis texto: evento, pelea, mercado, cuota.',
+    'Con eso te devuelvo lectura + EV + stake sugerido.',
+  ].join('\n'),
+  record_bet: [
+    '🧾 Registrar apuesta al ledger',
+    'Pasame estos datos:',
+    '1) Evento',
+    '2) Pelea',
+    '3) Pick / mercado',
+    '4) Cuota',
+    '5) Stake o unidades',
+    'Opcional: referencia/bookie.',
+  ].join('\n'),
+  settle_bet: [
+    '✅ Cerrar apuesta',
+    'Pasame: `bet_id` + resultado (`WON` o `LOST`).',
+    'Ejemplo: `bet_id 31 WON`.',
+    'Si no sabes el ID, usa "Ver pendientes".',
+  ].join('\n'),
+};
+
 function pickLargestPhoto(photos = []) {
   if (!photos.length) {
     return null;
@@ -134,6 +174,47 @@ export function startTelegramBot(router) {
   const bot = new TelegramBot(token, { polling: true });
   const pendingMediaGroups = new Map();
 
+  function buildQuickActionsMarkup() {
+    return {
+      inline_keyboard: QUICK_ACTION_ROWS,
+    };
+  }
+
+  async function sendBotMessage(chatId, text) {
+    return bot.sendMessage(chatId, text, {
+      reply_markup: buildQuickActionsMarkup(),
+    });
+  }
+
+  async function routeSyntheticAction(query, syntheticMessage = '') {
+    const sourceMsg = query?.message;
+    if (!sourceMsg) {
+      return null;
+    }
+
+    const chatId = sourceMsg.chat?.id;
+    if (!chatId || !syntheticMessage) {
+      return null;
+    }
+
+    return router.routeMessage({
+      chatId: String(chatId),
+      message: syntheticMessage,
+      user: {
+        id: query?.from?.id ? String(query.from.id) : null,
+        username: query?.from?.username || null,
+        firstName: query?.from?.first_name || null,
+        lastName: query?.from?.last_name || null,
+      },
+      chat: {
+        id: sourceMsg.chat?.id ? String(sourceMsg.chat.id) : null,
+        type: sourceMsg.chat?.type || null,
+        title: sourceMsg.chat?.title || null,
+      },
+      originalAction: query?.data || null,
+    });
+  }
+
   async function deliverToRouter({
     msg,
     userMessage,
@@ -149,7 +230,7 @@ export function startTelegramBot(router) {
     const hasMedia = Array.isArray(inputItems) && inputItems.length > 0;
 
     if (!cleanMessage && !hasMedia) {
-      await bot.sendMessage(
+      await sendBotMessage(
         chatId,
         'Por ahora puedo procesar texto, imagen o audio. Si queres, mandame tu consulta por mensaje o adjunta un archivo.'
       );
@@ -179,7 +260,7 @@ export function startTelegramBot(router) {
       },
     });
 
-    bot.sendMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
+    await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
   }
 
   async function processSingleMessage(msg) {
@@ -234,7 +315,7 @@ export function startTelegramBot(router) {
       }
     } catch (error) {
       console.error('❌ Error procesando media:', error);
-      await bot.sendMessage(
+      await sendBotMessage(
         chatId,
         'No pude procesar el archivo multimedia. Si es audio, asegurate de que pueda convertirlo a mp3/wav (requiere ffmpeg).'
       );
@@ -307,7 +388,7 @@ export function startTelegramBot(router) {
       }
     } catch (error) {
       console.error('❌ Error procesando album:', error);
-      await bot.sendMessage(
+      await sendBotMessage(
         chatId,
         'No pude procesar todas las fotos del album. Probá reenviarlas o mandar menos imágenes.'
       );
@@ -330,6 +411,49 @@ export function startTelegramBot(router) {
     }
 
     await processSingleMessage(msg);
+  });
+
+  bot.on('callback_query', async (query) => {
+    const data = String(query?.data || '');
+    const chatId = query?.message?.chat?.id;
+    if (!chatId) {
+      return;
+    }
+
+    try {
+      await bot.answerCallbackQuery(query.id);
+    } catch (error) {
+      console.error('⚠️ Error respondiendo callback_query:', error);
+    }
+
+    if (data === 'qa:analyze_quotes') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes);
+      return;
+    }
+
+    if (data === 'qa:record_bet') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.record_bet);
+      return;
+    }
+
+    if (data === 'qa:settle_bet') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.settle_bet);
+      return;
+    }
+
+    const syntheticByAction = {
+      'qa:list_pending': 'mostrame mis apuestas pending del ledger con bet_id',
+      'qa:undo_last': 'deshace la ultima mutacion del ledger',
+      'qa:view_credits': 'decime cuantos creditos tengo y mis ultimos movimientos',
+    };
+
+    const syntheticMessage = syntheticByAction[data];
+    if (!syntheticMessage) {
+      return;
+    }
+
+    const routed = await routeSyntheticAction(query, syntheticMessage);
+    await sendBotMessage(chatId, routed || 'No pude completar esa accion ahora mismo.');
   });
 
   console.log('🤖 Telegram bot iniciado y esperando mensajes...');
