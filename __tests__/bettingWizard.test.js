@@ -1348,6 +1348,67 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getCreditState() {
+          return {
+            availableCredits: 7.5,
+            freeCredits: 2,
+            paidCredits: 5.5,
+            weekId: '2026-W09',
+          };
+        },
+        getUsageCounters() {
+          return {
+            imagesToday: 1,
+            audioSecondsWeek: 180,
+          };
+        },
+        listCreditTransactions() {
+          return [
+            {
+              amount: 5,
+              type: 'credit',
+              reason: 'mercadopago_payment',
+              createdAt: '2026-03-01T03:00:00.000Z',
+            },
+            {
+              amount: -1,
+              type: 'spend',
+              reason: 'analysis',
+              createdAt: '2026-03-01T03:30:00.000Z',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cuantos creditos tengo?', {
+      chatId: 'chat-credit-balance-1',
+      userId: 'u-credit-balance-1',
+      originalMessage: 'cuantos creditos tengo?',
+      resolution: {
+        resolvedMessage: 'cuantos creditos tengo?',
+      },
+    });
+
+    assert.match(result.reply, /Estado de creditos/i);
+    assert.match(result.reply, /Disponibles:\s*7\.50/);
+    assert.match(result.reply, /Ultimos movimientos/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }

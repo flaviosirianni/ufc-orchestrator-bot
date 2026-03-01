@@ -1469,6 +1469,40 @@ export function addCredits(userId, amount, { reason = 'purchase', metadata = nul
   return { ok: true, paidCredits: newPaid };
 }
 
+function parseJsonOrNull(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function listCreditTransactions(userId, { limit = 8 } = {}) {
+  if (!userId) return [];
+  const db = getDb();
+  const max = Math.max(1, Math.min(50, Number(limit) || 8));
+  const rows = db
+    .prepare(
+      `SELECT id, amount, type, reason, metadata, created_at
+       FROM credit_transactions
+       WHERE telegram_user_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(String(userId), max);
+
+  return rows.map((row) => ({
+    id: row.id,
+    amount: Number(row.amount) || 0,
+    type: row.type || null,
+    reason: row.reason || null,
+    metadata: parseJsonOrNull(row.metadata),
+    createdAt: row.created_at || null,
+  }));
+}
+
 export function creditFromMercadoPagoPayment({
   paymentId,
   userId,

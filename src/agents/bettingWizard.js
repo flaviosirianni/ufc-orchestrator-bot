@@ -356,6 +356,14 @@ function hasLedgerSignals(message = '') {
   );
 }
 
+function hasCreditSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(credito|creditos|credits|saldo|recarga|cargar creditos|topup|packs?)\b/.test(
+    text
+  );
+}
+
 function isLiveFightQueueQuestion(message = '') {
   const text = normalise(message);
   if (!text) return false;
@@ -945,6 +953,30 @@ function formatAmountWithCurrency(amount, currency = 'ARS') {
   const formatted = new Intl.NumberFormat('es-AR').format(rounded);
   const symbol = '$';
   return `${symbol}${formatted} ${String(currency || 'ARS').toUpperCase()}`;
+}
+
+function formatSignedCredits(value) {
+  const amount = Number(value) || 0;
+  const sign = amount >= 0 ? '+' : '-';
+  return `${sign}${Math.abs(amount).toFixed(2)}`;
+}
+
+function formatIsoForUser(isoValue = '', timezone = DEFAULT_USER_TIMEZONE) {
+  const parsed = new Date(String(isoValue || ''));
+  if (!Number.isFinite(parsed.getTime())) return String(isoValue || 'N/D');
+  try {
+    return new Intl.DateTimeFormat('es-AR', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(parsed);
+  } catch {
+    return parsed.toISOString();
+  }
 }
 
 function formatProfileSummary(profile = {}) {
@@ -2320,6 +2352,7 @@ export function createBettingWizard({
     };
 
     const wantsLedger = hasLedgerSignals(originalMessage);
+    const wantsCredits = hasCreditSignals(originalMessage);
     const wantsOdds = hasOddsRequestSignals(originalMessage);
     const wantsBetDecision = hasBetDecisionSignals(originalMessage);
     let oddsSnapshot = null;
@@ -2369,6 +2402,75 @@ export function createBettingWizard({
       timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
       originalMessage,
     });
+
+    if (wantsCredits && userId && userStore?.getCreditState) {
+      const creditState = userStore.getCreditState(userId, CREDIT_FREE_WEEKLY) || {
+        availableCredits: 0,
+        freeCredits: 0,
+        paidCredits: 0,
+        weekId: null,
+      };
+
+      const dayIso = getUtcDayIso();
+      const { weekStartIso, weekEndIso } = getWeekBoundsUtc();
+      const usageCounters = userStore.getUsageCounters
+        ? userStore.getUsageCounters({
+            userId,
+            dayIso,
+            weekStartIso,
+            weekEndIso,
+          })
+        : { imagesToday: 0, audioSecondsWeek: 0 };
+
+      const recentTx = userStore.listCreditTransactions
+        ? userStore.listCreditTransactions(userId, { limit: 6 })
+        : [];
+
+      const topupUrl = resolveTopupUrl(userId);
+      const tz = temporalContext?.timezone || userProfile?.timezone || DEFAULT_USER_TIMEZONE;
+
+      const lines = [
+        '💳 Estado de creditos',
+        `- Disponibles: ${(Number(creditState.availableCredits) || 0).toFixed(2)}`,
+        `- Free: ${(Number(creditState.freeCredits) || 0).toFixed(2)}`,
+        `- Paid: ${(Number(creditState.paidCredits) || 0).toFixed(2)}`,
+      ];
+
+      if (creditState.weekId) {
+        lines.push(`- Semana free activa: ${creditState.weekId}`);
+      }
+
+      lines.push(
+        `- Consumo multimedia: ${Number(usageCounters.imagesToday) || 0} imagen(es) hoy | ${(
+          (Number(usageCounters.audioSecondsWeek) || 0) / 60
+        ).toFixed(1)} min audio esta semana`
+      );
+
+      if (recentTx.length) {
+        lines.push('', 'Ultimos movimientos:');
+        for (const tx of recentTx.slice(0, 5)) {
+          const when = formatIsoForUser(tx.createdAt, tz);
+          const reason = tx.reason ? ` (${tx.reason})` : '';
+          lines.push(
+            `- ${when}: ${formatSignedCredits(tx.amount)} [${String(
+              tx.type || 'tx'
+            ).toUpperCase()}]${reason}`
+          );
+        }
+      }
+
+      if (topupUrl) {
+        lines.push('', `Recarga: ${topupUrl}`);
+      }
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
 
     if (isProfileSummaryRequest(originalMessage) && userId) {
       const latestProfile =
