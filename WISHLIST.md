@@ -826,3 +826,46 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si conviene `editMessageText` (chat mas limpio) vs mensajes nuevos (trazabilidad completa).
    - **Prioridad:** alta.
    - **Estado:** en progreso (menu principal + submenus Apuestas/Config y persistencia de scope por chat implementados; falta evaluar `editMessageText` e idempotencia avanzada de taps).
+
+29. **Checkout de recarga de creditos desde Home (Mercado Pago packs)**
+   - **Objetivo de negocio/UX:** reducir friccion para monetizacion y evitar duplicidad/confusion de acciones en home menu.
+   - **Problema observado (ejemplo real):**
+     - En Home aparece `Registrar apuesta` aunque esa accion ya existe dentro de `Apuestas`, generando ruido de navegacion.
+     - El usuario espera una accion de alto valor en Home para recargar creditos rapidamente.
+   - **Comportamiento deseado para el usuario final:**
+     - Reemplazar en Home el boton redundante por `Cargar creditos`.
+     - Al tocar `Cargar creditos`, abrir flujo de packs via Mercado Pago (o mostrar estado claro si no esta configurado).
+     - Mantener dentro de `Apuestas` las acciones operativas de ledger (`Registrar`, `Pendientes`, `Cerrar`, etc.).
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `TopupEntryPoint` en Telegram:
+       - boton `qa:topup_credits` en Home.
+       - resolver URL de checkout con prioridad:
+         1) `CREDIT_TOPUP_URL` (soportando placeholders de usuario),
+         2) fallback `APP_PUBLIC_URL/topup/checkout?user_id=...`.
+     - `PackSelector` en backend (`/topup/checkout`):
+       - soportar `credits` opcional por query para elegir pack puntual.
+       - retornar error controlado cuando pack no existe, incluyendo lista de packs validos.
+     - `Checkout UX`:
+       - mensaje previo con packs disponibles y monto por pack.
+       - CTA claro al checkout.
+       - post-checkout con estado (`success/pending/failure`) y acceso a `Creditos`.
+     - Guardrails:
+       - no exponer links vacios/no configurados sin aviso.
+       - validar `user_id` en URL y trazabilidad en `external_reference`.
+       - idempotencia de acreditacion via `payment_id` (ya existente) y notificacion unica.
+   - **Criterios de aceptacion verificables:**
+     - Home muestra `Cargar creditos` en lugar de `Registrar apuesta`.
+     - Desde Telegram, el usuario puede abrir checkout de packs con <= 2 taps.
+     - Si falta configuracion de checkout, recibe mensaje explicito y accion alternativa (`ver creditos`).
+     - Pago aprobado acredita creditos una sola vez y deja comprobante auditable.
+   - **Pruebas de regresion necesarias:**
+     - Callback `qa:topup_credits` con `CREDIT_TOPUP_URL` configurado -> link valido con `user_id`.
+     - Callback `qa:topup_credits` sin URL configurada -> fallback controlado (sin crash).
+     - `/topup/checkout?credits=<pack>` con pack invalido -> error + packs validos.
+     - Webhook MP reintentado -> no duplica acreditacion ni movimiento.
+   - **Riesgos y decisiones abiertas:**
+     - Definir estrategia final de pricing de packs (`MP_TOPUP_PACKS`) y valor por credito.
+     - Definir si el selector de pack vive en Telegram (submenu) o en landing web de checkout.
+     - Definir copy legal/comercial final de recarga y devolucion.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente (entrypoint inicial en Home implementado; falta UX completa de packs y selector).

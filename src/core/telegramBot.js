@@ -18,6 +18,8 @@ const MAX_AUDIO_TRANSCRIPT_CHARS = Number(
 const MEDIA_GROUP_FLUSH_MS = Number(process.env.MEDIA_GROUP_FLUSH_MS ?? '900');
 const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
 const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?? '4500');
+const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
+const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 
 const MAIN_MENU_ROWS = [
   [
@@ -29,7 +31,7 @@ const MAIN_MENU_ROWS = [
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
   ],
   [
-    { text: 'Registrar apuesta', callback_data: 'qa:record_bet' },
+    { text: 'Cargar creditos', callback_data: 'qa:topup_credits' },
     { text: 'Ayuda', callback_data: 'qa:help' },
   ],
 ];
@@ -178,6 +180,7 @@ const QUICK_ACTION_HINTS = {
     '- `Ver config`: muestra tus ajustes actuales.',
     '- `Stake minimo / Unidad / Riesgo / Bankroll / Timezone / Exposicion %`: actualizan tu perfil.',
     '- `Creditos`: muestra saldo y movimientos.',
+    '- `Cargar creditos`: abre el flujo de recarga (Mercado Pago) si está configurado.',
     '',
     'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
@@ -188,6 +191,33 @@ const MENU_SCOPES = new Set(['main', 'bets', 'config']);
 function normalizeMenuScope(scope = 'main') {
   const normalized = String(scope || '').trim().toLowerCase();
   return MENU_SCOPES.has(normalized) ? normalized : 'main';
+}
+
+function normalizeBaseUrl(url = '') {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+}
+
+function resolveTopupUrlForUser(userId = '') {
+  const safeUserId = encodeURIComponent(String(userId || '').trim());
+  const fromEnv = String(CREDIT_TOPUP_URL || '').trim();
+  if (fromEnv) {
+    if (!safeUserId) return fromEnv;
+    const withUser = fromEnv
+      .replaceAll('{user_id}', safeUserId)
+      .replaceAll('{telegram_user_id}', safeUserId);
+    if (withUser !== fromEnv) {
+      return withUser;
+    }
+    const delimiter = fromEnv.includes('?') ? '&' : '?';
+    return `${fromEnv}${delimiter}user_id=${safeUserId}`;
+  }
+
+  const appBase = normalizeBaseUrl(APP_PUBLIC_URL);
+  if (!appBase) return '';
+  if (!safeUserId) return `${appBase}/topup/checkout`;
+  return `${appBase}/topup/checkout?user_id=${safeUserId}`;
 }
 
 function pickLargestPhoto(photos = []) {
@@ -661,6 +691,34 @@ export function startTelegramBot(router) {
 
     if (data === 'qa:help') {
       await sendBotMessage(chatId, QUICK_ACTION_HINTS.help, { menuScope: getMenuScope(chatId) });
+      return;
+    }
+
+    if (data === 'qa:topup_credits') {
+      const topupUrl = resolveTopupUrlForUser(query?.from?.id ? String(query.from.id) : '');
+      if (topupUrl) {
+        await sendBotMessage(
+          chatId,
+          [
+            '💳 Cargar créditos',
+            'Abrí este link para ver packs y pagar por Mercado Pago:',
+            topupUrl,
+            '',
+            'Si querés, después te muestro tus créditos y movimientos.',
+          ].join('\n'),
+          { menuScope: 'main' }
+        );
+      } else {
+        await sendBotMessage(
+          chatId,
+          [
+            '💳 Cargar créditos',
+            'Todavía no tengo configurado el link de checkout en este entorno.',
+            'Puedo mostrarte tus créditos actuales mientras tanto con el botón `Creditos`.',
+          ].join('\n'),
+          { menuScope: 'main' }
+        );
+      }
       return;
     }
 
