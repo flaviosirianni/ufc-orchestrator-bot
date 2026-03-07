@@ -844,6 +844,34 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal: Alex Pereira ganador.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick para esta pelea', {
+      chatId: 'chat-quality-gate-1',
+      originalMessage: 'dame un pick para esta pelea',
+      resolution: {
+        resolvedMessage: 'dame un pick para esta pelea',
+      },
+    });
+
+    assert.match(result.reply, /Control de calidad/i);
+    assert.match(result.reply, /NO_BET/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
       responseWithText('No hay evento de UFC ahora mismo.', { includeWebSearch: true }),
     ]);
 
@@ -1046,6 +1074,91 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /5u/);
     assert.match(result.reply, /\$2\.000 ARS/);
     assert.match(result.reply, /Nota de staking/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal\n- Stake: 4u (=$2400 ARS)\n- Cuota: @2.10'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            bankroll: 120000,
+            unitSize: 600,
+            riskProfile: 'moderado',
+            targetEventUtilizationPct: 35,
+            minStakeAmount: 2000,
+            minUnitsPerBet: 2.5,
+            currency: 'ARS',
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick con stake', {
+      chatId: 'chat-stake-budget-1',
+      userId: 'u-stake-budget-1',
+      originalMessage: 'dame un pick con stake',
+      resolution: {
+        resolvedMessage: 'dame un pick con stake',
+      },
+    });
+
+    assert.match(result.reply, /Plan de evento/i);
+    assert.match(result.reply, /presupuesto objetivo/i);
+    assert.match(result.reply, /Remanente estimado/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal\n- Stake: 1u (=$500 ARS)\n- Cuota: @2.10'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            bankroll: 10000,
+            unitSize: 500,
+            riskProfile: 'moderado',
+            targetEventUtilizationPct: 10,
+            minStakeAmount: 2000,
+            minUnitsPerBet: 3,
+            currency: 'ARS',
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick con stake', {
+      chatId: 'chat-stake-conflict-1',
+      userId: 'u-stake-conflict-1',
+      originalMessage: 'dame un pick con stake',
+      resolution: {
+        resolvedMessage: 'dame un pick con stake',
+      },
+    });
+
+    assert.match(result.reply, /NO_BET sugerido/i);
+    assert.match(result.reply, /piso de stake/i);
   });
 
   tests.push(async () => {

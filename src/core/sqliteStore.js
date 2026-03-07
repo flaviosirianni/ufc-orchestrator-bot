@@ -846,14 +846,38 @@ function buildMutationPreview(userId, payload = {}) {
     }
   }
 
-  const requiresConfirmation = !hasExplicitIds && candidates.length > 1;
+  const explicitIdCount = explicitIds.length;
+  const hasSingleExplicitId = hasExplicitIds && explicitIdCount === 1;
+  const isBulkSelection = candidates.length > 1 || explicitIdCount > 1;
+
+  let requiresConfirmation = false;
+  let confirmationReason = null;
+
+  if (operation === 'archive') {
+    if (!hasSingleExplicitId) {
+      requiresConfirmation = true;
+      confirmationReason = isBulkSelection
+        ? 'bulk_archive'
+        : 'archive_requires_explicit_confirmation';
+    }
+  } else if (operation === 'settle' || operation === 'set_pending') {
+    if (!hasSingleExplicitId) {
+      requiresConfirmation = true;
+      confirmationReason = isBulkSelection
+        ? 'bulk_state_change'
+        : 'state_change_without_explicit_bet_id';
+    }
+  }
 
   return {
     ok: true,
     operation,
     result: normalizedResult || null,
     requiresConfirmation,
+    confirmationReason,
     hasExplicitIds,
+    hasSingleExplicitId,
+    explicitIdCount,
     candidates,
   };
 }

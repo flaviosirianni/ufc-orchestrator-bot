@@ -34,6 +34,24 @@ const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const STAKE_MIN_AMOUNT_DEFAULT = Number(process.env.STAKE_MIN_AMOUNT_DEFAULT ?? '2000');
 const STAKE_MIN_UNITS_DEFAULT = Number(process.env.STAKE_MIN_UNITS_DEFAULT ?? '2.5');
+const STAKE_EVENT_UTILIZATION_CONSERVADOR = Number(
+  process.env.STAKE_EVENT_UTILIZATION_CONSERVADOR ?? '28'
+);
+const STAKE_EVENT_UTILIZATION_MODERADO = Number(
+  process.env.STAKE_EVENT_UTILIZATION_MODERADO ?? '35'
+);
+const STAKE_EVENT_UTILIZATION_AGRESIVO = Number(
+  process.env.STAKE_EVENT_UTILIZATION_AGRESIVO ?? '45'
+);
+const STAKE_MAX_PICK_EXPOSURE_CONSERVADOR = Number(
+  process.env.STAKE_MAX_PICK_EXPOSURE_CONSERVADOR ?? '16'
+);
+const STAKE_MAX_PICK_EXPOSURE_MODERADO = Number(
+  process.env.STAKE_MAX_PICK_EXPOSURE_MODERADO ?? '22'
+);
+const STAKE_MAX_PICK_EXPOSURE_AGRESIVO = Number(
+  process.env.STAKE_MAX_PICK_EXPOSURE_AGRESIVO ?? '30'
+);
 const PICK_COMMITTEE_ENABLED = process.env.BETTING_PICK_COMMITTEE === 'true';
 const PICK_COMMITTEE_MODEL =
   process.env.BETTING_PICK_COMMITTEE_MODEL || DECISION_MODEL || MODEL;
@@ -332,6 +350,32 @@ function hasOddsSignals(message = '') {
   return false;
 }
 
+function hasConcreteOddsContext(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+
+  if (/@\s?\d+([.,]\d+)?/.test(text)) {
+    return true;
+  }
+
+  if (/\b(?:cuota|odds?|quote|linea|línea)\b[^0-9@]{0,10}@?\s*\d+([.,]\d+)?/.test(text)) {
+    return true;
+  }
+
+  if (/\b(o|u)\s?\d+([.,]\d+)?\b/.test(text)) {
+    return true;
+  }
+
+  if (
+    /\b(moneyline|ml|over|under|totales|props)\b/.test(text) &&
+    /\b\d+([.,]\d+)?\b/.test(text)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function hasBetDecisionSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
@@ -583,6 +627,23 @@ function formatMutationActionLabel(operation = '') {
   if (operation === 'set_pending') return 'SET_PENDING';
   if (operation === 'settle') return 'SETTLE';
   return operation || 'MUTATION';
+}
+
+function formatConfirmationReason(reason = '') {
+  const value = String(reason || '').trim();
+  if (value === 'bulk_archive') {
+    return 'Archivado masivo detectado.';
+  }
+  if (value === 'bulk_state_change') {
+    return 'Cambio de estado masivo detectado.';
+  }
+  if (value === 'state_change_without_explicit_bet_id') {
+    return 'Cambio de estado sin bet_id explicito.';
+  }
+  if (value === 'archive_requires_explicit_confirmation') {
+    return 'Archivado sin bet_id explicito.';
+  }
+  return 'Mutacion sensible detectada.';
 }
 
 function normalizeText(value = '') {
@@ -981,26 +1042,23 @@ function formatIsoForUser(isoValue = '', timezone = DEFAULT_USER_TIMEZONE) {
 
 function formatProfileSummary(profile = {}) {
   const safeProfile = profile || {};
-  const currency = safeProfile.currency || 'ARS';
   const timezone = safeProfile.timezone || DEFAULT_USER_TIMEZONE;
   const unitSize = toNumberOrNull(safeProfile.unitSize);
   const bankroll = toNumberOrNull(safeProfile.bankroll);
-  const targetUtil = toNumberOrNull(safeProfile.targetEventUtilizationPct);
   const stakeConfig = getStakeCalibrationConfig(safeProfile);
 
   const lines = [
     '⚙️ Config actual',
-    `- Bankroll: ${bankroll ? formatAmountWithCurrency(bankroll, currency) : 'No definido'}`,
-    `- Unidad: ${unitSize ? formatAmountWithCurrency(unitSize, currency) : 'No definida'}`,
-    `- Riesgo: ${safeProfile.riskProfile || 'No definido'}`,
+    `- Bankroll: ${bankroll ? formatAmountWithCurrency(bankroll, stakeConfig.currency) : 'No definido'}`,
+    `- Unidad: ${unitSize ? formatAmountWithCurrency(unitSize, stakeConfig.currency) : 'No definida'}`,
+    `- Riesgo: ${stakeConfig.riskProfile}`,
     `- Timezone: ${timezone}`,
     `- Stake minimo: ${formatUnits(stakeConfig.minUnitsPerBet)}u / ${formatAmountWithCurrency(
       stakeConfig.minStakeAmount,
-      currency
+      stakeConfig.currency
     )}`,
-    `- Utilizacion objetivo evento: ${
-      targetUtil ? `${formatUnits(targetUtil)}%` : 'No definida'
-    }`,
+    `- Utilizacion objetivo evento: ${formatUnits(stakeConfig.targetEventUtilizationPct)}%`,
+    `- Exposicion maxima por pick: ${formatUnits(stakeConfig.maxPerPickExposurePct)}% del evento`,
   ];
 
   lines.push(
@@ -1011,10 +1069,50 @@ function formatProfileSummary(profile = {}) {
   return lines.join('\n');
 }
 
+function resolveRiskBucket(rawRisk = '') {
+  return normalizeRiskProfile(rawRisk) || 'moderado';
+}
+
+function getDefaultEventUtilizationPct(riskProfile = 'moderado') {
+  if (riskProfile === 'conservador') return STAKE_EVENT_UTILIZATION_CONSERVADOR;
+  if (riskProfile === 'agresivo') return STAKE_EVENT_UTILIZATION_AGRESIVO;
+  return STAKE_EVENT_UTILIZATION_MODERADO;
+}
+
+function getMaxPerPickExposurePct(riskProfile = 'moderado') {
+  if (riskProfile === 'conservador') return STAKE_MAX_PICK_EXPOSURE_CONSERVADOR;
+  if (riskProfile === 'agresivo') return STAKE_MAX_PICK_EXPOSURE_AGRESIVO;
+  return STAKE_MAX_PICK_EXPOSURE_MODERADO;
+}
+
 function getStakeCalibrationConfig(userProfile = {}) {
   const minStakeAmount = toNumberOrNull(userProfile?.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT;
   const minUnitsPerBet = toNumberOrNull(userProfile?.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT;
   const unitSize = toNumberOrNull(userProfile?.unitSize);
+  const bankroll = toNumberOrNull(userProfile?.bankroll);
+  const riskProfile = resolveRiskBucket(userProfile?.riskProfile);
+  const currency = String(userProfile?.currency || 'ARS').toUpperCase();
+
+  const configuredUtil = toNumberOrNull(userProfile?.targetEventUtilizationPct);
+  const defaultUtil = getDefaultEventUtilizationPct(riskProfile);
+  const targetEventUtilizationPct =
+    configuredUtil && configuredUtil > 0 && configuredUtil <= 100
+      ? configuredUtil
+      : defaultUtil;
+
+  const maxPerPickExposurePct = getMaxPerPickExposurePct(riskProfile);
+  const eventBudget =
+    Number.isFinite(bankroll) && bankroll > 0 && targetEventUtilizationPct > 0
+      ? (bankroll * targetEventUtilizationPct) / 100
+      : null;
+  const maxPerPickAmount =
+    Number.isFinite(eventBudget) && eventBudget > 0 && maxPerPickExposurePct > 0
+      ? (eventBudget * maxPerPickExposurePct) / 100
+      : null;
+  const maxPerPickUnits =
+    Number.isFinite(maxPerPickAmount) && Number.isFinite(unitSize) && unitSize > 0
+      ? maxPerPickAmount / unitSize
+      : null;
 
   let floorAmount = minStakeAmount;
   let floorUnits = minUnitsPerBet;
@@ -1025,33 +1123,30 @@ function getStakeCalibrationConfig(userProfile = {}) {
 
   return {
     unitSize,
+    bankroll,
+    riskProfile,
+    currency,
     minStakeAmount,
     minUnitsPerBet,
     floorAmount,
     floorUnits,
+    targetEventUtilizationPct,
+    maxPerPickExposurePct,
+    eventBudget,
+    maxPerPickAmount,
+    maxPerPickUnits,
   };
 }
 
-function calibrateStakeLine(line = '', config = {}) {
+function parseStakeNumbersFromLine(line = '', unitSize = null) {
   const text = String(line || '');
-  if (!/stake/i.test(text)) {
-    return { line: text, changed: false };
-  }
-
-  const { floorAmount, floorUnits, unitSize } = config;
-  if (!Number.isFinite(floorAmount) && !Number.isFinite(floorUnits)) {
-    return { line: text, changed: false };
-  }
-
   const unitsMatch = text.match(/([0-9]+(?:[.,][0-9]+)?)\s*u\b/i);
   const amountMatch = text.match(/\$\s*([0-9][0-9\.\,]*)/);
-
   const parsedUnits = unitsMatch ? parseDecimalLike(unitsMatch[1]) : null;
   const parsedAmount = amountMatch ? parseDecimalLike(amountMatch[1]) : null;
 
   let inferredUnits = parsedUnits;
   let inferredAmount = parsedAmount;
-
   if (inferredUnits === null && inferredAmount !== null && unitSize) {
     inferredUnits = inferredAmount / unitSize;
   }
@@ -1059,33 +1154,197 @@ function calibrateStakeLine(line = '', config = {}) {
     inferredAmount = inferredUnits * unitSize;
   }
 
+  return {
+    unitsMatch,
+    amountMatch,
+    parsedUnits,
+    parsedAmount,
+    inferredUnits,
+    inferredAmount,
+  };
+}
+
+function extractStakeAmountsFromLines(lines = [], { unitSize = null } = {}) {
+  if (!Array.isArray(lines) || !lines.length) return 0;
+  let total = 0;
+  for (const line of lines) {
+    const text = String(line || '');
+    if (!/stake/i.test(text)) continue;
+    const parsed = parseStakeNumbersFromLine(text, unitSize);
+    const amount = Number(parsed.inferredAmount);
+    if (Number.isFinite(amount) && amount > 0) {
+      total += amount;
+    }
+  }
+  return total;
+}
+
+function buildStakingBudgetSummaryLines(config = {}, totalStakeAmount = 0) {
+  if (!Number.isFinite(totalStakeAmount) || totalStakeAmount <= 0) {
+    return [];
+  }
+  if (!Number.isFinite(config.eventBudget) || config.eventBudget <= 0) {
+    return [];
+  }
+
+  const remaining = config.eventBudget - totalStakeAmount;
+  const budgetLabel = formatAmountWithCurrency(config.eventBudget, config.currency);
+  const committedLabel = formatAmountWithCurrency(totalStakeAmount, config.currency);
+  const remainingLabel = formatAmountWithCurrency(Math.abs(remaining), config.currency);
+
+  const lines = [
+    `Plan de evento: presupuesto objetivo ${budgetLabel} (${formatUnits(
+      config.targetEventUtilizationPct
+    )}% del bankroll).`,
+  ];
+  if (remaining >= 0) {
+    lines.push(
+      `Comprometido en esta recomendacion: ${committedLabel} | Remanente estimado: ${remainingLabel}.`
+    );
+  } else {
+    lines.push(
+      `Comprometido en esta recomendacion: ${committedLabel} | Exceso sobre objetivo: ${remainingLabel}.`
+    );
+  }
+  return lines;
+}
+
+function calibrateStakeLine(line = '', config = {}) {
+  const text = String(line || '');
+  if (!/stake/i.test(text)) {
+    return {
+      line: text,
+      changed: false,
+      adjustedByFloor: false,
+      adjustedByCap: false,
+      conflict: null,
+    };
+  }
+
+  const { floorAmount, floorUnits, unitSize, maxPerPickAmount, maxPerPickUnits } = config;
+  if (
+    !Number.isFinite(floorAmount) &&
+    !Number.isFinite(floorUnits) &&
+    !Number.isFinite(maxPerPickAmount) &&
+    !Number.isFinite(maxPerPickUnits)
+  ) {
+    return {
+      line: text,
+      changed: false,
+      adjustedByFloor: false,
+      adjustedByCap: false,
+      conflict: null,
+    };
+  }
+
+  const parsed = parseStakeNumbersFromLine(text, unitSize);
+  const { unitsMatch, amountMatch, parsedUnits, parsedAmount } = parsed;
+  let { inferredUnits, inferredAmount } = parsed;
+
   if (inferredUnits === null && inferredAmount === null) {
-    return { line: text, changed: false };
+    return {
+      line: text,
+      changed: false,
+      adjustedByFloor: false,
+      adjustedByCap: false,
+      conflict: null,
+    };
+  }
+
+  const floorExceedsCapByAmount =
+    Number.isFinite(floorAmount) &&
+    Number.isFinite(maxPerPickAmount) &&
+    floorAmount > maxPerPickAmount + 1e-9;
+  const floorExceedsCapByUnits =
+    Number.isFinite(floorUnits) &&
+    Number.isFinite(maxPerPickUnits) &&
+    floorUnits > maxPerPickUnits + 1e-9;
+  if (floorExceedsCapByAmount || floorExceedsCapByUnits) {
+    return {
+      line: text,
+      changed: false,
+      adjustedByFloor: false,
+      adjustedByCap: false,
+      conflict: 'floor_exceeds_exposure_cap',
+    };
   }
 
   let targetUnits = inferredUnits ?? floorUnits;
   let targetAmount = inferredAmount ?? floorAmount;
+  let adjustedByFloor = false;
+  let adjustedByCap = false;
 
-  if (Number.isFinite(floorUnits)) {
-    targetUnits = Math.max(targetUnits ?? floorUnits, floorUnits);
+  if (
+    Number.isFinite(floorUnits) &&
+    (!Number.isFinite(targetUnits) || targetUnits + 1e-9 < floorUnits)
+  ) {
+    targetUnits = floorUnits;
+    adjustedByFloor = true;
   }
-  if (Number.isFinite(floorAmount)) {
-    targetAmount = Math.max(targetAmount ?? floorAmount, floorAmount);
+  if (
+    Number.isFinite(floorAmount) &&
+    (!Number.isFinite(targetAmount) || targetAmount + 1e-9 < floorAmount)
+  ) {
+    targetAmount = floorAmount;
+    adjustedByFloor = true;
   }
 
-  if (unitSize) {
-    targetAmount = Math.max(targetAmount || 0, targetUnits * unitSize);
-    targetUnits = Math.max(targetUnits || 0, targetAmount / unitSize);
+  if (unitSize && Number.isFinite(targetUnits)) {
+    const amountFromUnits = targetUnits * unitSize;
+    if (!Number.isFinite(targetAmount) || targetAmount + 1e-9 < amountFromUnits) {
+      targetAmount = amountFromUnits;
+      adjustedByFloor = true;
+    }
+  }
+  if (unitSize && Number.isFinite(targetAmount)) {
+    const unitsFromAmount = targetAmount / unitSize;
+    if (!Number.isFinite(targetUnits) || targetUnits + 1e-9 < unitsFromAmount) {
+      targetUnits = unitsFromAmount;
+      adjustedByFloor = true;
+    }
+  }
+
+  if (
+    Number.isFinite(maxPerPickAmount) &&
+    Number.isFinite(targetAmount) &&
+    targetAmount > maxPerPickAmount + 1e-9
+  ) {
+    targetAmount = maxPerPickAmount;
+    adjustedByCap = true;
+  }
+  if (unitSize && Number.isFinite(targetAmount)) {
+    targetUnits = targetAmount / unitSize;
+  }
+  if (
+    Number.isFinite(maxPerPickUnits) &&
+    Number.isFinite(targetUnits) &&
+    targetUnits > maxPerPickUnits + 1e-9
+  ) {
+    targetUnits = maxPerPickUnits;
+    adjustedByCap = true;
+  }
+  if (unitSize && Number.isFinite(targetUnits)) {
+    targetAmount = targetUnits * unitSize;
   }
 
   const needsAdjustByUnits =
-    inferredUnits !== null && Number.isFinite(floorUnits) && inferredUnits + 1e-9 < floorUnits;
+    (parsedUnits !== null && Number.isFinite(targetUnits) && Math.abs(parsedUnits - targetUnits) > 1e-9) ||
+    (parsedUnits === null && Number.isFinite(targetUnits));
   const needsAdjustByAmount =
-    inferredAmount !== null && Number.isFinite(floorAmount) && inferredAmount + 1e-9 < floorAmount;
+    (parsedAmount !== null &&
+      Number.isFinite(targetAmount) &&
+      Math.abs(parsedAmount - targetAmount) > 1e-9) ||
+    (parsedAmount === null && Number.isFinite(targetAmount));
   const needsAdjust = needsAdjustByUnits || needsAdjustByAmount;
 
   if (!needsAdjust) {
-    return { line: text, changed: false };
+    return {
+      line: text,
+      changed: false,
+      adjustedByFloor: false,
+      adjustedByCap: false,
+      conflict: null,
+    };
   }
 
   let updated = text;
@@ -1097,12 +1356,18 @@ function calibrateStakeLine(line = '', config = {}) {
   }
 
   if (amountMatch) {
-    updated = updated.replace(amountMatch[0], formatArsAmount(targetAmount));
+    updated = updated.replace(amountMatch[0], formatAmountWithCurrency(targetAmount, config.currency));
   } else if (Number.isFinite(targetAmount)) {
-    updated = `${updated} (=${formatArsAmount(targetAmount)})`;
+    updated = `${updated} (=${formatAmountWithCurrency(targetAmount, config.currency)})`;
   }
 
-  return { line: updated, changed: true };
+  return {
+    line: updated,
+    changed: true,
+    adjustedByFloor,
+    adjustedByCap,
+    conflict: null,
+  };
 }
 
 function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}) {
@@ -1119,23 +1384,84 @@ function enforceStakeCalibration(reply = '', originalMessage = '', userProfile =
   const config = getStakeCalibrationConfig(userProfile || {});
   const lines = text.split('\n');
   let changed = false;
+  let adjustedByFloor = false;
+  let adjustedByCap = false;
+  let hasExposureConflict = false;
   const updatedLines = lines.map((line) => {
     const next = calibrateStakeLine(line, config);
     if (next.changed) changed = true;
+    if (next.adjustedByFloor) adjustedByFloor = true;
+    if (next.adjustedByCap) adjustedByCap = true;
+    if (next.conflict === 'floor_exceeds_exposure_cap') hasExposureConflict = true;
     return next.line;
   });
 
-  if (!changed) {
-    return text;
+  if (hasExposureConflict) {
+    const noBetLines = [
+      text,
+      '',
+      '⛔ Control de staking: NO_BET sugerido.',
+      '- Motivo: tu piso de stake supera la exposicion maxima por pick para tu presupuesto actual.',
+    ];
+    if (Number.isFinite(config.eventBudget) && config.eventBudget > 0) {
+      noBetLines.push(
+        `- Presupuesto objetivo evento: ${formatAmountWithCurrency(config.eventBudget, config.currency)} (${formatUnits(
+          config.targetEventUtilizationPct
+        )}% del bankroll).`
+      );
+    }
+    if (Number.isFinite(config.maxPerPickAmount) && config.maxPerPickAmount > 0) {
+      noBetLines.push(
+        `- Maximo por pick (riesgo ${config.riskProfile}): ${formatAmountWithCurrency(
+          config.maxPerPickAmount,
+          config.currency
+        )} (${formatUnits(config.maxPerPickExposurePct)}% del evento).`
+      );
+    }
+    noBetLines.push(
+      `- Piso configurado: ${formatUnits(config.floorUnits)}u / ${formatAmountWithCurrency(
+        config.floorAmount,
+        config.currency
+      )}.`,
+      '- Ajusta perfil (stake minimo, bankroll o utilizacion) y recalculo.'
+    );
+    return noBetLines.join('\n');
   }
 
-  updatedLines.push(
-    '',
-    `Nota de staking: ajusté el stake al piso configurado (${formatUnits(
-      config.minUnitsPerBet
-    )}u / ${formatArsAmount(config.minStakeAmount)}).`
-  );
-  return updatedLines.join('\n');
+  const resultLines = changed ? updatedLines : lines.slice();
+  const totalStakeAmount = extractStakeAmountsFromLines(changed ? updatedLines : lines, {
+    unitSize: config.unitSize,
+  });
+
+  if (changed) {
+    let note = '';
+    if (adjustedByFloor && adjustedByCap) {
+      note = `Nota de staking: ajuste por piso configurado y techo de exposicion (${formatUnits(
+        config.maxPerPickExposurePct
+      )}% por pick).`;
+    } else if (adjustedByFloor) {
+      note = `Nota de staking: ajuste al piso configurado (${formatUnits(
+        config.minUnitsPerBet
+      )}u / ${formatAmountWithCurrency(config.minStakeAmount, config.currency)}).`;
+    } else if (adjustedByCap) {
+      note = `Nota de staking: limite por exposicion maxima por pick (${formatUnits(
+        config.maxPerPickExposurePct
+      )}% del presupuesto del evento).`;
+    }
+    if (note) {
+      resultLines.push('', note);
+    }
+  }
+
+  const budgetLines = buildStakingBudgetSummaryLines(config, totalStakeAmount);
+  if (budgetLines.length) {
+    resultLines.push('', ...budgetLines);
+  }
+
+  if (!changed && !budgetLines.length) {
+    return text;
+  }
+  return resultLines.join('\n');
 }
 
 function enforceRationaleSection(reply = '', originalMessage = '') {
@@ -1159,6 +1485,37 @@ function enforceRationaleSection(reply = '', originalMessage = '') {
   }
 
   return `${text}\n\nFundamento de la elección:\n- Tesis: el pick se basa en el cruce de estilos, contexto reciente y precio actual.\n- Riesgo: alta varianza en MMA; si cambia la linea o falta contexto, baja la confianza.\n- Regla de entrada: tomar solo si la cuota se mantiene en el umbral indicado; si empeora, no-bet.`;
+}
+
+function enforceDecisionQualityGate(reply = '', originalMessage = '') {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+
+  const userMessage = String(originalMessage || '');
+  const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
+  if (isOperationalLedgerTurn) {
+    return text;
+  }
+
+  const looksLikeDecisionTurn =
+    hasBetDecisionSignals(userMessage) ||
+    hasOddsSignals(userMessage) ||
+    /\b(pick|stake|apuesta|recomendacion)\b/i.test(text);
+  if (!looksLikeDecisionTurn || !isRecommendationReply(text)) {
+    return text;
+  }
+
+  const userHasOdds = hasConcreteOddsContext(userMessage);
+  const replyHasOdds = hasConcreteOddsContext(text);
+  if (userHasOdds || replyHasOdds) {
+    return text;
+  }
+
+  if (/\bcontrol de calidad\b/i.test(text) && /\bno-bet\b/i.test(text)) {
+    return text;
+  }
+
+  return `${text}\n\n⚠️ Control de calidad: pick condicional (NO_BET por ahora).\n- Falta contexto de cuotas reales de tu bookie para validar edge y entry.\n- Para volverlo ejecutable: pasame screenshot/quotes completos (mercado + cuota actual).`;
 }
 
 function containsAbsoluteDate(text = '') {
@@ -2997,6 +3354,7 @@ export function createBettingWizard({
 
       if (preview.requiresConfirmation) {
         const token = savePendingMutation(mutationScope, { payload });
+        const reasonMessage = formatConfirmationReason(preview.confirmationReason);
         return {
           ok: false,
           requiresConfirmation: true,
@@ -3006,9 +3364,9 @@ export function createBettingWizard({
             result: preview.result || null,
             candidateCount: preview.candidates?.length || 0,
             candidates: preview.candidates || [],
+            confirmationReason: preview.confirmationReason || null,
           },
-          message:
-            'Mutacion sensible detectada. Pedi confirmacion explicita del usuario y luego reintenta con confirm=true + confirmationToken.',
+          message: `${reasonMessage} Pedi confirmacion explicita del usuario y luego reintenta con confirm=true + confirmationToken.`,
         };
       }
 
@@ -3620,8 +3978,11 @@ export function createBettingWizard({
       const replyWithStakeCalibration = committeeBlocked
         ? replyWithRationale
         : enforceStakeCalibration(replyWithRationale, originalMessage, userProfile || {});
+      const replyWithDecisionGate = committeeBlocked
+        ? replyWithStakeCalibration
+        : enforceDecisionQualityGate(replyWithStakeCalibration, originalMessage);
       const replyWithTemporalGuard = enforceCalendarNoEventContext(
-        replyWithStakeCalibration,
+        replyWithDecisionGate,
         originalMessage,
         temporalContext
       );

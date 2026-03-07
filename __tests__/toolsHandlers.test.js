@@ -85,18 +85,28 @@ export async function runToolsHandlersTests() {
   });
 
   tests.push(async () => {
-    const result = await getFighterHistory({
-      sheetId: 'sheet-test',
-      fighters: ['Vinicius Oliveira'],
-      strict: true,
-      readRangeImpl: async () => [
-        ['2025-07-19', 'UFC 318', 'Vinicius Oliveira', 'Kyler Phillips'],
-        ['2024-05-18', 'UFC FN', 'Adrian Yanez', 'Vinicius Salvador'],
-      ],
+    configureFightHistoryStore({
+      getCacheSnapshot: () => null,
+      upsertCacheSnapshot: () => null,
     });
 
-    assert.equal(result.rows.length, 1);
-    assert.match(result.rows[0][2], /Vinicius Oliveira/);
+    try {
+      const result = await getFighterHistory({
+        sheetId: 'sheet-test',
+        range: 'Synthetic Fight History!A:Z',
+        fighters: ['Vinicius Oliveira'],
+        strict: true,
+        readRangeImpl: async () => [
+          ['2025-07-19', 'UFC 318', 'Vinicius Oliveira', 'Kyler Phillips'],
+          ['2024-05-18', 'UFC FN', 'Adrian Yanez', 'Vinicius Salvador'],
+        ],
+      });
+
+      assert.equal(result.rows.length, 1);
+      assert.match(result.rows[0][2], /Vinicius Oliveira/);
+    } finally {
+      configureFightHistoryStore({});
+    }
   });
 
   tests.push(async () => {
