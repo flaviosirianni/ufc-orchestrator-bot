@@ -439,6 +439,21 @@ function hasLiveEventStatusSignals(message = '') {
   return hasLiveWords && hasEventWords && hasAskWords;
 }
 
+function hasFightResultLookupSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  if (
+    /\b(como salio|como termino|resultado|quien gano|quien ganó|ya termino|ya terminó|ya finalizo|ya finalizó)\b/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  const hasResultWords = /\b(resultado|salio|termino|finalizo|gano|ganador|winner)\b/.test(text);
+  const hasFightWords = /\b(pelea|fight|combate|vs|versus|evento|ufc)\b/.test(text);
+  return hasResultWords && hasFightWords;
+}
+
 function parseNewsAlertsIntent(message = '') {
   const text = normalise(message);
   if (!text || !/\b(alerta|alertas)\b/.test(text)) {
@@ -864,6 +879,205 @@ function parseDecimalLike(value = '') {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function toNumberFlexible(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  return parseDecimalLike(String(value));
+}
+
+function cleanNameChunk(value = '') {
+  return String(value || '')
+    .replace(/^[^A-Za-zÀ-ÿ0-9]+/, '')
+    .replace(/[^A-Za-zÀ-ÿ0-9]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractFightFromText(text = '') {
+  const raw = String(text || '').replace(/\n+/g, ' ');
+  const match = raw.match(
+    /([A-Za-zÀ-ÿ'`.\- ]{2,70})\s+(?:vs\.?|v\.?|versus)\s+([A-Za-zÀ-ÿ'`.\- ]{2,70})/i
+  );
+  if (!match) return null;
+  const fighterA = cleanNameChunk(match[1]);
+  const fighterB = cleanNameChunk(match[2]);
+  if (!fighterA || !fighterB) return null;
+  return { fighterA, fighterB };
+}
+
+function extractNameTokens(value = '') {
+  return normalizeText(value)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token && token.length > 1);
+}
+
+function extractLastName(value = '') {
+  const tokens = extractNameTokens(value);
+  if (!tokens.length) return '';
+  return tokens[tokens.length - 1];
+}
+
+function levenshteinDistance(a = '', b = '') {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left) return right.length;
+  if (!right) return left.length;
+  if (left === right) return 0;
+
+  const prev = new Array(right.length + 1);
+  const curr = new Array(right.length + 1);
+
+  for (let j = 0; j <= right.length; j += 1) {
+    prev[j] = j;
+  }
+
+  for (let i = 1; i <= left.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= right.length; j += 1) {
+      prev[j] = curr[j];
+    }
+  }
+
+  return prev[right.length];
+}
+
+function fuzzyNameScore(left = '', right = '') {
+  const a = normalizeText(left).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const b = normalizeText(right).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (
+    (a.length >= 4 && b.length >= 4 && a.includes(b)) ||
+    (a.length >= 4 && b.length >= 4 && b.includes(a))
+  ) {
+    return 0.92;
+  }
+
+  const aLast = extractLastName(a);
+  const bLast = extractLastName(b);
+  if (aLast && bLast) {
+    if (aLast === bLast) return 0.86;
+    const lastDistance = levenshteinDistance(aLast, bLast);
+    if (lastDistance <= 1 && Math.max(aLast.length, bLast.length) >= 4) {
+      return 0.8;
+    }
+  }
+
+  const distance = levenshteinDistance(a, b);
+  const ratio = distance / Math.max(a.length, b.length);
+  if (ratio <= 0.18) return 0.78;
+  if (ratio <= 0.28) return 0.65;
+  return 0;
+}
+
+function fightSimilarityScore(queryFight = '', candidateFight = '') {
+  const query = extractFightFromText(queryFight) || null;
+  const candidate = extractFightFromText(candidateFight) || null;
+
+  if (query && candidate) {
+    const direct =
+      (fuzzyNameScore(query.fighterA, candidate.fighterA) +
+        fuzzyNameScore(query.fighterB, candidate.fighterB)) /
+      2;
+    const swapped =
+      (fuzzyNameScore(query.fighterA, candidate.fighterB) +
+        fuzzyNameScore(query.fighterB, candidate.fighterA)) /
+      2;
+    return Math.max(direct, swapped);
+  }
+
+  const q = normalizeText(queryFight).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const c = normalizeText(candidateFight)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!q || !c) return 0;
+  if (q === c) return 1;
+  if ((q.length >= 5 && c.includes(q)) || (c.length >= 5 && q.includes(c))) return 0.85;
+  const distance = levenshteinDistance(q, c);
+  const ratio = distance / Math.max(q.length, c.length);
+  if (ratio <= 0.2) return 0.72;
+  return 0;
+}
+
+function resolveFuzzyBetSelection({
+  queryFight = '',
+  queryEventName = '',
+  queryPick = '',
+  candidates = [],
+  minScore = 0.72,
+} = {}) {
+  const rows = Array.isArray(candidates) ? candidates : [];
+  const fightQuery = String(queryFight || '').trim();
+  if (!fightQuery || !rows.length) {
+    return null;
+  }
+
+  const eventNorm = normalizeText(queryEventName || '');
+  const pickNorm = normalizeText(queryPick || '');
+  const scored = [];
+
+  for (const row of rows) {
+    const rowFight = String(row?.fight || '').trim();
+    const rowId = Number(row?.id);
+    if (!rowFight || !Number.isInteger(rowId) || rowId <= 0) continue;
+
+    let score = fightSimilarityScore(fightQuery, rowFight);
+    if (eventNorm) {
+      const rowEvent = normalizeText(row?.eventName || '');
+      if (rowEvent && rowEvent.includes(eventNorm)) {
+        score += 0.05;
+      }
+    }
+    if (pickNorm) {
+      const rowPick = normalizeText(row?.pick || '');
+      if (rowPick && rowPick.includes(pickNorm)) {
+        score += 0.03;
+      }
+    }
+
+    scored.push({
+      id: rowId,
+      score,
+      fight: rowFight,
+      eventName: row?.eventName || null,
+    });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  if (!scored.length) return null;
+
+  const best = scored[0];
+  if (best.score < minScore) {
+    return null;
+  }
+
+  const second = scored[1];
+  if (second && second.score >= minScore && Math.abs(best.score - second.score) < 0.08) {
+    return {
+      ambiguous: true,
+      candidates: scored.slice(0, 3),
+    };
+  }
+
+  return {
+    ambiguous: false,
+    betId: best.id,
+    score: Number(best.score.toFixed(3)),
+    fight: best.fight,
+    eventName: best.eventName,
+  };
+}
+
 function formatArsAmount(amount) {
   const value = Number(amount);
   if (!Number.isFinite(value)) return '$0 ARS';
@@ -1082,6 +1296,14 @@ function hasAmbiguousFightReference(message = '') {
   );
 }
 
+function isLedgerMutationIntentMessage(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return /\b(cerr\w*|liquid\w*|settl\w*|anot\w*|registr\w*|archiv\w*|borr\w*|elimin\w*|marc\w*|deshac\w*|undo|revert\w*)\b/.test(
+    text
+  );
+}
+
 function normalizeTimeZone(timezone = '') {
   const fallback = DEFAULT_USER_TIMEZONE;
   const candidate = String(timezone || '').trim() || fallback;
@@ -1243,7 +1465,7 @@ function hasRationaleContent(text = '') {
 function isLedgerOperationMessage(message = '') {
   const normalized = normalizeText(message);
   if (!normalized) return false;
-  return /\b(ledger|bet_id|pending|won|lost|settle|archiv|borra|elimina|cierra|cerra|anota|registro)\b/.test(
+  return /\b(ledger|bet[\s_-]?id|pending|won|lost|settl\w*|archiv\w*|borr\w*|elimin\w*|cerr\w*|anot\w*|registr\w*|liquid\w*|marc\w*)\b/.test(
     normalized
   );
 }
@@ -2158,6 +2380,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
     'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
     'Para cambiar estado de apuestas existentes (WON/LOST/PENDING) o borrar/archivar, usa mutate_user_bets, nunca record_user_bet.',
+    'record_user_bet solo se usa para ALTA de apuesta nueva y exige campos minimos completos: fight, pick, odds y stake.',
     'Si la referencia de pelea es ambigua (esa/anterior/recien), no ejecutes mutaciones: pedi desambiguacion con bet_id.',
     'Si el target de mutacion es inequivoco (bet_id explicito o selector unico), ejecuta directo sin pedir confirmacion extra.',
     'Si mutate_user_bets responde requiresConfirmation=true, pedile confirmacion explicita al usuario y luego ejecuta con confirm=true + confirmationToken.',
@@ -2361,6 +2584,196 @@ function buildResponsesTools({ timezone = WEB_SEARCH_TIMEZONE } = {}) {
   ];
 
   return tools;
+}
+
+function hasImageInputItems(inputItems = []) {
+  if (!Array.isArray(inputItems) || !inputItems.length) return false;
+  return inputItems.some((item) => item?.type === 'input_image' || item?.type === 'input_file');
+}
+
+function missingRequiredRecordFields(record = {}) {
+  const missing = [];
+  if (!String(record?.fight || '').trim()) missing.push('fight');
+  if (!String(record?.pick || '').trim()) missing.push('pick');
+  if (toNumberFlexible(record?.odds) === null) missing.push('odds');
+  if (toNumberFlexible(record?.stake) === null) missing.push('stake');
+  return missing;
+}
+
+function mergeBetRecord(base = {}, patch = {}) {
+  const next = { ...base };
+  if (!next.eventName && patch.eventName) next.eventName = String(patch.eventName).trim();
+  if (!next.fight && patch.fight) next.fight = String(patch.fight).trim();
+  if (!next.pick && patch.pick) next.pick = String(patch.pick).trim();
+  const existingOdds = toNumberFlexible(next.odds);
+  const existingStake = toNumberFlexible(next.stake);
+  const existingUnits = toNumberFlexible(next.units);
+  next.odds = existingOdds === null ? toNumberFlexible(patch.odds) : existingOdds;
+  next.stake = existingStake === null ? toNumberFlexible(patch.stake) : existingStake;
+  next.units = existingUnits === null ? toNumberFlexible(patch.units) : existingUnits;
+  return next;
+}
+
+async function extractBetRecordFromMedia({
+  client,
+  model = DECISION_MODEL || MODEL,
+  originalMessage = '',
+  inputItems = [],
+} = {}) {
+  if (!client || !hasImageInputItems(inputItems)) {
+    return { ok: false, error: 'no_media' };
+  }
+
+  const mediaPayload = inputItems.filter(
+    (item) => item?.type === 'input_image' || item?.type === 'input_file'
+  );
+  if (!mediaPayload.length) {
+    return { ok: false, error: 'no_supported_media' };
+  }
+
+  const extractionInstructions = [
+    'Extrae datos de un ticket/apuesta de MMA/UFC.',
+    'Devuelve SOLO un JSON válido con claves: eventName, fight, pick, odds, stake, units.',
+    'Si no se ve un campo con claridad, devuelve null en ese campo.',
+    'No agregues texto fuera del JSON.',
+  ].join(' ');
+
+  const extractionPrompt = [
+    '[USER_MESSAGE]',
+    String(originalMessage || '').trim() || 'N/D',
+    '',
+    'Objetivo: completar los campos de registro de apuesta.',
+  ].join('\n');
+
+  const input = [
+    {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: extractionPrompt },
+        ...mediaPayload,
+      ],
+    },
+  ];
+
+  try {
+    const response = await client.responses.create({
+      model: model || MODEL,
+      temperature: 0,
+      instructions: extractionInstructions,
+      input,
+    });
+    const text = extractResponseText(response);
+    const parsed = extractFirstJsonObject(text) || {};
+    const extracted = {
+      eventName: parsed.eventName ? String(parsed.eventName).trim() : null,
+      fight: parsed.fight ? String(parsed.fight).trim() : null,
+      pick: parsed.pick ? String(parsed.pick).trim() : null,
+      odds: toNumberFlexible(parsed.odds),
+      stake: toNumberFlexible(parsed.stake),
+      units: toNumberFlexible(parsed.units),
+    };
+    return {
+      ok: true,
+      extracted,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function inferResultFightReference({
+  originalMessage = '',
+  resolution = null,
+  pendingBets = [],
+} = {}) {
+  const fromResolution = resolution?.resolvedFight;
+  if (fromResolution?.fighterA && fromResolution?.fighterB) {
+    return {
+      fighterA: fromResolution.fighterA,
+      fighterB: fromResolution.fighterB,
+      source: 'resolution',
+    };
+  }
+
+  const fromMessage = extractFightFromText(originalMessage);
+  if (fromMessage?.fighterA && fromMessage?.fighterB) {
+    return {
+      fighterA: fromMessage.fighterA,
+      fighterB: fromMessage.fighterB,
+      source: 'message',
+    };
+  }
+
+  const liveHint = chooseLikelyActiveFightFromPendingBets(pendingBets);
+  if (liveHint.type === 'single' && liveHint.top?.fight) {
+    const parsed = extractFightFromText(liveHint.top.fight);
+    if (parsed?.fighterA && parsed?.fighterB) {
+      return {
+        fighterA: parsed.fighterA,
+        fighterB: parsed.fighterB,
+        source: 'pending_bets_single',
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseScoreNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pickWinnerFromScores(scores = []) {
+  const rows = Array.isArray(scores) ? scores : [];
+  const withScore = rows
+    .map((row) => ({
+      name: String(row?.name || '').trim(),
+      score: parseScoreNumber(row?.score),
+    }))
+    .filter((row) => row.name && row.score !== null);
+
+  if (withScore.length < 2) {
+    return {
+      winner: null,
+      isDraw: false,
+      scoreLine: null,
+    };
+  }
+
+  const sorted = withScore.slice().sort((a, b) => Number(b.score) - Number(a.score));
+  const top = sorted[0];
+  const runnerUp = sorted[1];
+  const isDraw = Number(top.score) === Number(runnerUp.score);
+  const scoreLine = withScore.map((row) => `${row.name} ${row.score}`).join(' - ');
+
+  return {
+    winner: isDraw ? null : top.name,
+    isDraw,
+    scoreLine,
+  };
+}
+
+function findLatestHistoryResultForFight(rows = [], fightRef = null) {
+  if (!fightRef?.fighterA || !fightRef?.fighterB) return null;
+  const matches = (Array.isArray(rows) ? rows : []).filter((row) => {
+    if (!Array.isArray(row)) return false;
+    return rowContainsFighter(row, fightRef.fighterA) && rowContainsFighter(row, fightRef.fighterB);
+  });
+  if (!matches.length) return null;
+  const row = matches[0];
+  return {
+    date: row[0] || null,
+    event: row[1] || null,
+    fighterA: row[2] || null,
+    fighterB: row[3] || null,
+    winner: row[5] || null,
+    method: row[6] || null,
+  };
 }
 
 function extractFunctionCalls(response) {
@@ -3089,6 +3502,7 @@ export function createBettingWizard({
     const wantsLatestNews = hasLatestNewsSignals(originalMessage);
     const wantsEventProjections = hasEventProjectionSignals(originalMessage);
     const wantsLiveEventStatus = hasLiveEventStatusSignals(originalMessage);
+    const wantsFightResultLookup = hasFightResultLookupSignals(originalMessage);
     const newsAlertsIntent = parseNewsAlertsIntent(originalMessage);
     let oddsSnapshot = null;
     let ledgerSummary = null;
@@ -3961,6 +4375,162 @@ export function createBettingWizard({
       }
     }
 
+    if (wantsFightResultLookup && !isLedgerMutationIntentMessage(originalMessage)) {
+      const pendingBetsForReference =
+        userId && userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: 'pending',
+              includeArchived: false,
+              limit: 60,
+            })
+          : [];
+      const fightRef = inferResultFightReference({
+        originalMessage,
+        resolution,
+        pendingBets: pendingBetsForReference,
+      });
+
+      if (typeof userStore?.refreshLiveScores === 'function') {
+        try {
+          await userStore.refreshLiveScores({
+            force: true,
+            daysFrom: 3,
+          });
+        } catch (error) {
+          console.error('⚠️ refreshLiveScores failed:', error);
+        }
+      }
+
+      const now = Date.now();
+      const recentEvents =
+        typeof userStore?.listRecentOddsEvents === 'function'
+          ? userStore.listRecentOddsEvents({
+              fromIso: new Date(now - 10 * 24 * 3600000).toISOString(),
+              toIso: new Date(now + 2 * 24 * 3600000).toISOString(),
+              limit: 160,
+            })
+          : [];
+
+      let bestEvent = null;
+      let bestScore = 0;
+      if (fightRef?.fighterA && fightRef?.fighterB) {
+        const refFight = `${fightRef.fighterA} vs ${fightRef.fighterB}`;
+        for (const event of recentEvents) {
+          const eventFight = `${event?.homeTeam || ''} vs ${event?.awayTeam || ''}`.trim();
+          if (!eventFight || eventFight === 'vs') continue;
+          const score = fightSimilarityScore(refFight, eventFight);
+          if (score > bestScore) {
+            bestScore = score;
+            bestEvent = event;
+          }
+        }
+      } else if (recentEvents.length === 1) {
+        bestEvent = recentEvents[0];
+        bestScore = 1;
+      }
+
+      if (bestEvent && bestScore >= 0.66) {
+        const winnerInfo = pickWinnerFromScores(bestEvent.scores || []);
+        const lines = ['📡 Resultado de pelea (fuente live prioritaria)'];
+        if (bestEvent.eventName) {
+          lines.push(`Evento: ${bestEvent.eventName}`);
+        }
+        lines.push(
+          `Pelea: ${bestEvent.homeTeam || 'N/D'} vs ${bestEvent.awayTeam || 'N/D'}`
+        );
+        if (bestEvent.commenceTime) {
+          lines.push(
+            `Fecha estimada: ${formatEventDateLabel(
+              bestEvent.commenceTime,
+              temporalContext.timezone
+            )}`
+          );
+        }
+
+        if (bestEvent.completed) {
+          if (winnerInfo.winner) {
+            lines.push(`Resultado: ganó ${winnerInfo.winner}.`);
+          } else if (winnerInfo.isDraw) {
+            lines.push('Resultado: empate/draw.');
+          } else {
+            lines.push('Resultado: finalizada, pero sin ganador legible en feed de scores.');
+          }
+        } else {
+          lines.push('Estado: todavía no figura finalizada en el feed live.');
+        }
+
+        if (winnerInfo.scoreLine) {
+          lines.push(`Score reportado: ${winnerInfo.scoreLine}`);
+        }
+        if (bestEvent.lastScoresSyncAt) {
+          lines.push(
+            `Última sync scores: ${formatIsoForUser(
+              bestEvent.lastScoresSyncAt,
+              temporalContext.timezone
+            )}`
+          );
+        }
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (
+        fightRef?.fighterA &&
+        fightRef?.fighterB &&
+        typeof fightsScalper?.getFighterHistory === 'function'
+      ) {
+        try {
+          const history = await fightsScalper.getFighterHistory({
+            message: `${fightRef.fighterA} vs ${fightRef.fighterB}`,
+            fighters: [fightRef.fighterA, fightRef.fighterB],
+            strict: false,
+          });
+          const latest = findLatestHistoryResultForFight(history?.rows || [], fightRef);
+          if (latest?.winner) {
+            const lines = [
+              '📚 Resultado encontrado en historial local (fallback).',
+              `Pelea: ${latest.fighterA || fightRef.fighterA} vs ${latest.fighterB || fightRef.fighterB}`,
+              `Ganador: ${latest.winner}`,
+            ];
+            if (latest.method) lines.push(`Método: ${latest.method}`);
+            if (latest.date) lines.push(`Fecha: ${latest.date}`);
+            return {
+              reply: lines.join('\n'),
+              metadata: {
+                resolvedFight: runtimeState.resolvedFight,
+                eventCard: runtimeState.eventCard,
+              },
+            };
+          }
+        } catch (error) {
+          console.error('⚠️ local history result lookup failed:', error);
+        }
+      }
+
+      const lines = [
+        'No encontré un resultado live confirmado para esa pelea ahora mismo.',
+      ];
+      if (fightRef?.fighterA && fightRef?.fighterB) {
+        lines.push(`Referencia usada: ${fightRef.fighterA} vs ${fightRef.fighterB}.`);
+      }
+      lines.push(
+        'Si querés, pasame el winner exacto y te ayudo a cerrar el ledger al toque.'
+      );
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
       if (!userId) {
         return { ok: false, error: 'userId no disponible para mutaciones de apuestas.' };
@@ -3982,7 +4552,7 @@ export function createBettingWizard({
         String(rawArgs.fight || '').trim() ||
         resolvedFightLabel(runtimeState.resolvedFight || resolution?.resolvedFight || null) ||
         '';
-      const payload = {
+      let payload = {
         operation,
         result: normalizedResult || undefined,
         betIds: betIds.length ? betIds : undefined,
@@ -4120,7 +4690,57 @@ export function createBettingWizard({
         };
       }
 
-      const preview = userStore.previewBetMutation(userId, payload);
+      let preview = userStore.previewBetMutation(userId, payload);
+      if (
+        !preview?.ok &&
+        preview?.error === 'no_matching_bets' &&
+        !betIds.length &&
+        payload.fight &&
+        typeof userStore?.listUserBets === 'function' &&
+        (operation === 'settle' || operation === 'archive' || operation === 'set_pending')
+      ) {
+        const fuzzyPool = userStore.listUserBets(userId, {
+          status: operation === 'settle' ? 'pending' : null,
+          includeArchived: false,
+          limit: 80,
+          eventName: payload.eventName || null,
+          pick: payload.pick || null,
+        });
+        const fuzzySelection = resolveFuzzyBetSelection({
+          queryFight: payload.fight,
+          queryEventName: payload.eventName || '',
+          queryPick: payload.pick || '',
+          candidates: fuzzyPool,
+        });
+
+        if (fuzzySelection?.ambiguous) {
+          return {
+            ok: false,
+            error: 'ambiguous_fuzzy_match',
+            requiresDisambiguation: true,
+            candidates: fuzzySelection.candidates || [],
+            message:
+              'Encontré más de una apuesta parecida para esa pelea. Pasame el bet_id exacto y lo cierro sin riesgo.',
+          };
+        }
+
+        if (fuzzySelection?.betId) {
+          payload = {
+            ...payload,
+            betIds: [fuzzySelection.betId],
+            metadata: {
+              ...(payload.metadata || {}),
+              fuzzyMatch: {
+                requestedFight: payload.fight,
+                matchedFight: fuzzySelection.fight,
+                matchScore: fuzzySelection.score,
+              },
+            },
+          };
+          preview = userStore.previewBetMutation(userId, payload);
+        }
+      }
+
       if (!preview?.ok) {
         return preview;
       }
@@ -4288,13 +4908,13 @@ export function createBettingWizard({
             return runMutateUserBets(args, { fromLegacyRecordTool: true });
           }
 
-          const record = {
+          let record = {
             eventName: args.eventName ? String(args.eventName).trim() : null,
             fight: args.fight ? String(args.fight).trim() : null,
             pick: args.pick ? String(args.pick).trim() : null,
-            odds: toNumberOrNull(args.odds),
-            stake: toNumberOrNull(args.stake),
-            units: toNumberOrNull(args.units),
+            odds: toNumberFlexible(args.odds),
+            stake: toNumberFlexible(args.stake),
+            units: toNumberFlexible(args.units),
             result: normalizeBetResult(args.result) || 'pending',
             notes: args.notes ? truncateText(String(args.notes), 240) : null,
           };
@@ -4323,6 +4943,32 @@ export function createBettingWizard({
               },
               { fromLegacyRecordTool: true }
             );
+          }
+
+          let mediaExtraction = null;
+          const missingBefore = missingRequiredRecordFields(record);
+          if (missingBefore.length && hasImageInputItems(context.inputItems)) {
+            mediaExtraction = await extractBetRecordFromMedia({
+              client,
+              model: DECISION_MODEL || MODEL,
+              originalMessage,
+              inputItems: context.inputItems,
+            });
+            if (mediaExtraction?.ok && mediaExtraction.extracted) {
+              record = mergeBetRecord(record, mediaExtraction.extracted);
+            }
+          }
+
+          const missingRequired = missingRequiredRecordFields(record);
+          if (missingRequired.length) {
+            return {
+              ok: false,
+              error: 'missing_required_fields_for_record_user_bet',
+              missingFields: missingRequired,
+              message:
+                'Para registrar una apuesta nueva necesito: pelea, pick, cuota y stake (monto).',
+              extractedFromMedia: Boolean(mediaExtraction?.ok),
+            };
           }
 
           const stored = userStore.addBetRecord(userId, record);

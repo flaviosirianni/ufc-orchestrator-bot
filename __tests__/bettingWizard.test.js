@@ -529,6 +529,283 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'record_user_bet',
+        {
+          eventName: 'UFC 326',
+          fight: 'Drew Dober vs Michael Johnson',
+          pick: 'Dober por KO/TKO',
+        },
+        'call_record_missing_fields'
+      ),
+      responseWithText('Necesito cuota y stake para registrarla.'),
+    ]);
+
+    let createCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord() {
+          createCalls += 1;
+          return null;
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('registrala en ledger', {
+      chatId: 'chat-record-required-1',
+      userId: 'u-record-required-1',
+      originalMessage: 'registrala en ledger',
+      resolution: {
+        resolvedMessage: 'registrala en ledger',
+      },
+    });
+
+    assert.match(result.reply, /cuota y stake|Necesito/i);
+    assert.equal(createCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'record_user_bet',
+        {
+          eventName: 'UFC 326',
+        },
+        'call_record_from_screenshot'
+      ),
+      responseWithText(
+        '{"eventName":"UFC 326","fight":"Drew Dober vs Michael Johnson","pick":"Drew Dober por KO, TKO o DQ","odds":"2.10","stake":"2000","units":"3.3"}'
+      ),
+      responseWithText('Listo, apuesta registrada con éxito.'),
+    ]);
+
+    let storedRecord = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord(_userId, record) {
+          storedRecord = record;
+          return {
+            id: 39,
+            ...record,
+            result: record.result || 'pending',
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('anotala en mi ledger', {
+      chatId: 'chat-record-screenshot-1',
+      userId: 'u-record-screenshot-1',
+      originalMessage: 'anotala en mi ledger',
+      resolution: {
+        resolvedMessage: 'anotala en mi ledger',
+      },
+      inputItems: [
+        {
+          type: 'input_image',
+          image_url: 'data:image/jpeg;base64,ZmFrZQ==',
+        },
+      ],
+      mediaStats: {
+        imageCount: 1,
+        audioSeconds: 0,
+      },
+    });
+
+    assert.match(result.reply, /registrada|Listo/i);
+    assert.equal(storedRecord?.fight, 'Drew Dober vs Michael Johnson');
+    assert.equal(storedRecord?.pick, 'Drew Dober por KO, TKO o DQ');
+    assert.equal(storedRecord?.odds, 2.1);
+    assert.equal(storedRecord?.stake, 2000);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          operation: 'settle',
+          result: 'loss',
+          fight: 'Drew Drover vs Michael Johnson',
+        },
+        'call_fuzzy_settle'
+      ),
+      responseWithText('Hecho.'),
+    ]);
+
+    const previewPayloads = [];
+    let applyPayload = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [
+            {
+              id: 39,
+              eventName: 'UFC 326',
+              fight: 'Drew Dober vs Michael Johnson',
+              pick: 'Dober por KO/TKO',
+              result: 'pending',
+            },
+          ];
+        },
+        previewBetMutation(_userId, payload = {}) {
+          previewPayloads.push(payload);
+          const betIds = Array.isArray(payload.betIds) ? payload.betIds : [];
+          if (!betIds.length) {
+            return {
+              ok: false,
+              error: 'no_matching_bets',
+            };
+          }
+          return {
+            ok: true,
+            operation: 'settle',
+            result: 'loss',
+            requiresConfirmation: false,
+            candidates: [{ id: 39, result: 'pending' }],
+          };
+        },
+        applyBetMutation(_userId, payload = {}) {
+          applyPayload = payload;
+          return {
+            ok: true,
+            operation: 'settle',
+            affectedCount: 1,
+            receipts: [{ betId: 39, previousResult: 'pending', newResult: 'loss' }],
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cerrala como perdida: Drew Drover vs Michael Johnson', {
+      chatId: 'chat-fuzzy-close-1',
+      userId: 'u-fuzzy-close-1',
+      originalMessage: 'cerrala como perdida: Drew Drover vs Michael Johnson',
+      resolution: {
+        resolvedMessage: 'cerrala como perdida: Drew Drover vs Michael Johnson',
+      },
+    });
+
+    assert.match(result.reply, /Hecho|cerrada|aplicada/i);
+    assert.equal(previewPayloads.length, 2);
+    assert.deepEqual(previewPayloads[1].betIds, [39]);
+    assert.deepEqual(applyPayload?.betIds, [39]);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+
+    let refreshCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        async refreshLiveScores() {
+          refreshCalls += 1;
+          return { ok: true, upsertedCount: 1 };
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326',
+              eventName: 'UFC 326',
+              homeTeam: 'Drew Dober',
+              awayTeam: 'Michael Johnson',
+              commenceTime: '2026-03-08T01:00:00Z',
+              completed: true,
+              scores: [
+                { name: 'Drew Dober', score: '1' },
+                { name: 'Michael Johnson', score: '0' },
+              ],
+              lastScoresSyncAt: '2026-03-08T03:00:00Z',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'fijate si sabes como salio Drew Dober vs Michael Johnson',
+      {
+        chatId: 'chat-result-live-1',
+        userId: 'u-result-live-1',
+        originalMessage: 'fijate si sabes como salio Drew Dober vs Michael Johnson',
+        resolution: {
+          resolvedMessage: 'fijate si sabes como salio Drew Dober vs Michael Johnson',
+        },
+      }
+    );
+
+    assert.match(result.reply, /fuente live prioritaria/i);
+    assert.match(result.reply, /gano Drew Dober|ganó Drew Dober/i);
+    assert.equal(refreshCalls, 1);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal: Dober por KO @2.10'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cerrala como ganada', {
+      chatId: 'chat-ledger-op-1',
+      originalMessage: 'cerrala como ganada',
+      resolution: {
+        resolvedMessage: 'cerrala como ganada',
+      },
+    });
+
+    assert.doesNotMatch(result.reply, /Fundamento de la elección/i);
+    assert.doesNotMatch(result.reply, /Control de calidad/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
       responseWithFunctionCall('mutate_user_bets', {
         operation: 'archive',
         fight: 'A vs B',

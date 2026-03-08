@@ -2189,6 +2189,45 @@ export function listUpcomingOddsEvents({
   return rows.map(parseOddsEventIndexRow).filter(Boolean);
 }
 
+export function listRecentOddsEvents({
+  sportKey = 'mma_mixed_martial_arts',
+  fromIso = null,
+  toIso = null,
+  limit = 120,
+  includeCompleted = true,
+} = {}) {
+  const db = getDb();
+  const max = Math.max(1, Math.min(500, Number(limit) || 120));
+  const from = fromIso ? String(fromIso).trim() : null;
+  const to = toIso ? String(toIso).trim() : null;
+  const completedValue = includeCompleted ? null : 0;
+
+  const rows = db
+    .prepare(
+      `SELECT event_id, sport_key, event_name, event_norm_key, commence_time, home_team, away_team,
+              completed, scores_json, last_odds_sync_at, last_scores_sync_at, updated_at
+       FROM odds_events_index
+       WHERE sport_key = ?
+         AND (? IS NULL OR completed = ?)
+         AND (? IS NULL OR commence_time >= ?)
+         AND (? IS NULL OR commence_time <= ?)
+       ORDER BY commence_time DESC, updated_at DESC
+       LIMIT ?`
+    )
+    .all(
+      String(sportKey || 'mma_mixed_martial_arts'),
+      completedValue,
+      completedValue,
+      from,
+      from,
+      to,
+      to,
+      max
+    );
+
+  return rows.map(parseOddsEventIndexRow).filter(Boolean);
+}
+
 function parseOddsMarketSnapshotRow(row) {
   if (!row) return null;
   return {

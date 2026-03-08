@@ -49,6 +49,7 @@ import {
   listLatestOddsMarketsForFight,
   listLatestOddsMarketsForEvent,
   listUpcomingOddsEvents,
+  listRecentOddsEvents,
   upsertOddsEventsIndex,
   insertOddsMarketSnapshots,
   getLatestProjectionForFight,
@@ -81,6 +82,44 @@ function readJsonBody(req) {
       }
     });
   });
+}
+
+function normalizeText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function toFightKey(a = '', b = '') {
+  const left = normalizeText(a);
+  const right = normalizeText(b);
+  if (!left || !right) return '';
+  return [left, right].sort().join('::');
+}
+
+function mapOddsEventIndexRows(payload = [], fallbackSportKey = 'mma_mixed_martial_arts') {
+  const events = Array.isArray(payload) ? payload : [];
+  return events
+    .map((item) => {
+      const eventId = String(item?.id || '').trim();
+      if (!eventId) return null;
+      const homeTeam = String(item?.home_team || '').trim();
+      const awayTeam = String(item?.away_team || '').trim();
+      return {
+        eventId,
+        sportKey: String(item?.sport_key || fallbackSportKey || '').trim() || fallbackSportKey,
+        eventName: homeTeam && awayTeam ? `${homeTeam} vs ${awayTeam}` : eventId,
+        eventNormKey: toFightKey(homeTeam, awayTeam),
+        commenceTime: item?.commence_time || null,
+        homeTeam: homeTeam || null,
+        awayTeam: awayTeam || null,
+        completed: item?.completed === true,
+        scores: Array.isArray(item?.scores) ? item.scores : null,
+      };
+    })
+    .filter(Boolean);
 }
 
 function createHealthServer(
@@ -333,8 +372,44 @@ function bootstrap() {
       listLatestOddsMarketsForFight,
       listLatestOddsMarketsForEvent,
       listUpcomingOddsEvents,
+      listRecentOddsEvents,
       getLatestOddsApiQuotaState,
       listLatestProjectionSnapshotsForEvent,
+      refreshLiveScores: async ({ force = true, daysFrom = 3 } = {}) => {
+        try {
+          const result = await oddsApi.getScores({
+            sport: process.env.ODDS_API_MMA_SPORT_KEY || 'mma_mixed_martial_arts',
+            daysFrom,
+            dateFormat: process.env.ODDS_API_DEFAULT_DATE_FORMAT || 'iso',
+            force,
+          });
+          if (!result?.ok || !Array.isArray(result?.data)) {
+            return {
+              ok: false,
+              error: result?.error || 'scores_sync_failed',
+              meta: result?.meta || null,
+            };
+          }
+
+          const rows = mapOddsEventIndexRows(
+            result.data,
+            process.env.ODDS_API_MMA_SPORT_KEY || 'mma_mixed_martial_arts'
+          );
+          const upserted = rows.length
+            ? upsertOddsEventsIndex(rows, { markScoresSyncAt: true })
+            : { upsertedCount: 0 };
+          return {
+            ok: true,
+            upsertedCount: Number(upserted?.upsertedCount) || 0,
+            meta: result?.meta || null,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
       resolveLiveEventContext: async ({ referenceDate } = {}) => {
         const ref = referenceDate instanceof Date ? referenceDate : new Date();
         const refIsoDate = ref.toISOString().slice(0, 10);
