@@ -55,6 +55,9 @@ import {
   getLatestProjectionForFight,
   insertFightProjectionSnapshots,
   listLatestProjectionSnapshotsForEvent,
+  getLatestBetScoringForFight,
+  listLatestBetScoringForEvent,
+  insertFightBetScoringSnapshots,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -375,6 +378,8 @@ function bootstrap() {
       listRecentOddsEvents,
       getLatestOddsApiQuotaState,
       listLatestProjectionSnapshotsForEvent,
+      getLatestBetScoringForFight,
+      listLatestBetScoringForEvent,
       refreshLiveScores: async ({ force = true, daysFrom = 3 } = {}) => {
         try {
           const result = await oddsApi.getScores({
@@ -473,6 +478,7 @@ function bootstrap() {
     listLatestOddsMarketsForFight,
     getLatestProjectionForFight,
     insertFightProjectionSnapshots,
+    insertFightBetScoringSnapshots,
   });
 
   const port = Number(process.env.PORT || 3000);

@@ -359,6 +359,33 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_projection_event_fight_time
       ON fight_projection_snapshots (event_id, fight_id, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS fight_bet_scoring_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      fight_id TEXT NOT NULL,
+      fighter_a TEXT NOT NULL,
+      fighter_b TEXT NOT NULL,
+      market_key TEXT NOT NULL,
+      selection TEXT,
+      recommendation TEXT NOT NULL,
+      edge_pct REAL NOT NULL,
+      confidence_pct REAL NOT NULL,
+      risk_level TEXT NOT NULL,
+      suggested_stake_units REAL,
+      suggested_stake_amount REAL,
+      no_bet_reason TEXT,
+      model_probability_pct REAL,
+      implied_probability_pct REAL,
+      consensus_odds REAL,
+      books_count INTEGER NOT NULL DEFAULT 0,
+      inputs_json TEXT NOT NULL,
+      reasoning_version TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bet_scoring_event_fight_market_time
+      ON fight_bet_scoring_snapshots (event_id, fight_id, market_key, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS user_intel_prefs (
       telegram_user_id TEXT PRIMARY KEY,
       news_alerts_enabled INTEGER NOT NULL DEFAULT 1,
@@ -2436,6 +2463,53 @@ function parseProjectionSnapshotRow(row) {
   };
 }
 
+function parseBetScoringSnapshotRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    eventId: row.event_id || null,
+    fightId: row.fight_id || null,
+    fighterA: row.fighter_a || null,
+    fighterB: row.fighter_b || null,
+    marketKey: row.market_key || null,
+    selection: row.selection || null,
+    recommendation: row.recommendation || 'no_bet',
+    edgePct:
+      row.edge_pct === null || row.edge_pct === undefined ? 0 : Number(row.edge_pct),
+    confidencePct:
+      row.confidence_pct === null || row.confidence_pct === undefined
+        ? 0
+        : Number(row.confidence_pct),
+    riskLevel: row.risk_level || 'high',
+    suggestedStakeUnits:
+      row.suggested_stake_units === null || row.suggested_stake_units === undefined
+        ? null
+        : Number(row.suggested_stake_units),
+    suggestedStakeAmount:
+      row.suggested_stake_amount === null || row.suggested_stake_amount === undefined
+        ? null
+        : Number(row.suggested_stake_amount),
+    noBetReason: row.no_bet_reason || null,
+    modelProbabilityPct:
+      row.model_probability_pct === null || row.model_probability_pct === undefined
+        ? null
+        : Number(row.model_probability_pct),
+    impliedProbabilityPct:
+      row.implied_probability_pct === null || row.implied_probability_pct === undefined
+        ? null
+        : Number(row.implied_probability_pct),
+    consensusOdds:
+      row.consensus_odds === null || row.consensus_odds === undefined
+        ? null
+        : Number(row.consensus_odds),
+    booksCount:
+      row.books_count === null || row.books_count === undefined ? 0 : Number(row.books_count),
+    inputs: parseJsonSafe(row.inputs_json, {}),
+    reasoningVersion: row.reasoning_version || null,
+    createdAt: row.created_at || null,
+  };
+}
+
 export function insertFightProjectionSnapshots(items = []) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) {
@@ -2568,6 +2642,173 @@ export function listLatestProjectionSnapshotsForEvent({
     if (byFight.size >= max) break;
   }
   return Array.from(byFight.values());
+}
+
+export function insertFightBetScoringSnapshots(items = []) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) {
+    return { insertedCount: 0 };
+  }
+
+  const db = getDb();
+  const ts = nowIso();
+  const insert = db.prepare(
+    `INSERT INTO fight_bet_scoring_snapshots
+      (event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
+       edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
+       no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
+       inputs_json, reasoning_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const run = db.transaction((inputRows) => {
+    let insertedCount = 0;
+    for (const row of inputRows) {
+      const eventId = String(row?.eventId || '').trim();
+      const fightId = String(row?.fightId || '').trim();
+      const fighterA = String(row?.fighterA || '').trim();
+      const fighterB = String(row?.fighterB || '').trim();
+      const marketKey = String(row?.marketKey || '').trim();
+      if (!eventId || !fightId || !fighterA || !fighterB || !marketKey) continue;
+
+      insert.run(
+        eventId,
+        fightId,
+        fighterA,
+        fighterB,
+        marketKey,
+        row.selection || null,
+        row.recommendation || 'no_bet',
+        row.edgePct === null || row.edgePct === undefined ? 0 : Number(row.edgePct),
+        row.confidencePct === null || row.confidencePct === undefined
+          ? 0
+          : Number(row.confidencePct),
+        row.riskLevel || 'high',
+        row.suggestedStakeUnits === null || row.suggestedStakeUnits === undefined
+          ? null
+          : Number(row.suggestedStakeUnits),
+        row.suggestedStakeAmount === null || row.suggestedStakeAmount === undefined
+          ? null
+          : Number(row.suggestedStakeAmount),
+        row.noBetReason || null,
+        row.modelProbabilityPct === null || row.modelProbabilityPct === undefined
+          ? null
+          : Number(row.modelProbabilityPct),
+        row.impliedProbabilityPct === null || row.impliedProbabilityPct === undefined
+          ? null
+          : Number(row.impliedProbabilityPct),
+        row.consensusOdds === null || row.consensusOdds === undefined
+          ? null
+          : Number(row.consensusOdds),
+        row.booksCount === null || row.booksCount === undefined ? 0 : Number(row.booksCount),
+        JSON.stringify(
+          row.inputs && typeof row.inputs === 'object' ? row.inputs : {}
+        ),
+        row.reasoningVersion || 'v1_market_pack',
+        row.createdAt || ts
+      );
+      insertedCount += 1;
+    }
+    return { insertedCount };
+  });
+
+  return run(rows);
+}
+
+export function getLatestBetScoringForFight({
+  eventId = '',
+  fightId = '',
+  fighterA = '',
+  fighterB = '',
+  marketKey = '',
+} = {}) {
+  const cleanEventId = String(eventId || '').trim();
+  if (!cleanEventId) return null;
+  const cleanMarketKey = String(marketKey || '').trim();
+  const db = getDb();
+
+  if (fightId) {
+    const row = db
+      .prepare(
+        `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
+                edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
+                no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
+                inputs_json, reasoning_version, created_at
+         FROM fight_bet_scoring_snapshots
+         WHERE event_id = ?
+           AND fight_id = ?
+           AND (? = '' OR market_key = ?)
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get(cleanEventId, String(fightId), cleanMarketKey, cleanMarketKey);
+    return parseBetScoringSnapshotRow(row);
+  }
+
+  const normA = normalizeName(fighterA);
+  const normB = normalizeName(fighterB);
+  if (!normA || !normB) return null;
+
+  const row = db
+    .prepare(
+      `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
+              edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
+              no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
+              inputs_json, reasoning_version, created_at
+       FROM fight_bet_scoring_snapshots
+       WHERE event_id = ?
+         AND (? = '' OR market_key = ?)
+         AND (
+           (lower(fighter_a) = ? AND lower(fighter_b) = ?)
+           OR
+           (lower(fighter_a) = ? AND lower(fighter_b) = ?)
+         )
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(cleanEventId, cleanMarketKey, cleanMarketKey, normA, normB, normB, normA);
+  return parseBetScoringSnapshotRow(row);
+}
+
+export function listLatestBetScoringForEvent({
+  eventId = '',
+  marketKey = '',
+  limit = 60,
+  latestPerFightMarket = true,
+} = {}) {
+  const cleanEventId = String(eventId || '').trim();
+  if (!cleanEventId) return [];
+  const cleanMarketKey = String(marketKey || '').trim();
+  const max = Math.max(1, Math.min(500, Number(limit) || 60));
+  const db = getDb();
+
+  const rows = db
+    .prepare(
+      `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
+              edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
+              no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
+              inputs_json, reasoning_version, created_at
+       FROM fight_bet_scoring_snapshots
+       WHERE event_id = ?
+         AND (? = '' OR market_key = ?)
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(cleanEventId, cleanMarketKey, cleanMarketKey, Math.max(max * 4, max));
+
+  const parsed = rows.map(parseBetScoringSnapshotRow).filter(Boolean);
+  if (!latestPerFightMarket) {
+    return parsed.slice(0, max);
+  }
+
+  const deduped = new Map();
+  for (const row of parsed) {
+    const key = `${String(row?.fightId || '').trim()}::${String(row?.marketKey || '').trim()}`;
+    if (!key || deduped.has(key)) continue;
+    deduped.set(key, row);
+    if (deduped.size >= max) break;
+  }
+  return Array.from(deduped.values());
 }
 
 function parseFightHistoryCacheRow(row) {

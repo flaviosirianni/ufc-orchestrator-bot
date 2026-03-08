@@ -2392,6 +2392,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Cuando sugieras stake, respeta min_stake_amount y min_units_per_bet del perfil; si el edge no justifica ese piso, propone NO_BET en lugar de stake simbolico.',
     'Si el usuario provee cuotas/odds de una sola pelea (texto o imagen), responde con formato estructurado: intro breve, separador, encabezado de pelea + cuotas recibidas, separador, "Lectura de la pelea" con bullets claros, separador, "Mi probabilidad estimada", separador, "EV (valor esperado)" con picks y EV, separador, "RECOMENDACIONES" (pick principal / valor / agresivo) con stake en unidades si hay unit_size, separador, "Que NO jugaria", separador, "Resumen rapido".',
     'Si el usuario provee cuotas de varias peleas, aplica el mismo formato por pelea (secciones repetidas) y al final agrega un "Resumen global" con los picks principales ordenados por solidez.',
+    'Si recibis PRECOMPUTED_BET_SCORING, usalo como base primaria de edge/confianza/stake y solo ajusta por cuotas actuales del usuario.',
     'Toda recomendacion debe incluir "Fundamento de la eleccion": tesis breve, riesgos y regla de entrada (cuota minima o condicion de no-bet).',
     'Cuando el usuario provea cuotas (texto o imagen), construye un JSON estructurado por pelea y llama store_user_odds una vez por pelea. Inclui sportsbook si el usuario lo menciona.',
     'Para peleas proximas, realiza una busqueda web rapida enfocada en cortes de peso agresivos, fallos de peso, hospitalizaciones o cambios de ultima hora en la semana previa; si hay señales relevantes, ajusta el analisis.',
@@ -5208,15 +5209,19 @@ export function createBettingWizard({
 
       let precomputedEventProjections = [];
       let precomputedFightProjection = null;
+      let precomputedEventBetScoring = [];
+      let precomputedFightBetScoring = [];
+      const decisionEventState = wantsBetDecision
+        ? userStore?.getEventWatchState?.('next_event')
+        : null;
       if (
         wantsBetDecision &&
         typeof userStore?.listLatestProjectionSnapshotsForEvent === 'function'
       ) {
-        const eventState = userStore?.getEventWatchState?.('next_event');
-        if (eventState?.eventId) {
+        if (decisionEventState?.eventId) {
           precomputedEventProjections =
             userStore.listLatestProjectionSnapshotsForEvent({
-              eventId: eventState.eventId,
+              eventId: decisionEventState.eventId,
               limit: 20,
               latestPerFight: true,
             }) || [];
@@ -5226,6 +5231,25 @@ export function createBettingWizard({
                 projectionSnapshotMatchesFight(snapshot, resolution.resolvedFight)
               ) || null;
           }
+        }
+      }
+
+      if (
+        wantsBetDecision &&
+        decisionEventState?.eventId &&
+        typeof userStore?.listLatestBetScoringForEvent === 'function'
+      ) {
+        precomputedEventBetScoring =
+          userStore.listLatestBetScoringForEvent({
+            eventId: decisionEventState.eventId,
+            limit: 80,
+            latestPerFightMarket: true,
+          }) || [];
+
+        if (resolution?.resolvedFight) {
+          precomputedFightBetScoring = precomputedEventBetScoring.filter((snapshot) =>
+            projectionSnapshotMatchesFight(snapshot, resolution.resolvedFight)
+          );
         }
       }
 
@@ -5295,6 +5319,18 @@ export function createBettingWizard({
         extraSections.push(
           '[CACHED_ODDS_CONSENSUS]',
           JSON.stringify(cachedFightOddsConsensus, null, 2)
+        );
+      }
+
+      if (wantsBetDecision && precomputedFightBetScoring.length) {
+        extraSections.push(
+          '[PRECOMPUTED_BET_SCORING]',
+          JSON.stringify(precomputedFightBetScoring, null, 2)
+        );
+      } else if (wantsBetDecision && precomputedEventBetScoring.length) {
+        extraSections.push(
+          '[PRECOMPUTED_EVENT_BET_SCORING]',
+          JSON.stringify(precomputedEventBetScoring.slice(0, 18), null, 2)
         );
       }
 

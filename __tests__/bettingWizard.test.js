@@ -1267,6 +1267,22 @@ export async function runBettingWizardTests() {
             },
           ];
         },
+        listLatestBetScoringForEvent() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-07',
+              fightId: 'fight_2',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              marketKey: 'moneyline',
+              selection: 'Max Holloway',
+              recommendation: 'bet',
+              edgePct: 5.4,
+              confidencePct: 69,
+              riskLevel: 'medium',
+            },
+          ];
+        },
         listLatestOddsMarketsForFight() {
           return [
             {
@@ -1305,6 +1321,7 @@ export async function runBettingWizardTests() {
 
     assert.match(result.reply, /Pick principal/);
     assert.match(fakeClient.calls[0]?.input || '', /\[PRECOMPUTED_PROJECTION\]/);
+    assert.match(fakeClient.calls[0]?.input || '', /\[PRECOMPUTED_BET_SCORING\]/);
     assert.match(fakeClient.calls[0]?.input || '', /\[CACHED_ODDS_CONSENSUS\]/);
     assert.match(fakeClient.calls[0]?.input || '', /Max Holloway/);
   });

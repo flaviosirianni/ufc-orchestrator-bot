@@ -7,6 +7,7 @@ import { runHistoryScraperTests } from './historyScraper.test.js';
 import { runMessageFormatterTests } from './messageFormatter.test.js';
 import { runAutoSettlementTests } from './autoSettlement.test.js';
 import { runOddsApiToolTests } from './oddsApiTool.test.js';
+import { runBetScoringEngineTests } from './betScoringEngine.test.js';
 
 async function main() {
   await runRouterChainTests();
@@ -14,6 +15,7 @@ async function main() {
   await runToolsHandlersTests();
   await runWebIntelToolTests();
   await runOddsApiToolTests();
+  await runBetScoringEngineTests();
   await runHistoryScraperTests();
   await runAutoSettlementTests();
   await runBettingWizardTests();

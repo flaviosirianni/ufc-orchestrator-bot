@@ -1,4 +1,5 @@
 import '../core/env.js';
+import { buildFightBetScoringPack } from './betScoringEngine.js';
 
 const PRE_FIGHT_ANALYSIS_INTERVAL_MS = Number(
   process.env.PRE_FIGHT_ANALYSIS_INTERVAL_MS ?? String(3 * 60 * 60 * 1000)
@@ -257,6 +258,8 @@ function computeProjection({
     fightId,
     fighterA,
     fighterB,
+    fighterAWinPct: Number(probA.toFixed(2)),
+    fighterBWinPct: Number(probB.toFixed(2)),
     predictedWinner: winner,
     predictedMethod: spread >= 20 ? 'inside_distance_or_clear_decision' : 'decision_lean',
     confidencePct: Number(confidence.toFixed(1)),
@@ -277,6 +280,7 @@ export function startPreFightAnalysisMonitor({
   listLatestOddsMarketsForFight,
   getLatestProjectionForFight,
   insertFightProjectionSnapshots,
+  insertFightBetScoringSnapshots,
 } = {}) {
   if (
     typeof getEventWatchState !== 'function' ||
@@ -313,6 +317,7 @@ export function startPreFightAnalysisMonitor({
       });
 
       const snapshots = [];
+      const betScoringSnapshots = [];
       for (const fight of fights) {
         const oddsRows = listLatestOddsMarketsForFight({
           fighterA: fight.fighterA,
@@ -332,7 +337,18 @@ export function startPreFightAnalysisMonitor({
           newsRows,
           previous,
         });
-        if (snapshot) snapshots.push(snapshot);
+        if (!snapshot) continue;
+        snapshots.push(snapshot);
+
+        const marketPack = buildFightBetScoringPack({
+          eventId: eventState.eventId,
+          fight,
+          projection: snapshot,
+          oddsRows,
+        });
+        if (Array.isArray(marketPack) && marketPack.length) {
+          betScoringSnapshots.push(...marketPack);
+        }
       }
 
       if (!snapshots.length) return;
@@ -340,6 +356,16 @@ export function startPreFightAnalysisMonitor({
       console.log(
         `[preFightAnalysis] Stored ${inserted?.insertedCount || 0} projection snapshot(s) for ${eventState.eventName}.`
       );
+
+      if (
+        typeof insertFightBetScoringSnapshots === 'function' &&
+        betScoringSnapshots.length
+      ) {
+        const insertedScoring = insertFightBetScoringSnapshots(betScoringSnapshots);
+        console.log(
+          `[preFightAnalysis] Stored ${insertedScoring?.insertedCount || 0} bet scoring snapshot(s) for ${eventState.eventName}.`
+        );
+      }
     } catch (error) {
       console.error('❌ preFightAnalysis cycle failed:', error);
     } finally {
