@@ -369,6 +369,7 @@ function bootstrap() {
       addCredits,
       getUsageCounters,
       getEventWatchState,
+      upsertEventWatchState,
       listLatestRelevantNews,
       getUserIntelPrefs,
       updateUserIntelPrefs,

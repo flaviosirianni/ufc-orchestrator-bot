@@ -592,6 +592,31 @@ function dateDiffInDays(isoA = '', isoB = '') {
   return Math.round((msA - msB) / 86400000);
 }
 
+function isEventStateNearToday(eventState = null, nowMs = Date.now(), maxDistanceDays = 1) {
+  const eventDate = toIsoDateSafe(eventState?.eventDateUtc || '');
+  if (!eventDate) return false;
+  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const distance = Math.abs(dateDiffInDays(eventDate, todayIso));
+  return Number.isFinite(distance) && distance <= Math.max(0, Number(maxDistanceDays) || 0);
+}
+
+function collectMonitoredFightersFromMainCard(mainCard = []) {
+  const fights = Array.isArray(mainCard) ? mainCard : [];
+  const out = [];
+  const seen = new Set();
+  for (const fight of fights) {
+    for (const raw of [fight?.fighterA, fight?.fighterB]) {
+      const name = String(raw || '').trim();
+      if (!name) continue;
+      const key = normalise(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
 function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now()) {
   const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
   if (!rows.length) return [];
@@ -4896,6 +4921,10 @@ export function createBettingWizard({
           console.error('⚠️ live event score refresh failed:', error);
         }
       }
+      const liveEventStateFromOdds = buildEventStateFromOddsRows({
+        oddsRows: oddsWindowEvents,
+        eventContext: liveOddsContext,
+      });
 
       let liveWebContext = null;
       if (typeof userStore?.resolveLiveEventContext === 'function') {
@@ -4949,6 +4978,47 @@ export function createBettingWizard({
         : webEventDate || oddsEventDate;
 
       if (resolvedEventName) {
+        if (typeof userStore?.upsertEventWatchState === 'function') {
+          try {
+            const mainCard =
+              Array.isArray(liveEventStateFromOdds?.mainCard) && liveEventStateFromOdds.mainCard.length
+                ? liveEventStateFromOdds.mainCard
+                : Array.isArray(liveWebContext?.fights)
+                ? liveWebContext.fights
+                    .filter((fight) => fight?.fighterA && fight?.fighterB)
+                    .slice(0, 8)
+                    .map((fight, index) => ({
+                      fightId: `fight_${index + 1}`,
+                      fighterA: String(fight.fighterA || '').trim(),
+                      fighterB: String(fight.fighterB || '').trim(),
+                      isCompleted: false,
+                      hasScores: false,
+                    }))
+                : [];
+            const resolvedEventId =
+              String(liveEventStateFromOdds?.eventId || '').trim() ||
+              String(liveOddsContext?.eventId || '').trim() ||
+              String(liveWebContext?.eventId || '').trim() ||
+              buildSyntheticEventId(resolvedEventName, resolvedEventDate || null);
+            userStore.upsertEventWatchState(
+              {
+                eventId: resolvedEventId,
+                eventName: resolvedEventName,
+                eventDateUtc: resolvedEventDate || null,
+                eventStatus: 'live',
+                sourcePrimary: preferOddsContext ? 'odds_scores_live' : liveWebContext?.source || null,
+                sourceSecondary: preferOddsContext ? liveWebContext?.source || null : null,
+                mainCard,
+                monitoredFighters: collectMonitoredFightersFromMainCard(mainCard),
+                lastReconciledAt: new Date().toISOString(),
+              },
+              'current_event'
+            );
+          } catch (error) {
+            console.error('⚠️ live event upsert current_event failed:', error);
+          }
+        }
+
         const lines = [
           '🔴 Estado UFC en vivo (validacion actual)',
           `Evento detectado: ${resolvedEventName}`,
@@ -5072,7 +5142,10 @@ export function createBettingWizard({
         return mergeOddsEventRows(upcomingRows, recentRows);
       };
 
-      let eventState = userStore.getEventWatchState('next_event');
+      const currentEventState = userStore.getEventWatchState('current_event');
+      const nextEventState = userStore.getEventWatchState('next_event');
+      const preferCurrentEvent = isEventStateNearToday(currentEventState, nowMs, 1);
+      let eventState = preferCurrentEvent ? currentEventState : nextEventState;
       const fallbackEventState = eventState || null;
       const todayIso = new Date(nowMs).toISOString().slice(0, 10);
       const fallbackEventDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
@@ -5190,6 +5263,50 @@ export function createBettingWizard({
       }
       if (mergedLiveSignals && !reconciledWithLive) {
         reconciliationNotes.push('Nota: estado de peleas reconciliado con scores live en backend.');
+      }
+      const selectedEventDate = toIsoDateSafe(eventState?.eventDateUtc || '');
+      const selectedEventDistanceDays = selectedEventDate
+        ? Math.abs(dateDiffInDays(selectedEventDate, todayIso))
+        : Number.POSITIVE_INFINITY;
+      if (!liveSignalsDetected && selectedEventDistanceDays > 1) {
+        reconciliationNotes.push(
+          'Aviso: sin señal live validada en este turno; mostrando el proximo evento en agenda.'
+        );
+      }
+
+      if (typeof userStore?.upsertEventWatchState === 'function' && liveSignalsDetected) {
+        try {
+          const normalizedMainCard = Array.isArray(eventState?.mainCard)
+            ? eventState.mainCard
+                .filter((fight) => fight?.fighterA && fight?.fighterB)
+                .slice(0, 12)
+                .map((fight, index) => ({
+                  fightId: String(fight?.fightId || '').trim() || `fight_${index + 1}`,
+                  fighterA: String(fight.fighterA || '').trim(),
+                  fighterB: String(fight.fighterB || '').trim(),
+                  isCompleted: fight?.isCompleted === true,
+                  hasScores: Boolean(fight?.hasScores),
+                }))
+            : [];
+          userStore.upsertEventWatchState(
+            {
+              eventId:
+                String(eventState?.eventId || '').trim() ||
+                buildSyntheticEventId(eventState?.eventName || '', eventState?.eventDateUtc || null),
+              eventName: String(eventState?.eventName || '').trim(),
+              eventDateUtc: selectedEventDate || null,
+              eventStatus: 'live',
+              sourcePrimary: eventState?.sourcePrimary || null,
+              sourceSecondary: null,
+              mainCard: normalizedMainCard,
+              monitoredFighters: collectMonitoredFightersFromMainCard(normalizedMainCard),
+              lastReconciledAt: new Date().toISOString(),
+            },
+            'current_event'
+          );
+        } catch (error) {
+          console.error('⚠️ projections upsert current_event failed:', error);
+        }
       }
 
       if (wantsLatestNews) {
