@@ -1176,6 +1176,10 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
+    const syncOddsIso = new Date(nowMs - 4 * 60 * 1000).toISOString();
+    const syncScoresIso = new Date(nowMs - 2 * 60 * 1000).toISOString();
 
     const wizard = createBettingWizard({
       conversationStore,
@@ -1232,6 +1236,10 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
+    const syncOddsIso = new Date(nowMs - 4 * 60 * 1000).toISOString();
+    const syncScoresIso = new Date(nowMs - 2 * 60 * 1000).toISOString();
 
     const wizard = createBettingWizard({
       conversationStore,
@@ -1270,6 +1278,99 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /No pude confirmar un evento UFC en vivo/i);
     assert.match(result.reply, /Proximo evento en agenda/i);
     assert.doesNotMatch(result.reply, /Evento detectado: UFC 324/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
+    const syncOddsIso = new Date(nowMs - 4 * 60 * 1000).toISOString();
+    const syncScoresIso = new Date(nowMs - 2 * 60 * 1000).toISOString();
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_324_2026-04-18',
+            eventName: 'UFC 324',
+            eventDateUtc: '2026-04-18',
+            updatedAt: '2026-03-07T10:00:00Z',
+          };
+        },
+        async resolveLiveEventContext() {
+          return {
+            eventName: 'UFC 324',
+            date: '2026-04-18',
+            source: 'open-web',
+            fights: [{ fighterA: 'Gaethje', fighterB: 'Pimblett' }],
+          };
+        },
+        listUpcomingOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              lastOddsSyncAt: syncOddsIso,
+              updatedAt: syncOddsIso,
+            },
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Caio Borralho',
+              awayTeam: 'Reinier de Ridder',
+              completed: false,
+              lastOddsSyncAt: syncOddsIso,
+              updatedAt: syncOddsIso,
+            },
+          ];
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              scores: [{ name: 'Max Holloway', score: '0' }],
+              lastScoresSyncAt: syncScoresIso,
+              updatedAt: syncScoresIso,
+            },
+          ];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 1 };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('fijate online el evento en vivo de la ufc', {
+      chatId: 'chat-live-status-reconcile-1',
+      originalMessage: 'fijate online el evento en vivo de la ufc',
+      resolution: {
+        resolvedMessage: 'fijate online el evento en vivo de la ufc',
+      },
+    });
+
+    assert.match(result.reply, /Estado UFC en vivo/i);
+    assert.match(result.reply, /Evento detectado: UFC 326/i);
+    assert.doesNotMatch(result.reply, /Evento detectado: UFC 324/i);
+    assert.match(result.reply, /Fuente primaria: indice interno de odds\/scores/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 

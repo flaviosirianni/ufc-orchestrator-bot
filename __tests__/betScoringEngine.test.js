@@ -114,9 +114,115 @@ export async function runBetScoringEngineTests() {
     }
   });
 
+  tests.push(async () => {
+    const pack = buildFightBetScoringPack({
+      eventId: 'ufc_327_2026-03-21',
+      fight: {
+        fightId: 'fight_3',
+        fighterA: 'Fighter A',
+        fighterB: 'Fighter B',
+      },
+      projection: {
+        predictedWinner: 'Fighter A',
+        predictedMethod: 'decision_lean',
+        confidencePct: 63,
+        fighterAWinPct: 61,
+        fighterBWinPct: 39,
+      },
+      oddsRows: [
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_a',
+          fetchedAt: '2026-03-20T14:00:00Z',
+          outcomeAName: 'Fighter A',
+          outcomeAPrice: 2.05,
+          outcomeBName: 'Fighter B',
+          outcomeBPrice: 1.77,
+        },
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_a',
+          fetchedAt: '2026-03-21T01:00:00Z',
+          outcomeAName: 'Fighter A',
+          outcomeAPrice: 1.87,
+          outcomeBName: 'Fighter B',
+          outcomeBPrice: 2.01,
+        },
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_b',
+          fetchedAt: '2026-03-20T15:00:00Z',
+          outcomeAName: 'Fighter A',
+          outcomeAPrice: 2.1,
+          outcomeBName: 'Fighter B',
+          outcomeBPrice: 1.75,
+        },
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_b',
+          fetchedAt: '2026-03-21T01:05:00Z',
+          outcomeAName: 'Fighter A',
+          outcomeAPrice: 1.9,
+          outcomeBName: 'Fighter B',
+          outcomeBPrice: 1.98,
+        },
+      ],
+    });
+
+    const moneyline = pack.find((row) => row.marketKey === 'moneyline');
+    assert.ok(moneyline);
+    assert.ok(['bet', 'lean'].includes(moneyline.recommendation));
+    assert.ok(Number(moneyline.inputs?.lineMovementPct) > 0);
+    assert.ok(Number(moneyline.inputs?.openingConsensusOdds) > Number(moneyline.consensusOdds));
+    assert.ok(Number.isFinite(Number(moneyline.inputs?.marketAgreementPct)));
+  });
+
+  tests.push(async () => {
+    const pack = buildFightBetScoringPack({
+      eventId: 'ufc_328_2026-03-28',
+      fight: {
+        fightId: 'fight_4',
+        fighterA: 'Fighter C',
+        fighterB: 'Fighter D',
+      },
+      projection: {
+        predictedWinner: 'Fighter C',
+        predictedMethod: 'inside_distance',
+        confidencePct: 59,
+        fighterAWinPct: 54,
+        fighterBWinPct: 46,
+      },
+      oddsRows: [
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_a',
+          fetchedAt: '2026-03-27T12:00:00Z',
+          outcomeAName: 'Fighter C',
+          outcomeAPrice: 1.75,
+          outcomeBName: 'Fighter D',
+          outcomeBPrice: 2.2,
+        },
+        {
+          marketKey: 'h2h',
+          bookmakerKey: 'book_a',
+          fetchedAt: '2026-03-28T00:10:00Z',
+          outcomeAName: 'Fighter C',
+          outcomeAPrice: 1.98,
+          outcomeBName: 'Fighter D',
+          outcomeBPrice: 1.86,
+        },
+      ],
+    });
+
+    const moneyline = pack.find((row) => row.marketKey === 'moneyline');
+    assert.ok(moneyline);
+    assert.ok(Number(moneyline.inputs?.lineMovementPct) < 0);
+    assert.ok(Number.isFinite(Number(moneyline.inputs?.lineMovementImpliedPct)));
+    assert.ok(Number.isFinite(Number(moneyline.inputs?.dataWindowHours)));
+  });
+
   for (const test of tests) {
     await test();
   }
   console.log('All betScoringEngine tests passed.');
 }
-

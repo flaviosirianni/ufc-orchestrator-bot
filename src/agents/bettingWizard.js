@@ -626,6 +626,45 @@ function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now()) {
   return hints;
 }
 
+function mergeOddsEventRows(...lists) {
+  const rows = lists.flatMap((items) => (Array.isArray(items) ? items : []));
+  if (!rows.length) return [];
+  const merged = new Map();
+  for (const row of rows) {
+    const eventId = String(row?.eventId || '').trim();
+    const eventName = String(row?.eventName || '').trim();
+    const commence = String(row?.commenceTime || '').trim();
+    const home = String(row?.homeTeam || '').trim();
+    const away = String(row?.awayTeam || '').trim();
+    const key = eventId || `${normalise(eventName)}::${commence}::${normalise(home)}::${normalise(away)}`;
+    if (!key) continue;
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, row);
+      continue;
+    }
+
+    const currentUpdated = Date.parse(
+      String(current?.lastScoresSyncAt || current?.lastOddsSyncAt || current?.updatedAt || '')
+    );
+    const candidateUpdated = Date.parse(
+      String(row?.lastScoresSyncAt || row?.lastOddsSyncAt || row?.updatedAt || '')
+    );
+
+    if (
+      Number.isFinite(candidateUpdated) &&
+      (!Number.isFinite(currentUpdated) || candidateUpdated > currentUpdated)
+    ) {
+      merged.set(key, row);
+    } else if (!current?.scores && Array.isArray(row?.scores) && row.scores.length) {
+      merged.set(key, row);
+    } else if (current?.completed === true && row?.completed === false) {
+      merged.set(key, row);
+    }
+  }
+  return Array.from(merged.values());
+}
+
 function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
   const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
   if (!rows.length) return null;
@@ -635,7 +674,7 @@ function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
     const commenceMs = Date.parse(String(row?.commenceTime || ''));
     if (!Number.isFinite(commenceMs)) continue;
     const deltaHours = Math.abs(commenceMs - nowMs) / 3600000;
-    if (deltaHours > 12) continue;
+    if (deltaHours > 20) continue;
 
     const eventName = String(row?.eventName || '').trim();
     if (!eventName) continue;
@@ -646,10 +685,15 @@ function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
     const entry =
       grouped.get(groupKey) ||
       {
+        eventId: String(row?.eventId || '').trim() || null,
         eventName,
         eventDate: toIsoDateSafe(row?.commenceTime),
         minDeltaMs: Number.POSITIVE_INFINITY,
         fights: new Set(),
+        hasScores: false,
+        hasInProgressSignal: false,
+        latestSyncMs: 0,
+        hasCompletedSignal: false,
       };
 
     entry.minDeltaMs = Math.min(entry.minDeltaMs, Math.abs(commenceMs - nowMs));
@@ -658,22 +702,78 @@ function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
     if (home && away) {
       entry.fights.add(`${home} vs ${away}`);
     }
+    if (row?.completed === true) {
+      entry.hasCompletedSignal = true;
+    } else if (row?.completed === false) {
+      entry.hasInProgressSignal = true;
+    }
+    if (Array.isArray(row?.scores) && row.scores.length) {
+      entry.hasScores = true;
+    }
+    const syncMs =
+      Date.parse(String(row?.lastScoresSyncAt || row?.lastOddsSyncAt || row?.updatedAt || '')) || 0;
+    entry.latestSyncMs = Math.max(entry.latestSyncMs, syncMs);
+
     grouped.set(groupKey, entry);
   }
 
   const candidates = Array.from(grouped.values());
   if (!candidates.length) return null;
-  candidates.sort((a, b) => {
+
+  const scored = candidates.map((entry) => {
+    const minDeltaHours = entry.minDeltaMs / 3600000;
+    const eventDateDiff = entry.eventDate
+      ? Math.abs(
+          dateDiffInDays(
+            entry.eventDate,
+            new Date(nowMs).toISOString().slice(0, 10)
+          )
+        )
+      : Number.POSITIVE_INFINITY;
+    const freshnessHours =
+      entry.latestSyncMs > 0 ? (nowMs - entry.latestSyncMs) / 3600000 : Number.POSITIVE_INFINITY;
+
+    let score = 0;
+    score += Math.min(entry.fights.size, 8) * 2.2;
+    score += Math.max(0, 12 - minDeltaHours) * 2.1;
+    if (entry.hasScores) score += 20;
+    if (entry.hasInProgressSignal) score += 11;
+    if (entry.hasCompletedSignal && !entry.hasInProgressSignal && !entry.hasScores) score -= 8;
+    if (eventDateDiff <= 1) score += 9;
+    else if (eventDateDiff >= 3) score -= 6;
+    if (freshnessHours <= 3) score += 9;
+    else if (freshnessHours <= 8) score += 4;
+    else if (freshnessHours >= 30) score -= 4;
+
+    return {
+      ...entry,
+      confidenceScore: Number(clampNumber(score, 0, 100).toFixed(1)),
+      minDeltaHours,
+    };
+  });
+  scored.sort((a, b) => {
+    if (b.confidenceScore !== a.confidenceScore) {
+      return b.confidenceScore - a.confidenceScore;
+    }
     const fightsDiff = b.fights.size - a.fights.size;
     if (fightsDiff !== 0) return fightsDiff;
     return a.minDeltaMs - b.minDeltaMs;
   });
 
-  const best = candidates[0];
+  const best = scored[0];
   return {
+    eventId: best.eventId || null,
     eventName: best.eventName,
     eventDate: best.eventDate || null,
     fights: Array.from(best.fights).slice(0, 4),
+    confidenceScore: best.confidenceScore,
+    minDeltaHours: Number(best.minDeltaHours.toFixed(2)),
+    evidence: {
+      hasScores: Boolean(best.hasScores),
+      hasInProgressSignal: Boolean(best.hasInProgressSignal),
+      hasCompletedSignal: Boolean(best.hasCompletedSignal),
+      latestSyncAt: best.latestSyncMs > 0 ? new Date(best.latestSyncMs).toISOString() : null,
+    },
   };
 }
 
@@ -4283,14 +4383,40 @@ export function createBettingWizard({
       const nowMs = Date.now();
       const nextEventState = userStore?.getEventWatchState?.('next_event') || null;
 
-      const oddsWindowEvents = userStore?.listUpcomingOddsEvents
-        ? userStore.listUpcomingOddsEvents({
-            fromIso: new Date(nowMs - 8 * 3600000).toISOString(),
-            limit: 80,
-          })
-        : [];
-      const liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
-      const liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
+      const loadOddsLiveRows = () => {
+        const upcomingRows = userStore?.listUpcomingOddsEvents
+          ? userStore.listUpcomingOddsEvents({
+              fromIso: new Date(nowMs - 10 * 3600000).toISOString(),
+              limit: 120,
+            })
+          : [];
+        const recentRows = userStore?.listRecentOddsEvents
+          ? userStore.listRecentOddsEvents({
+              fromIso: new Date(nowMs - 20 * 3600000).toISOString(),
+              toIso: new Date(nowMs + 10 * 3600000).toISOString(),
+              limit: 180,
+              includeCompleted: true,
+            })
+          : [];
+        return mergeOddsEventRows(upcomingRows, recentRows);
+      };
+
+      let oddsWindowEvents = loadOddsLiveRows();
+      let liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
+      let liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
+      if (
+        (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
+        typeof userStore?.refreshLiveScores === 'function'
+      ) {
+        try {
+          await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
+          oddsWindowEvents = loadOddsLiveRows();
+          liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
+          liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
+        } catch (error) {
+          console.error('⚠️ live event score refresh failed:', error);
+        }
+      }
 
       let liveWebContext = null;
       if (typeof userStore?.resolveLiveEventContext === 'function') {
@@ -4311,12 +4437,37 @@ export function createBettingWizard({
         }
       }
 
-      const resolvedEventName =
-        String(liveWebContext?.eventName || '').trim() ||
-        String(liveOddsContext?.eventName || '').trim();
-      const resolvedEventDate =
-        toIsoDateSafe(liveWebContext?.date || '') ||
-        toIsoDateSafe(liveOddsContext?.eventDate || '');
+      const webEventName = String(liveWebContext?.eventName || '').trim();
+      const webEventDate = toIsoDateSafe(liveWebContext?.date || '');
+      const oddsEventName = String(liveOddsContext?.eventName || '').trim();
+      const oddsEventDate = toIsoDateSafe(liveOddsContext?.eventDate || '');
+      const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+      const webDistanceDays = webEventDate
+        ? Math.abs(dateDiffInDays(webEventDate, todayIso))
+        : Number.POSITIVE_INFINITY;
+      const oddsDistanceDays = oddsEventDate
+        ? Math.abs(dateDiffInDays(oddsEventDate, todayIso))
+        : Number.POSITIVE_INFINITY;
+      const webVsOddsDateGapDays =
+        webEventDate && oddsEventDate
+          ? Math.abs(dateDiffInDays(webEventDate, oddsEventDate))
+          : 0;
+      const oddsConfidence = Number(liveOddsContext?.confidenceScore || 0);
+
+      const preferOddsContext =
+        Boolean(oddsEventName) &&
+        (!webEventName ||
+          ((webVsOddsDateGapDays >= 2 || webDistanceDays > 1) &&
+            oddsDistanceDays <= 1 &&
+            oddsConfidence >= 58) ||
+          (oddsConfidence >= 80 && oddsDistanceDays <= 1));
+
+      const resolvedEventName = preferOddsContext
+        ? oddsEventName
+        : webEventName || oddsEventName;
+      const resolvedEventDate = preferOddsContext
+        ? oddsEventDate || webEventDate
+        : webEventDate || oddsEventDate;
 
       if (resolvedEventName) {
         const lines = [
@@ -4336,7 +4487,11 @@ export function createBettingWizard({
               .slice(0, 4)
               .map((fight) => `${fight.fighterA} vs ${fight.fighterB}`)
           : [];
-        const fightHints = webFights.length
+        const fightHints = preferOddsContext
+          ? Array.isArray(liveOddsContext?.fights) && liveOddsContext.fights.length
+            ? liveOddsContext.fights
+            : liveOddsHints
+          : webFights.length
           ? webFights
           : Array.isArray(liveOddsContext?.fights) && liveOddsContext.fights.length
           ? liveOddsContext.fights
@@ -4347,10 +4502,18 @@ export function createBettingWizard({
             lines.push(`${index + 1}. ${fightText}`);
           }
         }
+        if (preferOddsContext && webEventName && webEventName !== oddsEventName) {
+          lines.push(
+            '',
+            'Nota de reconciliacion: priorice odds/scores en tiempo real por discrepancia con la respuesta web.'
+          );
+        }
 
         lines.push(
           '',
-          liveWebContext?.source
+          preferOddsContext && liveOddsContext?.eventName
+            ? 'Fuente primaria: indice interno de odds/scores.'
+            : liveWebContext?.source
             ? `Fuente primaria: ${liveWebContext.source}.`
             : liveOddsContext?.eventName
             ? 'Fuente primaria: indice interno de odds/scores.'

@@ -1,7 +1,7 @@
 import '../core/env.js';
 
 const BET_SCORING_REASONING_VERSION =
-  process.env.BET_SCORING_REASONING_VERSION || 'v1_market_pack';
+  process.env.BET_SCORING_REASONING_VERSION || 'v2_market_pack_momentum';
 
 function normalizeText(value = '') {
   return String(value || '')
@@ -109,6 +109,49 @@ function average(values = []) {
   return valid.reduce((sum, value) => sum + Number(value), 0) / valid.length;
 }
 
+function stddev(values = []) {
+  const valid = (Array.isArray(values) ? values : []).filter((value) =>
+    Number.isFinite(Number(value))
+  );
+  if (!valid.length) return null;
+  const avg = average(valid);
+  if (!Number.isFinite(Number(avg))) return null;
+  const variance =
+    valid.reduce((sum, value) => sum + (Number(value) - avg) ** 2, 0) / valid.length;
+  return Math.sqrt(variance);
+}
+
+function rowTs(row = {}) {
+  return Date.parse(String(row?.fetchedAt || row?.sourceLastUpdate || '')) || 0;
+}
+
+function earliestByBookmaker(rows = []) {
+  const map = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const bookmaker = String(row?.bookmakerKey || row?.bookmakerTitle || '').trim();
+    if (!bookmaker) continue;
+    const key = `${bookmaker}::${String(row?.marketKey || '').trim()}`;
+    const ts = rowTs(row);
+    const current = map.get(key);
+    const currentTs = current ? rowTs(current) : Number.POSITIVE_INFINITY;
+    if (!current || ts <= currentTs) {
+      map.set(key, row);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function impliedProbabilityPctFromPair(selectedOdds, oppositeOdds) {
+  const sel = parseNumber(selectedOdds);
+  const opp = parseNumber(oppositeOdds);
+  if (!sel || !opp || sel <= 1 || opp <= 1) return null;
+  const invSel = 1 / sel;
+  const invOpp = 1 / opp;
+  const total = invSel + invOpp;
+  if (total <= 0) return null;
+  return (invSel / total) * 100;
+}
+
 function deriveRiskLevel({ recommendation = 'no_bet', confidencePct = 0, edgePct = 0, books = 0 } = {}) {
   if (recommendation === 'no_bet') return 'high';
   if (books < 2 || confidencePct < 58) return 'high';
@@ -179,13 +222,17 @@ function scoreMoneyline({
     : parseNumber(projection?.fighterBWinPct);
   const modelProb = modelProbability !== null ? clamp(modelProbability, 5, 95) : 50;
 
-  const h2hRows = latestByBookmaker(
-    (Array.isArray(oddsRows) ? oddsRows : []).filter(
-      (row) => String(row?.marketKey || '').trim().toLowerCase() === 'h2h'
-    )
+  const filteredH2hRows = (Array.isArray(oddsRows) ? oddsRows : []).filter(
+    (row) => String(row?.marketKey || '').trim().toLowerCase() === 'h2h'
   );
+  const h2hRows = latestByBookmaker(filteredH2hRows);
+  const h2hOpeningRows = earliestByBookmaker(filteredH2hRows);
   const selPrices = [];
   const oppPrices = [];
+  const openingSelPrices = [];
+  const openingOppPrices = [];
+  const freshnessTs = [];
+  const openingTs = [];
   const loser = namesMatch(winner, fighterA) ? fighterB : fighterA;
 
   for (const row of h2hRows) {
@@ -194,6 +241,18 @@ function scoreMoneyline({
     if (!selected || !opposite) continue;
     selPrices.push(selected);
     oppPrices.push(opposite);
+    const ts = rowTs(row);
+    if (ts > 0) freshnessTs.push(ts);
+  }
+
+  for (const row of h2hOpeningRows) {
+    const selected = getOutcomePrice(row, winner);
+    const opposite = getOppositePrice(row, winner, loser);
+    if (!selected || !opposite) continue;
+    openingSelPrices.push(selected);
+    openingOppPrices.push(opposite);
+    const ts = rowTs(row);
+    if (ts > 0) openingTs.push(ts);
   }
 
   if (!selPrices.length || !oppPrices.length) {
@@ -212,33 +271,108 @@ function scoreMoneyline({
 
   const avgSelectionOdds = average(selPrices);
   const avgOppositeOdds = average(oppPrices);
-  const impliedSelection = avgSelectionOdds && avgOppositeOdds
-    ? ((1 / avgSelectionOdds) / ((1 / avgSelectionOdds) + 1 / avgOppositeOdds)) * 100
-    : null;
+  const impliedSelection = impliedProbabilityPctFromPair(avgSelectionOdds, avgOppositeOdds);
   const edge = impliedSelection === null ? 0 : modelProb - impliedSelection;
   const books = Math.min(selPrices.length, oppPrices.length);
+
+  const openingSelectionOdds = average(openingSelPrices);
+  const openingOppositeOdds = average(openingOppPrices);
+  const openingImplied = impliedProbabilityPctFromPair(openingSelectionOdds, openingOppositeOdds);
+
+  const lineMovementOdds =
+    Number.isFinite(Number(avgSelectionOdds)) && Number.isFinite(Number(openingSelectionOdds))
+      ? Number(avgSelectionOdds) - Number(openingSelectionOdds)
+      : null;
+  const lineMovementPct =
+    Number.isFinite(Number(avgSelectionOdds)) &&
+    Number.isFinite(Number(openingSelectionOdds)) &&
+    Number(openingSelectionOdds) > 1
+      ? ((Number(openingSelectionOdds) - Number(avgSelectionOdds)) /
+          Number(openingSelectionOdds)) *
+        100
+      : null;
+  const lineMovementImpliedPct =
+    impliedSelection !== null && openingImplied !== null
+      ? impliedSelection - openingImplied
+      : null;
+
+  const selStddev = stddev(selPrices);
+  const agreementPct =
+    selStddev === null
+      ? null
+      : clamp(100 - (selStddev / Math.max(average(selPrices) || 1.01, 1.01)) * 100 * 2.6, 0, 100);
+
+  const booksAdj = books >= 4 ? 2 : books <= 1 ? -4 : 0;
+  const movementAdj =
+    lineMovementPct === null ? 0 : clamp(Number(lineMovementPct) * 0.55, -5, 5);
+  const dispersionAdj =
+    selStddev === null ? 0 : selStddev <= 0.05 ? 1.2 : selStddev <= 0.1 ? 0 : selStddev <= 0.18 ? -1.4 : -3;
+  const antiMovePenalty =
+    edge > 0 && Number.isFinite(Number(lineMovementPct)) && Number(lineMovementPct) <= -2 ? -2.2 : 0;
+
   const confidence = clamp(
-    Number(projection?.confidencePct || 55) + Math.min(Math.abs(edge), 10) * 0.7 - (books < 3 ? 4 : 0),
-    45,
-    92
+    Number(projection?.confidencePct || 55) +
+      Math.min(Math.abs(edge), 12) * 0.65 +
+      booksAdj +
+      movementAdj +
+      dispersionAdj +
+      antiMovePenalty,
+    43,
+    94
   );
 
   let recommendation = 'no_bet';
   let noBetReason = 'insufficient_edge';
-  if (edge >= 4 && confidence >= 60) {
+  let requiredEdgeBet = 4;
+  let requiredConfidenceBet = 60;
+  let requiredEdgeLean = 1.5;
+  let requiredConfidenceLean = 56;
+
+  if (Number.isFinite(Number(lineMovementPct))) {
+    if (Number(lineMovementPct) <= -3) {
+      requiredEdgeBet += 1.25;
+      requiredConfidenceBet += 2;
+      requiredEdgeLean += 0.4;
+      requiredConfidenceLean += 1.5;
+    } else if (Number(lineMovementPct) >= 2.5) {
+      requiredEdgeBet = Math.max(3.1, requiredEdgeBet - 0.6);
+      requiredConfidenceBet = Math.max(57, requiredConfidenceBet - 1);
+    }
+  }
+  if (selStddev !== null && selStddev >= 0.16) {
+    requiredEdgeBet += 0.8;
+    requiredEdgeLean += 0.4;
+  }
+
+  if (edge >= requiredEdgeBet && confidence >= requiredConfidenceBet) {
     recommendation = 'bet';
     noBetReason = null;
-  } else if (edge >= 1.5 && confidence >= 56) {
+  } else if (edge >= requiredEdgeLean && confidence >= requiredConfidenceLean) {
     recommendation = 'lean';
     noBetReason = null;
   }
 
   let suggestedStakeUnits = null;
   if (recommendation === 'bet') {
-    suggestedStakeUnits = clamp(1 + edge * 0.18 + (confidence - 58) * 0.05, 1, 4.5);
+    suggestedStakeUnits = clamp(
+      1 + edge * 0.17 + (confidence - 58) * 0.05 + (movementAdj > 0 ? 0.15 : -0.1),
+      0.9,
+      4.5
+    );
   } else if (recommendation === 'lean') {
-    suggestedStakeUnits = clamp(0.75 + edge * 0.1, 0.75, 2);
+    suggestedStakeUnits = clamp(
+      0.72 + edge * 0.1 + (movementAdj > 0 ? 0.08 : 0),
+      0.6,
+      2
+    );
   }
+
+  const latestTs = freshnessTs.length ? Math.max(...freshnessTs) : null;
+  const oldestTs = openingTs.length ? Math.min(...openingTs) : null;
+  const dataWindowHours =
+    latestTs && oldestTs && latestTs >= oldestTs
+      ? Number(((latestTs - oldestTs) / 3600000).toFixed(2))
+      : null;
 
   return {
     ...base,
@@ -264,6 +398,21 @@ function scoreMoneyline({
       projectionConfidencePct: projection?.confidencePct || null,
       projectedWinner: winner,
       averageOppositeOdds: formatOdds(avgOppositeOdds),
+      openingConsensusOdds: formatOdds(openingSelectionOdds),
+      openingImpliedProbabilityPct:
+        openingImplied === null ? null : Number(openingImplied.toFixed(2)),
+      lineMovementOdds:
+        lineMovementOdds === null ? null : Number(Number(lineMovementOdds).toFixed(3)),
+      lineMovementPct:
+        lineMovementPct === null ? null : Number(Number(lineMovementPct).toFixed(2)),
+      lineMovementImpliedPct:
+        lineMovementImpliedPct === null
+          ? null
+          : Number(Number(lineMovementImpliedPct).toFixed(2)),
+      marketStddevOdds: selStddev === null ? null : Number(selStddev.toFixed(4)),
+      marketAgreementPct:
+        agreementPct === null ? null : Number(Number(agreementPct).toFixed(1)),
+      dataWindowHours,
     },
   };
 }
