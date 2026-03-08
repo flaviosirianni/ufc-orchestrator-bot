@@ -1510,6 +1510,79 @@ export async function runBettingWizardTests() {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
       responseWithText('Pick principal: Max Holloway ML.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_326_2026-03-07',
+            eventName: 'UFC 326',
+            eventDateUtc: '2026-03-07',
+            updatedAt: '2026-03-07T20:00:00Z',
+          };
+        },
+        listLatestBetScoringForEvent() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-07',
+              fightId: 'fight_2',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              marketKey: 'moneyline',
+              selection: 'Max Holloway',
+              recommendation: 'bet',
+              edgePct: 5.4,
+              confidencePct: 69,
+              modelProbabilityPct: 58.2,
+              impliedProbabilityPct: 52.8,
+              riskLevel: 'medium',
+              suggestedStakeUnits: 1.7,
+              booksCount: 2,
+              inputs: {
+                lineMovementPct: -6.2,
+                marketAgreementPct: 48.5,
+                dataWindowHours: 6.4,
+              },
+            },
+          ];
+        },
+        getLatestOddsSnapshot() {
+          return null;
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick para esta pelea, Holloway @2.10', {
+      chatId: 'chat-deterministic-hard-gate-1',
+      originalMessage: 'dame un pick para esta pelea, Holloway @2.10',
+      resolution: {
+        resolvedMessage: 'dame un pick para esta pelea, Holloway @2.10',
+        resolvedFight: {
+          fightId: 'fight_2',
+          fighterA: 'Max Holloway',
+          fighterB: 'Charles Oliveira',
+        },
+      },
+    });
+
+    assert.match(result.reply, /Ajuste deterministico \(cuota de tu bookie\)/i);
+    assert.match(result.reply, /Veredicto final: ⛔ NO_BET/i);
+    assert.match(result.reply, /Gate mercado:/i);
+    assert.match(result.reply, /Señales mercado:/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal: Max Holloway ML.'),
       responseWithText(
         '{"eventName":"UFC 326","fighterA":"Max Holloway","fighterB":"Charles Oliveira","moneylineA":2.10,"moneylineB":1.75,"bookmaker":"bet365"}'
       ),

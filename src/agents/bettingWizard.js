@@ -1331,6 +1331,109 @@ function resolveUserOddsForDeterministicAdjustment({
 }
 
 function computeDeterministicAdjustedScoring(baseRow = {}, userOdds = null) {
+  const toFinite = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const parseInputs = (row) => {
+    const raw = row?.inputs;
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  };
+  const applyMarketGuardrails = ({
+    recommendation = 'no_bet',
+    edgePct = 0,
+    confidencePct = 0,
+    row = {},
+  } = {}) => {
+    const baseRecommendation = String(recommendation || 'no_bet').trim().toLowerCase();
+    let finalRecommendation = baseRecommendation;
+    let forcedNoBetReason = null;
+    const notes = [];
+
+    const inputs = parseInputs(row);
+    const booksCount = toFinite(row?.booksCount);
+    const lineMovementPct = toFinite(inputs?.lineMovementPct);
+    const marketAgreementPct = toFinite(inputs?.marketAgreementPct);
+    const dataWindowHours = toFinite(inputs?.dataWindowHours);
+
+    if (Number.isFinite(booksCount) && booksCount < 2 && finalRecommendation !== 'no_bet') {
+      finalRecommendation = 'no_bet';
+      forcedNoBetReason = 'consenso insuficiente (<2 books)';
+      notes.push('Consenso insuficiente entre books.');
+    }
+
+    if (Number.isFinite(marketAgreementPct)) {
+      if (marketAgreementPct < 50 && finalRecommendation !== 'no_bet') {
+        finalRecommendation = 'no_bet';
+        forcedNoBetReason = forcedNoBetReason || 'mercado sin consenso suficiente';
+        notes.push('Dispersion alta entre books.');
+      } else if (marketAgreementPct < 62 && finalRecommendation === 'bet') {
+        finalRecommendation = 'lean';
+        notes.push('Consenso medio-bajo: BET degradado a LEAN.');
+      }
+    }
+
+    if (Number.isFinite(lineMovementPct)) {
+      if (lineMovementPct <= -5) {
+        if (finalRecommendation === 'bet') {
+          finalRecommendation = 'lean';
+          notes.push('Linea fuertemente en contra: BET degradado a LEAN.');
+        }
+        if (
+          finalRecommendation === 'lean' &&
+          (Number(edgePct) < 3.5 || Number(confidencePct) < 64)
+        ) {
+          finalRecommendation = 'no_bet';
+          forcedNoBetReason = forcedNoBetReason || 'linea en contra fuerte';
+          notes.push('Linea en contra + edge justo: NO_BET.');
+        }
+      } else if (lineMovementPct <= -3 && finalRecommendation === 'bet') {
+        finalRecommendation = 'lean';
+        notes.push('Linea en contra moderada: BET degradado a LEAN.');
+      }
+    }
+
+    if (Number.isFinite(dataWindowHours)) {
+      if (dataWindowHours < 0.5 && finalRecommendation === 'bet') {
+        finalRecommendation = 'lean';
+        notes.push('Ventana de datos corta: BET degradado a LEAN.');
+      }
+      if (
+        dataWindowHours < 0.25 &&
+        finalRecommendation === 'lean' &&
+        Number(edgePct) < 3
+      ) {
+        finalRecommendation = 'no_bet';
+        forcedNoBetReason = forcedNoBetReason || 'muestra de mercado insuficiente';
+        notes.push('Muestra temporal insuficiente para ejecutar.');
+      }
+    }
+
+    return {
+      baseRecommendation,
+      finalRecommendation,
+      changedRecommendation: finalRecommendation !== baseRecommendation,
+      forcedNoBetReason,
+      notes,
+      signals: {
+        booksCount,
+        lineMovementPct,
+        marketAgreementPct,
+        dataWindowHours,
+      },
+    };
+  };
+
   const odds = toOddsNumber(userOdds);
   if (!odds) return null;
 
@@ -1363,6 +1466,21 @@ function computeDeterministicAdjustedScoring(baseRow = {}, userOdds = null) {
     reason = null;
   }
 
+  const guardrail = applyMarketGuardrails({
+    recommendation,
+    edgePct: adjustedEdge,
+    confidencePct: adjustedConfidence,
+    row: baseRow,
+  });
+  if (guardrail.changedRecommendation) {
+    recommendation = guardrail.finalRecommendation;
+    if (recommendation === 'no_bet') {
+      reason = guardrail.forcedNoBetReason || reason || 'bloqueo por guardrails de mercado';
+    } else {
+      reason = null;
+    }
+  }
+
   let suggestedStakeUnits = null;
   if (recommendation !== 'no_bet') {
     const baseline = Number(baseRow?.suggestedStakeUnits);
@@ -1373,7 +1491,16 @@ function computeDeterministicAdjustedScoring(baseRow = {}, userOdds = null) {
         : recommendation === 'bet'
         ? 1.2 + adjustedEdge * 0.08
         : 0.75 + adjustedEdge * 0.05;
-    suggestedStakeUnits = clampNumber(raw, recommendation === 'bet' ? 1 : 0.5, recommendation === 'bet' ? 4.5 : 2.2);
+    const maxByRecommendation = recommendation === 'bet' ? 4.5 : 2.2;
+    const maxWithGuardrail =
+      guardrail.changedRecommendation && recommendation === 'lean'
+        ? Math.min(maxByRecommendation, 1.6)
+        : maxByRecommendation;
+    suggestedStakeUnits = clampNumber(
+      raw,
+      recommendation === 'bet' ? 1 : 0.5,
+      maxWithGuardrail
+    );
   }
 
   return {
@@ -1386,6 +1513,14 @@ function computeDeterministicAdjustedScoring(baseRow = {}, userOdds = null) {
     noBetReason: reason,
     suggestedStakeUnits:
       suggestedStakeUnits === null ? null : Number(suggestedStakeUnits.toFixed(2)),
+    guardrails: {
+      changedRecommendation: guardrail.changedRecommendation,
+      baseRecommendation: guardrail.baseRecommendation,
+      finalRecommendation: guardrail.finalRecommendation,
+      forcedNoBetReason: guardrail.forcedNoBetReason || null,
+      notes: guardrail.notes,
+      signals: guardrail.signals,
+    },
   };
 }
 
@@ -1464,6 +1599,39 @@ function enforceDeterministicOddsAdjustment({
     `- Edge ajustado: ${adjusted.edgePct >= 0 ? '+' : ''}${adjusted.edgePct.toFixed(2)}%`,
     `- Veredicto final: ${deterministicRecommendationLabel(adjusted.recommendation)}`,
   ];
+
+  const movementPct = Number(adjusted?.guardrails?.signals?.lineMovementPct);
+  const agreementPct = Number(adjusted?.guardrails?.signals?.marketAgreementPct);
+  const booksCount = Number(adjusted?.guardrails?.signals?.booksCount);
+  const hasSignalLine =
+    Number.isFinite(movementPct) ||
+    Number.isFinite(agreementPct) ||
+    Number.isFinite(booksCount);
+  if (hasSignalLine) {
+    const parts = [];
+    if (Number.isFinite(movementPct)) {
+      parts.push(
+        `line move ${movementPct >= 0 ? '+' : ''}${movementPct.toFixed(2)}%`
+      );
+    }
+    if (Number.isFinite(agreementPct)) {
+      parts.push(`consenso ${agreementPct.toFixed(1)}%`);
+    }
+    if (Number.isFinite(booksCount)) {
+      parts.push(`books ${booksCount.toFixed(0)}`);
+    }
+    lines.push(`- Señales mercado: ${parts.join(' | ')}`);
+  }
+  if (adjusted?.guardrails?.changedRecommendation) {
+    lines.push(
+      `- Gate mercado: ${deterministicRecommendationLabel(
+        adjusted.guardrails.baseRecommendation
+      )} -> ${deterministicRecommendationLabel(adjusted.guardrails.finalRecommendation)}`
+    );
+    if (Array.isArray(adjusted?.guardrails?.notes) && adjusted.guardrails.notes.length) {
+      lines.push(`- Motivo gate: ${adjusted.guardrails.notes.join(' ')}`);
+    }
+  }
 
   if (adjusted.recommendation === 'no_bet') {
     lines.push(`- Motivo: ${adjusted.noBetReason || 'sin edge suficiente a precio actual'}.`);
