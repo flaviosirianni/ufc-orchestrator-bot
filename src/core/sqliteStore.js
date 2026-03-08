@@ -215,6 +215,90 @@ function initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_mp_processed_user_time
       ON mp_processed_payments (telegram_user_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS event_watch_state (
+      watch_key TEXT PRIMARY KEY,
+      event_id TEXT,
+      event_name TEXT NOT NULL,
+      event_date_utc TEXT,
+      event_status TEXT,
+      source_primary TEXT,
+      source_secondary TEXT,
+      main_card_json TEXT NOT NULL,
+      monitored_fighters_json TEXT NOT NULL,
+      last_reconciled_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS fighter_news_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      fighter_slug TEXT NOT NULL,
+      fighter_name_display TEXT NOT NULL,
+      title TEXT NOT NULL,
+      url TEXT NOT NULL,
+      source_domain TEXT,
+      published_at TEXT,
+      fetched_at TEXT NOT NULL,
+      summary TEXT,
+      impact_level TEXT NOT NULL,
+      impact_score REAL NOT NULL,
+      confidence_score REAL NOT NULL,
+      tags_json TEXT,
+      content_hash TEXT NOT NULL,
+      dedupe_key TEXT NOT NULL,
+      is_relevant INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_news_dedupe_key
+      ON fighter_news_items (dedupe_key);
+    CREATE INDEX IF NOT EXISTS idx_news_event_fighter_time
+      ON fighter_news_items (event_id, fighter_slug, fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_news_impact_time
+      ON fighter_news_items (impact_level, fetched_at DESC);
+
+    CREATE TABLE IF NOT EXISTS fight_projection_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      fight_id TEXT NOT NULL,
+      fighter_a TEXT NOT NULL,
+      fighter_b TEXT NOT NULL,
+      predicted_winner TEXT,
+      predicted_method TEXT,
+      confidence_pct REAL NOT NULL,
+      key_factors_json TEXT NOT NULL,
+      relevant_news_ids_json TEXT,
+      reasoning_version TEXT NOT NULL,
+      changed_from_prev INTEGER NOT NULL DEFAULT 0,
+      change_summary TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_projection_event_fight_time
+      ON fight_projection_snapshots (event_id, fight_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS user_intel_prefs (
+      telegram_user_id TEXT PRIMARY KEY,
+      news_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+      alert_min_impact TEXT NOT NULL DEFAULT 'high',
+      confidence_delta_threshold REAL NOT NULL DEFAULT 8,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS intel_alert_dispatch_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      alert_type TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      fight_id TEXT,
+      news_id INTEGER,
+      projection_snapshot_id INTEGER,
+      dedupe_key TEXT NOT NULL,
+      dispatched_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_alert_dispatch_dedupe
+      ON intel_alert_dispatch_log (telegram_user_id, dedupe_key);
   `);
 }
 
@@ -1811,6 +1895,275 @@ export function upsertFightHistoryCacheSnapshot(snapshot = {}, cacheKey = 'defau
   );
 
   return getFightHistoryCacheSnapshot(cacheKey);
+}
+
+function parseEventWatchStateRow(row) {
+  if (!row) return null;
+  const mainCard = parseJsonSafe(row.main_card_json, []);
+  const monitoredFighters = parseJsonSafe(row.monitored_fighters_json, []);
+  return {
+    watchKey: row.watch_key || 'next_event',
+    eventId: row.event_id || null,
+    eventName: row.event_name || null,
+    eventDateUtc: row.event_date_utc || null,
+    eventStatus: row.event_status || null,
+    sourcePrimary: row.source_primary || null,
+    sourceSecondary: row.source_secondary || null,
+    mainCard: Array.isArray(mainCard) ? mainCard : [],
+    monitoredFighters: Array.isArray(monitoredFighters) ? monitoredFighters : [],
+    lastReconciledAt: row.last_reconciled_at || null,
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function getEventWatchState(watchKey = 'next_event') {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT watch_key, event_id, event_name, event_date_utc, event_status,
+              source_primary, source_secondary, main_card_json, monitored_fighters_json,
+              last_reconciled_at, updated_at
+       FROM event_watch_state
+       WHERE watch_key = ?`
+    )
+    .get(String(watchKey || 'next_event'));
+  return parseEventWatchStateRow(row);
+}
+
+export function upsertEventWatchState(snapshot = {}, watchKey = 'next_event') {
+  const db = getDb();
+  const ts = nowIso();
+  const mainCard = Array.isArray(snapshot.mainCard) ? snapshot.mainCard : [];
+  const monitoredFighters = Array.isArray(snapshot.monitoredFighters)
+    ? snapshot.monitoredFighters
+    : [];
+
+  db.prepare(
+    `INSERT INTO event_watch_state
+      (watch_key, event_id, event_name, event_date_utc, event_status,
+       source_primary, source_secondary, main_card_json, monitored_fighters_json,
+       last_reconciled_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(watch_key) DO UPDATE SET
+       event_id = excluded.event_id,
+       event_name = excluded.event_name,
+       event_date_utc = excluded.event_date_utc,
+       event_status = excluded.event_status,
+       source_primary = excluded.source_primary,
+       source_secondary = excluded.source_secondary,
+       main_card_json = excluded.main_card_json,
+       monitored_fighters_json = excluded.monitored_fighters_json,
+       last_reconciled_at = excluded.last_reconciled_at,
+       updated_at = excluded.updated_at`
+  ).run(
+    String(watchKey || 'next_event'),
+    snapshot.eventId || null,
+    snapshot.eventName || 'Unknown UFC Event',
+    snapshot.eventDateUtc || null,
+    snapshot.eventStatus || null,
+    snapshot.sourcePrimary || null,
+    snapshot.sourceSecondary || null,
+    JSON.stringify(mainCard),
+    JSON.stringify(monitoredFighters),
+    snapshot.lastReconciledAt || ts,
+    ts
+  );
+
+  return getEventWatchState(watchKey);
+}
+
+function normalizeImpactLevel(value = 'high') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'low' || raw === 'medium' || raw === 'high') return raw;
+  return 'high';
+}
+
+function parseFighterNewsRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    eventId: row.event_id || null,
+    fighterSlug: row.fighter_slug || null,
+    fighterName: row.fighter_name_display || null,
+    title: row.title || null,
+    url: row.url || null,
+    sourceDomain: row.source_domain || null,
+    publishedAt: row.published_at || null,
+    fetchedAt: row.fetched_at || null,
+    summary: row.summary || null,
+    impactLevel: row.impact_level || 'low',
+    impactScore: Number(row.impact_score) || 0,
+    confidenceScore: Number(row.confidence_score) || 0,
+    tags: parseJsonSafe(row.tags_json, []),
+    contentHash: row.content_hash || null,
+    dedupeKey: row.dedupe_key || null,
+    isRelevant: Boolean(row.is_relevant),
+  };
+}
+
+export function insertFighterNewsItems(items = []) {
+  const db = getDb();
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    return { insertedCount: 0 };
+  }
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO fighter_news_items
+      (event_id, fighter_slug, fighter_name_display, title, url, source_domain,
+       published_at, fetched_at, summary, impact_level, impact_score, confidence_score,
+       tags_json, content_hash, dedupe_key, is_relevant)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const run = db.transaction((rows) => {
+    let insertedCount = 0;
+    for (const row of rows) {
+      const result = insert.run(
+        row.eventId || 'unknown_event',
+        row.fighterSlug || null,
+        row.fighterNameDisplay || null,
+        row.title || null,
+        row.url || null,
+        row.sourceDomain || null,
+        row.publishedAt || null,
+        row.fetchedAt || nowIso(),
+        row.summary || null,
+        normalizeImpactLevel(row.impactLevel || 'low'),
+        Number(row.impactScore) || 0,
+        Number(row.confidenceScore) || 0,
+        JSON.stringify(Array.isArray(row.tags) ? row.tags : []),
+        row.contentHash || null,
+        row.dedupeKey || null,
+        row.isRelevant ? 1 : 0
+      );
+      if (Number(result.changes) > 0) {
+        insertedCount += 1;
+      }
+    }
+    return { insertedCount };
+  });
+
+  return run(list);
+}
+
+function impactLevelsForMin(minImpact = 'medium') {
+  const level = normalizeImpactLevel(minImpact);
+  if (level === 'low') return ['low', 'medium', 'high'];
+  if (level === 'medium') return ['medium', 'high'];
+  return ['high'];
+}
+
+export function listLatestRelevantNews({
+  eventId = null,
+  limit = 12,
+  minImpact = 'medium',
+} = {}) {
+  const db = getDb();
+  const levels = impactLevelsForMin(minImpact);
+  const max = Math.max(1, Number(limit) || 12);
+
+  const placeholders = levels.map(() => '?').join(', ');
+  const params = [];
+  let where = `is_relevant = 1 AND impact_level IN (${placeholders})`;
+  params.push(...levels);
+  if (eventId) {
+    where += ' AND event_id = ?';
+    params.push(String(eventId));
+  }
+  params.push(max);
+
+  const rows = db
+    .prepare(
+      `SELECT id, event_id, fighter_slug, fighter_name_display, title, url, source_domain,
+              published_at, fetched_at, summary, impact_level, impact_score, confidence_score,
+              tags_json, content_hash, dedupe_key, is_relevant
+       FROM fighter_news_items
+       WHERE ${where}
+       ORDER BY COALESCE(published_at, fetched_at) DESC, id DESC
+       LIMIT ?`
+    )
+    .all(...params);
+
+  return rows.map(parseFighterNewsRow).filter(Boolean);
+}
+
+export function getUserIntelPrefs(userId) {
+  if (!userId) return null;
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT telegram_user_id, news_alerts_enabled, alert_min_impact,
+              confidence_delta_threshold, updated_at
+       FROM user_intel_prefs
+       WHERE telegram_user_id = ?`
+    )
+    .get(String(userId));
+
+  if (!row) {
+    return {
+      telegramUserId: String(userId),
+      newsAlertsEnabled: true,
+      alertMinImpact: 'high',
+      confidenceDeltaThreshold: 8,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    telegramUserId: String(row.telegram_user_id),
+    newsAlertsEnabled: Boolean(row.news_alerts_enabled),
+    alertMinImpact: normalizeImpactLevel(row.alert_min_impact || 'high'),
+    confidenceDeltaThreshold: Number(row.confidence_delta_threshold) || 8,
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function updateUserIntelPrefs(userId, updates = {}) {
+  if (!userId) return null;
+  const db = getDb();
+  const current = getUserIntelPrefs(userId) || {
+    newsAlertsEnabled: true,
+    alertMinImpact: 'high',
+    confidenceDeltaThreshold: 8,
+  };
+  const ts = nowIso();
+
+  const next = {
+    newsAlertsEnabled:
+      updates.newsAlertsEnabled === undefined
+        ? current.newsAlertsEnabled
+        : Boolean(updates.newsAlertsEnabled),
+    alertMinImpact:
+      updates.alertMinImpact === undefined
+        ? current.alertMinImpact
+        : normalizeImpactLevel(updates.alertMinImpact),
+    confidenceDeltaThreshold:
+      updates.confidenceDeltaThreshold === undefined
+        ? Number(current.confidenceDeltaThreshold) || 8
+        : Number.isFinite(Number(updates.confidenceDeltaThreshold))
+        ? Number(updates.confidenceDeltaThreshold)
+        : Number(current.confidenceDeltaThreshold) || 8,
+  };
+
+  db.prepare(
+    `INSERT INTO user_intel_prefs
+      (telegram_user_id, news_alerts_enabled, alert_min_impact, confidence_delta_threshold, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET
+       news_alerts_enabled = excluded.news_alerts_enabled,
+       alert_min_impact = excluded.alert_min_impact,
+       confidence_delta_threshold = excluded.confidence_delta_threshold,
+       updated_at = excluded.updated_at`
+  ).run(
+    String(userId),
+    next.newsAlertsEnabled ? 1 : 0,
+    next.alertMinImpact,
+    next.confidenceDeltaThreshold,
+    ts
+  );
+
+  return getUserIntelPrefs(userId);
 }
 
 export function getDbPath() {

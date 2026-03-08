@@ -62,6 +62,12 @@ const PICK_COMMITTEE_MIN_CONFIDENCE = Number(
 const PICK_COMMITTEE_MAX_PENALTY = Number(
   process.env.BETTING_MAX_CONFIDENCE_PENALTY ?? '45'
 );
+const EVENT_INTEL_NEWS_USER_LIMIT = Number(process.env.EVENT_INTEL_NEWS_USER_LIMIT ?? '8');
+const EVENT_INTEL_PROJECTION_NEWS_LIMIT = Number(
+  process.env.EVENT_INTEL_PROJECTION_NEWS_LIMIT ?? '80'
+);
+const EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT =
+  process.env.EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT || 'medium';
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -406,6 +412,190 @@ function hasCreditSignals(message = '') {
   return /\b(credito|creditos|credits|saldo|recarga|cargar creditos|topup|packs?)\b/.test(
     text
   );
+}
+
+function hasLatestNewsSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(ultimas novedades|ultimas noticias|novedades|noticias relevantes|latest news|news)\b/.test(
+    text
+  ) && /\b(ufc|evento|proximo|peleador|peleadores)\b/.test(text);
+}
+
+function hasEventProjectionSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  return /\b(proyeccion|proyecciones|prediccion|predicciones|que crees que va a pasar|evento)\b/.test(
+    text
+  ) && /\b(ufc|evento|proximo|pelea|peleas)\b/.test(text);
+}
+
+function parseNewsAlertsIntent(message = '') {
+  const text = normalise(message);
+  if (!text || !/\b(alerta|alertas)\b/.test(text)) {
+    return null;
+  }
+
+  const wantsStatus = /\b(estado|status|como estan|como quedaron)\b/.test(text);
+  const wantsEnable = /\b(activar|activa|encender|habilitar|on)\b/.test(text);
+  const wantsDisable = /\b(desactivar|desactiva|apagar|off|silenciar)\b/.test(text);
+  const wantsToggle = /\b(toggle|cambiar)\b/.test(text);
+
+  if (!wantsStatus && !wantsEnable && !wantsDisable && !wantsToggle) {
+    return { type: 'status' };
+  }
+  if (wantsEnable) {
+    return { type: 'set', enabled: true };
+  }
+  if (wantsDisable) {
+    return { type: 'set', enabled: false };
+  }
+  if (wantsToggle) {
+    return { type: 'toggle' };
+  }
+  return { type: 'status' };
+}
+
+function normalizeImpactBucket(value = 'medium') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'high' || raw === 'medium' || raw === 'low') return raw;
+  if (raw === 'alto' || raw === 'alta') return 'high';
+  if (raw === 'medio' || raw === 'media') return 'medium';
+  if (raw === 'bajo' || raw === 'baja') return 'low';
+  return 'medium';
+}
+
+function impactRank(level = 'medium') {
+  const normalized = normalizeImpactBucket(level);
+  if (normalized === 'high') return 3;
+  if (normalized === 'medium') return 2;
+  return 1;
+}
+
+function impactWeight(level = 'medium') {
+  const normalized = normalizeImpactBucket(level);
+  if (normalized === 'high') return 18;
+  if (normalized === 'medium') return 9;
+  return 4;
+}
+
+function formatImpactBadge(level = 'medium') {
+  const normalized = normalizeImpactBucket(level);
+  if (normalized === 'high') return '🔴 alta';
+  if (normalized === 'medium') return '🟠 media';
+  return '🟢 baja';
+}
+
+function toFighterSlug(name = '') {
+  return normalise(name)
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function textMentionsFighter(text = '', fighterName = '') {
+  const normalizedText = normalise(text);
+  const normalizedFighter = normalise(fighterName);
+  if (!normalizedText || !normalizedFighter) return false;
+  if (normalizedText.includes(normalizedFighter)) return true;
+  const surname = normalizedFighter.split(/\s+/).filter(Boolean).slice(-1)[0] || '';
+  if (surname.length >= 4 && normalizedText.includes(surname)) return true;
+  return false;
+}
+
+function inferNewsDirection(title = '') {
+  const text = normalise(title);
+  if (!text) return 0;
+  const negativeSignals =
+    /\b(injury|injured|out of|out for|withdraw|withdrawn|replacement|replaced|miss weight|weight miss|hospital|suspend|suspended|visa issue|cancel|cancelled|failed weigh|medical issue)\b/;
+  const positiveSignals =
+    /\b(cleared|healthy|ready|in shape|great camp|looks sharp|on weight|fully fit)\b/;
+  if (negativeSignals.test(text)) return -1;
+  if (positiveSignals.test(text)) return 1;
+  return 0;
+}
+
+function newsItemTargetsFighter(item = {}, fighterName = '') {
+  const slug = String(item?.fighterSlug || '').trim().toLowerCase();
+  const targetSlug = toFighterSlug(fighterName);
+  if (slug && targetSlug && slug === targetSlug) return true;
+  const text = [item?.fighterName, item?.title, item?.summary].filter(Boolean).join(' ');
+  return textMentionsFighter(text, fighterName);
+}
+
+function compareNewsPriority(a, b) {
+  const impactDiff = impactRank(b?.impactLevel) - impactRank(a?.impactLevel);
+  if (impactDiff !== 0) return impactDiff;
+  const confidenceDiff = Number(b?.confidenceScore || 0) - Number(a?.confidenceScore || 0);
+  if (confidenceDiff !== 0) return confidenceDiff;
+  const timeA = Date.parse(String(a?.publishedAt || a?.fetchedAt || '')) || 0;
+  const timeB = Date.parse(String(b?.publishedAt || b?.fetchedAt || '')) || 0;
+  return timeB - timeA;
+}
+
+function formatEventDateLabel(eventDateUtc = '', timezone = DEFAULT_USER_TIMEZONE) {
+  const raw = String(eventDateUtc || '').trim();
+  if (!raw) return 'N/D';
+  const isoLike = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00Z` : raw;
+  return formatIsoForUser(isoLike, timezone);
+}
+
+function buildFightProjection({ fight = {}, newsItems = [] } = {}) {
+  const fighterA = String(fight?.fighterA || '').trim();
+  const fighterB = String(fight?.fighterB || '').trim();
+  const candidates = Array.isArray(newsItems) ? newsItems : [];
+
+  let scoreA = 0;
+  let scoreB = 0;
+  const evidence = [];
+
+  for (const item of candidates) {
+    const hitsA = newsItemTargetsFighter(item, fighterA);
+    const hitsB = newsItemTargetsFighter(item, fighterB);
+    if (!hitsA && !hitsB) continue;
+
+    const direction = inferNewsDirection(item?.title || '');
+    const confidenceFactor = clampNumber(Number(item?.confidenceScore || 0), 35, 100) / 100;
+    const weight = impactWeight(item?.impactLevel) * confidenceFactor;
+
+    if (direction < 0) {
+      if (hitsA && !hitsB) scoreB += weight;
+      if (hitsB && !hitsA) scoreA += weight;
+    } else if (direction > 0) {
+      if (hitsA && !hitsB) scoreA += weight * 0.6;
+      if (hitsB && !hitsA) scoreB += weight * 0.6;
+    } else {
+      if (hitsA && !hitsB) scoreA += weight * 0.12;
+      if (hitsB && !hitsA) scoreB += weight * 0.12;
+    }
+
+    evidence.push(item);
+  }
+
+  const diff = scoreA - scoreB;
+  const absDiff = Math.abs(diff);
+  let projectedWinner = null;
+  let confidence = evidence.length ? 53 : 50;
+  let scenario = 'Pelea pareja con la intel disponible.';
+
+  if (absDiff >= 4) {
+    projectedWinner = diff > 0 ? fighterA : fighterB;
+    confidence = clampNumber(56 + absDiff * 1.3, 56, 84);
+    if (absDiff >= 12) {
+      scenario = `Ventaja clara para ${projectedWinner} por señales de camp/disponibilidad.`;
+    } else {
+      scenario = `Ligera ventaja para ${projectedWinner} por señales recientes.`;
+    }
+  } else if (evidence.some((item) => normalizeImpactBucket(item?.impactLevel) === 'high')) {
+    confidence = 54;
+    scenario = 'Hay señales de alto impacto, pero todavia contrapuestas.';
+  }
+
+  return {
+    projectedWinner,
+    confidence: Math.round(confidence),
+    scenario,
+    evidence: evidence.sort(compareNewsPriority).slice(0, 2),
+  };
 }
 
 function isLiveFightQueueQuestion(message = '') {
@@ -2712,6 +2902,9 @@ export function createBettingWizard({
     const wantsCredits = hasCreditSignals(originalMessage);
     const wantsOdds = hasOddsRequestSignals(originalMessage);
     const wantsBetDecision = hasBetDecisionSignals(originalMessage);
+    const wantsLatestNews = hasLatestNewsSignals(originalMessage);
+    const wantsEventProjections = hasEventProjectionSignals(originalMessage);
+    const newsAlertsIntent = parseNewsAlertsIntent(originalMessage);
     let oddsSnapshot = null;
     let ledgerSummary = null;
     let userProfile = null;
@@ -2759,6 +2952,233 @@ export function createBettingWizard({
       timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
       originalMessage,
     });
+
+    if (newsAlertsIntent && userStore?.getUserIntelPrefs) {
+      if (!userId) {
+        return {
+          reply:
+            'No pude resolver el usuario para esta accion. Reintenta desde tu chat personal para configurar alertas.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const currentPrefs = userStore.getUserIntelPrefs(userId) || {
+        newsAlertsEnabled: true,
+        alertMinImpact: 'high',
+      };
+      let nextPrefs = currentPrefs;
+      let headline = '🔔 Estado de alertas de noticias.';
+
+      if (newsAlertsIntent.type === 'toggle' && userStore?.updateUserIntelPrefs) {
+        const nextEnabled = !Boolean(currentPrefs.newsAlertsEnabled);
+        nextPrefs =
+          userStore.updateUserIntelPrefs(userId, {
+            newsAlertsEnabled: nextEnabled,
+          }) || { ...currentPrefs, newsAlertsEnabled: nextEnabled };
+        headline = nextEnabled
+          ? '✅ Alertas de noticias activadas.'
+          : '✅ Alertas de noticias desactivadas.';
+      } else if (newsAlertsIntent.type === 'set' && userStore?.updateUserIntelPrefs) {
+        const desired = Boolean(newsAlertsIntent.enabled);
+        nextPrefs =
+          userStore.updateUserIntelPrefs(userId, {
+            newsAlertsEnabled: desired,
+          }) || { ...currentPrefs, newsAlertsEnabled: desired };
+        headline = desired
+          ? '✅ Alertas de noticias activadas.'
+          : '✅ Alertas de noticias desactivadas.';
+      }
+
+      const eventState = userStore?.getEventWatchState?.('next_event');
+      const lines = [
+        headline,
+        `- Estado: ${nextPrefs.newsAlertsEnabled ? 'ACTIVAS' : 'DESACTIVADAS'}`,
+        `- Umbral de impacto: ${formatImpactBadge(nextPrefs.alertMinImpact)} (${String(
+          nextPrefs.alertMinImpact || 'high'
+        ).toUpperCase()})`,
+      ];
+
+      if (eventState?.eventName) {
+        lines.push(
+          `- Evento monitoreado: ${eventState.eventName} (${formatEventDateLabel(
+            eventState.eventDateUtc,
+            temporalContext.timezone
+          )})`
+        );
+      }
+      if (nextPrefs?.updatedAt) {
+        lines.push(
+          `- Actualizado: ${formatIsoForUser(nextPrefs.updatedAt, temporalContext.timezone)}`
+        );
+      }
+
+      lines.push(
+        '',
+        'Comandos utiles: `activar alertas noticias`, `desactivar alertas noticias`, `estado alertas noticias`.'
+      );
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
+    if ((wantsLatestNews || wantsEventProjections) && userStore?.getEventWatchState) {
+      const eventState = userStore.getEventWatchState('next_event');
+      if (!eventState?.eventId || !eventState?.eventName) {
+        return {
+          reply:
+            'Todavia no tengo sincronizado el proximo evento UFC. Dame unos minutos y volve a intentar.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const userTimezone = userProfile?.timezone || temporalContext.timezone || DEFAULT_USER_TIMEZONE;
+      const eventLabel = `${eventState.eventName} (${formatEventDateLabel(
+        eventState.eventDateUtc,
+        userTimezone
+      )})`;
+
+      if (wantsLatestNews) {
+        if (!userStore?.listLatestRelevantNews) {
+          return {
+            reply: 'El modulo de novedades no esta disponible en este entorno.',
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+
+        const items = userStore.listLatestRelevantNews({
+          eventId: eventState.eventId,
+          limit: EVENT_INTEL_NEWS_USER_LIMIT,
+          minImpact: EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT,
+        });
+
+        if (!items.length) {
+          const lastUpdate = eventState?.updatedAt
+            ? formatIsoForUser(eventState.updatedAt, userTimezone)
+            : 'N/D';
+          return {
+            reply: [
+              '📰 Ultimas novedades',
+              `Evento: ${eventLabel}`,
+              'No encontré noticias relevantes nuevas (impacto medio/alto) por ahora.',
+              `Ultima reconciliacion: ${lastUpdate}`,
+            ].join('\n'),
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+
+        const lines = ['📰 Ultimas novedades', `Evento: ${eventLabel}`, ''];
+        for (const [index, item] of items.entries()) {
+          const stamp = formatIsoForUser(item.publishedAt || item.fetchedAt, userTimezone);
+          const fighter = item.fighterName ? `${item.fighterName}: ` : '';
+          lines.push(
+            `${index + 1}. ${formatImpactBadge(item.impactLevel)} ${fighter}${truncateText(
+              item.title || 'Sin titulo',
+              170
+            )}`
+          );
+          lines.push(`   ${item.sourceDomain || 'fuente no identificada'} | ${stamp}`);
+          if (item.url) {
+            lines.push(`   ${item.url}`);
+          }
+        }
+        lines.push('', 'Si queres, tambien te muestro `proyecciones para el evento`.');
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const fights = Array.isArray(eventState.mainCard)
+        ? eventState.mainCard.filter((fight) => fight?.fighterA && fight?.fighterB)
+        : [];
+      if (!fights.length) {
+        return {
+          reply:
+            'Todavia no tengo main card confirmada para el proximo evento. Cuando se sincronice, te muestro las proyecciones pelea por pelea.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const items = userStore?.listLatestRelevantNews
+        ? userStore.listLatestRelevantNews({
+            eventId: eventState.eventId,
+            limit: EVENT_INTEL_PROJECTION_NEWS_LIMIT,
+            minImpact: 'low',
+          })
+        : [];
+
+      const lines = [
+        '📊 Proyecciones para el evento',
+        `Evento: ${eventLabel}`,
+        `Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).`,
+        '',
+      ];
+
+      for (const [index, fight] of fights.entries()) {
+        const projection = buildFightProjection({
+          fight,
+          newsItems: items,
+        });
+        const fightLabel = `${fight.fighterA} vs ${fight.fighterB}`;
+
+        lines.push(`${index + 1}. ${fightLabel}`);
+        lines.push(
+          `   Proyeccion: ${
+            projection.projectedWinner
+              ? `ventaja para ${projection.projectedWinner}`
+              : 'pelea cerrada, sin edge claro'
+          }.`
+        );
+        lines.push(`   Confianza: ${projection.confidence}%`);
+        lines.push(`   Escenario: ${projection.scenario}`);
+
+        for (const item of projection.evidence) {
+          lines.push(
+            `   Señal relevante: ${formatImpactBadge(item.impactLevel)} ${truncateText(
+              item.title || '',
+              140
+            )}`
+          );
+        }
+        lines.push('');
+      }
+
+      lines.push(
+        'Este bloque se va actualizando automaticamente durante la semana y puede cambiar si aparece info nueva.'
+      );
+
+      return {
+        reply: lines.join('\n').trim(),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
 
     if (wantsCredits && userId && userStore?.getCreditState) {
       const creditState = userStore.getCreditState(userId, CREDIT_FREE_WEEKLY) || {

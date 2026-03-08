@@ -9,6 +9,7 @@ import { createBettingWizard } from '../agents/bettingWizard.js';
 import { createConversationStore } from './conversationStore.js';
 import { createSessionLogger } from './sessionLogger.js';
 import { startAutoSettlementMonitor } from './autoSettlement.js';
+import { startEventIntelMonitor } from './eventIntel.js';
 import {
   getUserProfile,
   updateUserProfile,
@@ -32,6 +33,12 @@ import {
   upsertFightHistoryCacheSnapshot,
   listPendingBetsForAutoSettlement,
   getLatestChatIdForUser,
+  getEventWatchState,
+  upsertEventWatchState,
+  insertFighterNewsItems,
+  listLatestRelevantNews,
+  getUserIntelPrefs,
+  updateUserIntelPrefs,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -297,6 +304,10 @@ function bootstrap() {
       spendCredits,
       addCredits,
       getUsageCounters,
+      getEventWatchState,
+      listLatestRelevantNews,
+      getUserIntelPrefs,
+      updateUserIntelPrefs,
     },
   });
 
@@ -325,6 +336,14 @@ function bootstrap() {
       if (!telegram?.sendSystemMessage) return;
       await telegram.sendSystemMessage({ chatId, text });
     },
+  });
+
+  startEventIntelMonitor({
+    buildWebContextForMessage: webIntel.buildWebContextForMessage,
+    fetchGoogleNewsRss: webIntel.fetchGoogleNewsRss,
+    getEventWatchState,
+    upsertEventWatchState,
+    insertFighterNewsItems,
   });
 
   const port = Number(process.env.PORT || 3000);

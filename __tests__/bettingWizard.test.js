@@ -1522,6 +1522,185 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_fight_night_test_2026-03-14',
+            eventName: 'UFC Fight Night: Test vs Test',
+            eventDateUtc: '2026-03-14',
+            updatedAt: '2026-03-07T10:00:00.000Z',
+          };
+        },
+        listLatestRelevantNews() {
+          return [
+            {
+              fighterName: 'Fighter A',
+              title: 'Fighter A suffers injury during camp before UFC event',
+              impactLevel: 'high',
+              sourceDomain: 'espn.com',
+              publishedAt: '2026-03-07T09:00:00.000Z',
+              fetchedAt: '2026-03-07T10:00:00.000Z',
+              url: 'https://espn.com/mma/story/test-news',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'mostrame ultimas novedades relevantes del proximo evento',
+      {
+        chatId: 'chat-intel-news-1',
+        userId: 'u-intel-news-1',
+        originalMessage: 'mostrame ultimas novedades relevantes del proximo evento',
+        resolution: {
+          resolvedMessage: 'mostrame ultimas novedades relevantes del proximo evento',
+        },
+      }
+    );
+
+    assert.match(result.reply, /Ultimas novedades/i);
+    assert.match(result.reply, /Fighter A suffers injury/i);
+    assert.match(result.reply, /espn\.com/i);
+    assert.match(result.reply, /https:\/\/espn\.com\/mma\/story\/test-news/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_999_2026-03-21',
+            eventName: 'UFC 999',
+            eventDateUtc: '2026-03-21',
+            mainCard: [
+              { fighterA: 'Alpha One', fighterB: 'Bravo Two' },
+              { fighterA: 'Charlie Three', fighterB: 'Delta Four' },
+            ],
+            updatedAt: '2026-03-07T11:00:00.000Z',
+          };
+        },
+        listLatestRelevantNews() {
+          return [
+            {
+              fighterSlug: 'alpha_one',
+              fighterName: 'Alpha One',
+              title: 'Alpha One withdrawn after injury concern',
+              impactLevel: 'high',
+              confidenceScore: 90,
+              publishedAt: '2026-03-07T09:00:00.000Z',
+            },
+            {
+              fighterSlug: 'delta_four',
+              fighterName: 'Delta Four',
+              title: 'Delta Four fully fit and ready for UFC 999',
+              impactLevel: 'medium',
+              confidenceScore: 70,
+              publishedAt: '2026-03-07T08:00:00.000Z',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame proyecciones para el proximo evento', {
+      chatId: 'chat-intel-proj-1',
+      userId: 'u-intel-proj-1',
+      originalMessage: 'mostrame proyecciones para el proximo evento',
+      resolution: {
+        resolvedMessage: 'mostrame proyecciones para el proximo evento',
+      },
+    });
+
+    assert.match(result.reply, /Proyecciones para el evento/i);
+    assert.match(result.reply, /Alpha One vs Bravo Two/);
+    assert.match(result.reply, /ventaja para Bravo Two/i);
+    assert.match(result.reply, /Confianza:\s*\d+%/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const updatePayloads = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserIntelPrefs() {
+          return {
+            telegramUserId: 'u-alert-1',
+            newsAlertsEnabled: true,
+            alertMinImpact: 'high',
+            confidenceDeltaThreshold: 8,
+            updatedAt: null,
+          };
+        },
+        updateUserIntelPrefs(_userId, updates) {
+          updatePayloads.push(updates);
+          return {
+            telegramUserId: 'u-alert-1',
+            newsAlertsEnabled: false,
+            alertMinImpact: 'high',
+            confidenceDeltaThreshold: 8,
+            updatedAt: '2026-03-07T12:00:00.000Z',
+          };
+        },
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_1000_2026-03-28',
+            eventName: 'UFC 1000',
+            eventDateUtc: '2026-03-28',
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('toggle alertas noticias', {
+      chatId: 'chat-alert-1',
+      userId: 'u-alert-1',
+      originalMessage: 'toggle alertas noticias',
+      resolution: {
+        resolvedMessage: 'toggle alertas noticias',
+      },
+    });
+
+    assert.equal(updatePayloads.length, 1);
+    assert.deepEqual(updatePayloads[0], { newsAlertsEnabled: false });
+    assert.match(result.reply, /desactivadas/i);
+    assert.match(result.reply, /Estado:\s*DESACTIVADAS/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }

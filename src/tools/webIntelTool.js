@@ -264,7 +264,7 @@ async function fetchText(url, fetchImpl = fetch) {
   return response.text();
 }
 
-async function fetchGoogleNewsRss({ query, days, fetchImpl = fetch }) {
+export async function fetchGoogleNewsRss({ query, days, fetchImpl = fetch }) {
   const url =
     'https://news.google.com/rss/search?q=' +
     encodeURIComponent(`${query} when:${days}d`) +
@@ -828,5 +828,6 @@ export default {
   isMainCardLookupRequest,
   isUpcomingEventLookupRequest,
   isCalendarLookupRequest,
+  fetchGoogleNewsRss,
   buildWebContextForMessage,
 };

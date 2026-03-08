@@ -31,6 +31,10 @@ const MAIN_MENU_ROWS = [
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
   ],
   [
+    { text: 'Proyecciones', callback_data: 'qa:event_projections' },
+    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
+  ],
+  [
     { text: 'Cargar creditos', callback_data: 'qa:topup_credits' },
     { text: 'Ayuda', callback_data: 'qa:help' },
   ],
@@ -76,6 +80,10 @@ const CONFIG_MENU_ROWS = [
     { text: 'Creditos', callback_data: 'qa:view_credits' },
   ],
   [
+    { text: 'Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
+    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
+  ],
+  [
     { text: 'Ayuda', callback_data: 'qa:help' },
     { text: '⬅ Volver', callback_data: 'menu:main' },
   ],
@@ -94,6 +102,18 @@ const QUICK_ACTION_HINTS = {
     'Mandame screenshot completo de la pelea/evento (ML + O/U + metodo si aparece).',
     'Si preferis texto: evento, pelea, mercado, cuota.',
     'Con eso te devuelvo lectura + EV + stake sugerido.',
+  ].join('\n'),
+  event_projections: [
+    '📊 Proyecciones para el evento',
+    'Te muestro pelea por pelea qué escenario veo hoy:',
+    '- ganador proyectado',
+    '- nivel de confianza (%)',
+    '- solo novedades relevantes si cambian la lectura',
+  ].join('\n'),
+  latest_news: [
+    '📰 Ultimas novedades',
+    'Te comparto las noticias mas relevantes del proximo evento UFC.',
+    'Si no hay novedades de impacto, te lo digo explicitamente.',
   ].join('\n'),
   bet_open: [
     '🚪 Abrir apuesta (setup, sin registrar todavía)',
@@ -164,6 +184,14 @@ const QUICK_ACTION_HINTS = {
     '- `utilizacion objetivo 35%`',
     '- `exposicion objetivo evento 40`',
   ].join('\n'),
+  config_news_alerts_toggle: [
+    '🔔 Alertas de noticias',
+    'Activa o desactiva avisos automáticos de cambios relevantes del evento.',
+    'Ejemplos:',
+    '- `activar alertas noticias`',
+    '- `desactivar alertas noticias`',
+    '- `estado alertas noticias`',
+  ].join('\n'),
   help: [
     '🆘 Ayuda de botones',
     '',
@@ -179,8 +207,13 @@ const QUICK_ACTION_HINTS = {
     '⚙️ Config',
     '- `Ver config`: muestra tus ajustes actuales.',
     '- `Stake minimo / Unidad / Riesgo / Bankroll / Timezone / Exposicion %`: actualizan tu perfil.',
+    '- `Alertas noticias`: activa/desactiva avisos automáticos de novedades relevantes.',
     '- `Creditos`: muestra saldo y movimientos.',
     '- `Cargar creditos`: abre el flujo de recarga (Mercado Pago) si está configurado.',
+    '',
+    '🧠 Intel del evento',
+    '- `Proyecciones`: lectura actual pelea por pelea + confianza.',
+    '- `Ultimas novedades`: resumen de noticias relevantes recientes.',
     '',
     'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
@@ -783,6 +816,9 @@ export function startTelegramBot(router) {
       'qa:view_config':
         'mostrame mi configuracion actual (bankroll, unidad, riesgo, timezone y stake minimo)',
       'qa:view_credits': 'decime cuantos creditos tengo y mis ultimos movimientos',
+      'qa:event_projections': 'mostrame proyecciones para el proximo evento',
+      'qa:latest_news': 'mostrame ultimas novedades relevantes del proximo evento',
+      'act:cfg_news_alerts_toggle': 'toggle alertas noticias',
     };
 
     const syntheticMessage = syntheticByAction[data];
@@ -796,6 +832,8 @@ export function startTelegramBot(router) {
       'qa:undo_last': 'bets',
       'qa:view_config': 'config',
       'qa:view_credits': 'config',
+      'qa:event_projections': 'main',
+      'act:cfg_news_alerts_toggle': 'config',
     };
     const menuScope = menuScopeByAction[data] || getMenuScope(chatId);
     await sendBotMessage(chatId, routed || 'No pude completar esa accion ahora mismo.', {

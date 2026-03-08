@@ -26,6 +26,8 @@ User → Telegram Bot → Router (intent + context) → Betting Wizard Agent →
     routerChain.js       # Message intent detection and orchestration
     conversationStore.js # Per-chat memory and fight reference resolver
     telegramBot.js       # Telegram bot configuration and polling loop
+    sqliteStore.js       # SQLite persistence (ledger, credits, event intel)
+    eventIntel.js        # Next-event discovery + fighter news monitor
     env.js               # Tiny .env loader (no third-party dependency)
   /agents
     bettingWizard.js     # Conversational UFC analyst (OpenAI tool-calling)
@@ -111,6 +113,16 @@ WEB_NEWS_DAYS=3
 WEB_EVENT_LOOKUP_DAYS=120
 WEB_NEXT_EVENT_LOOKUP_DAYS=45
 WEB_NEWS_MAX_ITEMS=6
+EVENT_INTEL_DISCOVERY_INTERVAL_MS=21600000
+EVENT_INTEL_NEWS_BASE_TICK_MS=3600000
+EVENT_INTEL_NEWS_SCAN_MS_FAR=28800000
+EVENT_INTEL_NEWS_SCAN_MS_NEAR=14400000
+EVENT_INTEL_NEWS_SCAN_MS_FINAL=7200000
+EVENT_INTEL_NEWS_LOOKBACK_DAYS=4
+EVENT_INTEL_NEWS_MAX_PER_FIGHTER=6
+EVENT_INTEL_NEWS_USER_LIMIT=8
+EVENT_INTEL_PROJECTION_NEWS_LIMIT=80
+EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT=medium
 PORT=3000
 ```
 
@@ -142,6 +154,15 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - Betting Wizard uses OpenAI `web_search` via the Responses API for live event/card validation.
 - For schedule queries, prompts instruct source priority (`ufc.com` → `espn.com` → other sources) and require live verification before answering.
 - By default the bot does not show citations unless the user asks for sources explicitly (`fuentes`, `links`, etc.).
+
+### Event Intel (next event + fighter news)
+
+- A background monitor keeps `next_event` reconciled (event name/date + main card fighters).
+- Another job scans fighter news on a dynamic cadence (far/near/final week) and stores deduped items in SQLite.
+- New user-facing flows:
+  - `Últimas novedades`: latest relevant news for the next UFC event.
+  - `Proyecciones`: fight-by-fight projection snapshot with confidence and only relevant signals.
+  - `Alertas noticias`: `activar`, `desactivar`, `estado`, `toggle` per-user (stored in `user_intel_prefs`).
 
 ### Media Inputs (Fotos y Audio)
 
