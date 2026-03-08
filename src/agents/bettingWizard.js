@@ -636,7 +636,11 @@ function mergeOddsEventRows(...lists) {
     const commence = String(row?.commenceTime || '').trim();
     const home = String(row?.homeTeam || '').trim();
     const away = String(row?.awayTeam || '').trim();
-    const key = eventId || `${normalise(eventName)}::${commence}::${normalise(home)}::${normalise(away)}`;
+    const fightKey =
+      home && away ? `${normalise(home)}::${normalise(away)}` : '';
+    const key = eventId
+      ? `${eventId}::${fightKey || commence || normalise(eventName)}`
+      : `${normalise(eventName)}::${commence}::${fightKey || 'no_fight'}`;
     if (!key) continue;
     const current = merged.get(key);
     if (!current) {
@@ -663,6 +667,313 @@ function mergeOddsEventRows(...lists) {
     }
   }
   return Array.from(merged.values());
+}
+
+function buildEventStateFromOddsRows({
+  oddsRows = [],
+  eventContext = null,
+} = {}) {
+  const rows = Array.isArray(oddsRows) ? oddsRows : [];
+  if (!rows.length || !eventContext?.eventName) return null;
+
+  const contextEventId = String(eventContext?.eventId || '').trim();
+  const contextEventName = normalise(eventContext?.eventName || '');
+  const contextEventDate = toIsoDateSafe(eventContext?.eventDate || '');
+
+  const related = rows.filter((row) => {
+    const rowEventId = String(row?.eventId || '').trim();
+    if (contextEventId && rowEventId && rowEventId === contextEventId) {
+      return true;
+    }
+    const rowEventName = normalise(row?.eventName || '');
+    if (!rowEventName || rowEventName !== contextEventName) {
+      return false;
+    }
+    if (!contextEventDate) return true;
+    const rowDate = toIsoDateSafe(row?.commenceTime || '');
+    if (!rowDate) return true;
+    return Math.abs(dateDiffInDays(rowDate, contextEventDate)) <= 1;
+  });
+
+  if (!related.length) return null;
+
+  const fightMap = new Map();
+  let latestSyncMs = 0;
+  for (const row of related) {
+    const fighterA = String(row?.homeTeam || '').trim();
+    const fighterB = String(row?.awayTeam || '').trim();
+    if (!fighterA || !fighterB) continue;
+    const fightKey = [normalise(fighterA), normalise(fighterB)].sort().join('::');
+    if (!fightKey) continue;
+
+    const syncMs =
+      Date.parse(String(row?.lastScoresSyncAt || row?.lastOddsSyncAt || row?.updatedAt || '')) || 0;
+    latestSyncMs = Math.max(latestSyncMs, syncMs);
+
+    const existing = fightMap.get(fightKey) || {
+      fighterA,
+      fighterB,
+      isCompleted: false,
+      hasScores: false,
+      updatedMs: 0,
+    };
+    const nextCompleted = existing.isCompleted || row?.completed === true;
+    const nextHasScores = existing.hasScores || (Array.isArray(row?.scores) && row.scores.length > 0);
+    const updatedMs = Math.max(existing.updatedMs || 0, syncMs);
+
+    fightMap.set(fightKey, {
+      fighterA: existing.fighterA || fighterA,
+      fighterB: existing.fighterB || fighterB,
+      isCompleted: nextCompleted,
+      hasScores: nextHasScores,
+      updatedMs,
+    });
+  }
+
+  const fights = Array.from(fightMap.values())
+    .sort((a, b) => {
+      if (a.isCompleted !== b.isCompleted) {
+        return a.isCompleted ? 1 : -1;
+      }
+      return (b.updatedMs || 0) - (a.updatedMs || 0);
+    })
+    .map((fight, index) => ({
+      fightId: `fight_${index + 1}`,
+      fighterA: fight.fighterA,
+      fighterB: fight.fighterB,
+      isCompleted: Boolean(fight.isCompleted),
+      hasScores: Boolean(fight.hasScores),
+    }));
+
+  if (!fights.length) return null;
+
+  const eventId =
+    contextEventId ||
+    String(related[0]?.eventId || '').trim() ||
+    `${normalise(eventContext.eventName)}_${contextEventDate || 'unknown'}`;
+  return {
+    eventId,
+    eventName: String(eventContext.eventName || '').trim(),
+    eventDateUtc: contextEventDate || toIsoDateSafe(related[0]?.commenceTime || ''),
+    sourcePrimary: 'odds_scores_live',
+    updatedAt: latestSyncMs > 0 ? new Date(latestSyncMs).toISOString() : null,
+    mainCard: fights,
+  };
+}
+
+function shouldPreferOddsEventForIntel({
+  fallbackEventState = null,
+  liveEventState = null,
+  liveOddsContext = null,
+  nowMs = Date.now(),
+} = {}) {
+  if (!liveEventState?.eventName) return false;
+  if (!fallbackEventState?.eventName) return true;
+
+  const fallbackName = normalise(fallbackEventState?.eventName || '');
+  const liveName = normalise(liveEventState?.eventName || '');
+  const sameName = Boolean(fallbackName && liveName && fallbackName === liveName);
+
+  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const fallbackDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
+  const liveDate = toIsoDateSafe(liveEventState?.eventDateUtc || liveOddsContext?.eventDate || '');
+  const fallbackDistance = fallbackDate
+    ? Math.abs(dateDiffInDays(fallbackDate, todayIso))
+    : Number.POSITIVE_INFINITY;
+  const liveDistance = liveDate
+    ? Math.abs(dateDiffInDays(liveDate, todayIso))
+    : Number.POSITIVE_INFINITY;
+  const confidence = Number(liveOddsContext?.confidenceScore || 0);
+  const hasOpenFights = Array.isArray(liveEventState?.mainCard)
+    ? liveEventState.mainCard.some((fight) => fight?.isCompleted !== true)
+    : false;
+
+  if (sameName && fallbackDistance <= 1) return false;
+  if (hasOpenFights && liveDistance <= 1 && (!sameName || fallbackDistance > 1)) {
+    return true;
+  }
+  if (!sameName && confidence >= 60 && liveDistance <= 1 && fallbackDistance >= 2) {
+    return true;
+  }
+  if (liveDistance + 1 < fallbackDistance && confidence >= 70) {
+    return true;
+  }
+  return false;
+}
+
+function buildSyntheticEventId(eventName = '', eventDateIso = null) {
+  const slug = normalise(eventName)
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  const safeSlug = slug || 'ufc_event';
+  const safeDate = String(eventDateIso || '').trim() || 'unknown_date';
+  return `${safeSlug}_${safeDate}`;
+}
+
+function eventsLikelySame(eventA = null, eventB = null) {
+  if (!eventA?.eventName || !eventB?.eventName) return false;
+  const idA = String(eventA?.eventId || '').trim();
+  const idB = String(eventB?.eventId || '').trim();
+  if (idA && idB && idA === idB) return true;
+
+  const nameA = normalise(eventA?.eventName || '');
+  const nameB = normalise(eventB?.eventName || '');
+  if (!nameA || !nameB || nameA !== nameB) return false;
+
+  const dateA = toIsoDateSafe(eventA?.eventDateUtc || '');
+  const dateB = toIsoDateSafe(eventB?.eventDateUtc || '');
+  if (!dateA || !dateB) return true;
+  return Math.abs(dateDiffInDays(dateA, dateB)) <= 1;
+}
+
+function buildEventStateFromWebContext({
+  webContext = null,
+  fallbackEventState = null,
+} = {}) {
+  const eventName = String(webContext?.eventName || '').trim();
+  if (!eventName) return null;
+  const eventDate =
+    toIsoDateSafe(webContext?.date || webContext?.eventDateUtc || '') ||
+    toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
+  const fightsFromWeb = Array.isArray(webContext?.fights)
+    ? webContext.fights
+        .filter((fight) => fight?.fighterA && fight?.fighterB)
+        .map((fight, index) => ({
+          fightId: `fight_${index + 1}`,
+          fighterA: String(fight.fighterA || '').trim(),
+          fighterB: String(fight.fighterB || '').trim(),
+          isCompleted: false,
+          hasScores: false,
+        }))
+    : [];
+
+  const fallbackFights = Array.isArray(fallbackEventState?.mainCard)
+    ? fallbackEventState.mainCard.filter((fight) => fight?.fighterA && fight?.fighterB)
+    : [];
+  const fights = fightsFromWeb.length ? fightsFromWeb : fallbackFights;
+
+  const explicitEventId = String(webContext?.eventId || '').trim();
+  let eventId = explicitEventId;
+  if (!eventId) {
+    if (
+      fallbackEventState?.eventId &&
+      eventsLikelySame(
+        {
+          eventName,
+          eventDateUtc: eventDate,
+        },
+        fallbackEventState
+      )
+    ) {
+      eventId = String(fallbackEventState.eventId || '').trim();
+    } else {
+      eventId = buildSyntheticEventId(eventName, eventDate || null);
+    }
+  }
+
+  return {
+    eventId,
+    eventName,
+    eventDateUtc: eventDate || null,
+    sourcePrimary: String(webContext?.source || '').trim() || 'web_live_context',
+    updatedAt: new Date().toISOString(),
+    mainCard: fights,
+  };
+}
+
+function mergeEventStateWithLiveSignals({
+  baseEventState = null,
+  liveEventState = null,
+} = {}) {
+  const base = baseEventState || null;
+  const live = liveEventState || null;
+  if (!live?.eventName) return base;
+  if (!base?.eventName) return live;
+  if (!eventsLikelySame(base, live)) return base;
+
+  const baseFights = Array.isArray(base.mainCard)
+    ? base.mainCard.filter((fight) => fight?.fighterA && fight?.fighterB)
+    : [];
+  const liveFights = Array.isArray(live.mainCard)
+    ? live.mainCard.filter((fight) => fight?.fighterA && fight?.fighterB)
+    : [];
+  if (!baseFights.length) {
+    return {
+      ...base,
+      eventId: base.eventId || live.eventId || null,
+      eventDateUtc: base.eventDateUtc || live.eventDateUtc || null,
+      sourcePrimary: base.sourcePrimary || live.sourcePrimary || null,
+      updatedAt: live.updatedAt || base.updatedAt || null,
+      mainCard: liveFights,
+    };
+  }
+
+  const liveByFightKey = new Map();
+  for (const fight of liveFights) {
+    const key = [normalise(fight.fighterA), normalise(fight.fighterB)].sort().join('::');
+    if (!key) continue;
+    liveByFightKey.set(key, fight);
+  }
+
+  const merged = [];
+  const seen = new Set();
+  for (const fight of baseFights) {
+    const key = [normalise(fight.fighterA), normalise(fight.fighterB)].sort().join('::');
+    if (!key) continue;
+    const liveMatch = liveByFightKey.get(key);
+    seen.add(key);
+    if (liveMatch) {
+      merged.push({
+        ...fight,
+        isCompleted: Boolean(
+          fight?.isCompleted === true || liveMatch?.isCompleted === true
+        ),
+        hasScores: Boolean(fight?.hasScores || liveMatch?.hasScores),
+      });
+    } else {
+      merged.push(fight);
+    }
+  }
+  for (const fight of liveFights) {
+    const key = [normalise(fight.fighterA), normalise(fight.fighterB)].sort().join('::');
+    if (!key || seen.has(key)) continue;
+    merged.push(fight);
+  }
+
+  return {
+    ...base,
+    eventId: base.eventId || live.eventId || null,
+    eventDateUtc: base.eventDateUtc || live.eventDateUtc || null,
+    sourcePrimary: base.sourcePrimary || live.sourcePrimary || null,
+    updatedAt: live.updatedAt || base.updatedAt || null,
+    mainCard: merged,
+  };
+}
+
+function shouldPreferWebEventForIntel({
+  fallbackEventState = null,
+  webEventState = null,
+  nowMs = Date.now(),
+} = {}) {
+  if (!webEventState?.eventName) return false;
+  if (!fallbackEventState?.eventName) return true;
+
+  const sameEvent = eventsLikelySame(fallbackEventState, webEventState);
+  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const fallbackDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
+  const webDate = toIsoDateSafe(webEventState?.eventDateUtc || '');
+  const fallbackDistance = fallbackDate
+    ? Math.abs(dateDiffInDays(fallbackDate, todayIso))
+    : Number.POSITIVE_INFINITY;
+  const webDistance = webDate
+    ? Math.abs(dateDiffInDays(webDate, todayIso))
+    : Number.POSITIVE_INFINITY;
+
+  if (sameEvent && fallbackDistance <= 1) return false;
+  if (webDistance <= 1 && fallbackDistance > 1) return true;
+  if (webDistance + 1 < fallbackDistance) return true;
+  return false;
 }
 
 function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
@@ -4742,7 +5053,112 @@ export function createBettingWizard({
     }
 
     if ((wantsLatestNews || wantsEventProjections) && userStore?.getEventWatchState) {
-      const eventState = userStore.getEventWatchState('next_event');
+      const nowMs = Date.now();
+      const loadOddsLiveRows = () => {
+        const upcomingRows = userStore?.listUpcomingOddsEvents
+          ? userStore.listUpcomingOddsEvents({
+              fromIso: new Date(nowMs - 10 * 3600000).toISOString(),
+              limit: 120,
+            })
+          : [];
+        const recentRows = userStore?.listRecentOddsEvents
+          ? userStore.listRecentOddsEvents({
+              fromIso: new Date(nowMs - 20 * 3600000).toISOString(),
+              toIso: new Date(nowMs + 10 * 3600000).toISOString(),
+              limit: 180,
+              includeCompleted: true,
+            })
+          : [];
+        return mergeOddsEventRows(upcomingRows, recentRows);
+      };
+
+      let eventState = userStore.getEventWatchState('next_event');
+      const fallbackEventState = eventState || null;
+      const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+      const fallbackEventDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
+      const fallbackDistanceDays = fallbackEventDate
+        ? Math.abs(dateDiffInDays(fallbackEventDate, todayIso))
+        : Number.POSITIVE_INFINITY;
+      let oddsLiveRows = loadOddsLiveRows();
+      let liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs);
+      if (
+        (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
+        typeof userStore?.refreshLiveScores === 'function'
+      ) {
+        try {
+          await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
+          oddsLiveRows = loadOddsLiveRows();
+          liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs);
+        } catch (error) {
+          console.error('⚠️ intel event refreshLiveScores failed:', error);
+        }
+      }
+      const liveEventState = buildEventStateFromOddsRows({
+        oddsRows: oddsLiveRows,
+        eventContext: liveOddsContext,
+      });
+      let reconciledWithLive = false;
+      let reconciledWithWeb = false;
+      let mergedLiveSignals = false;
+
+      const shouldUseOddsEvent = shouldPreferOddsEventForIntel({
+        fallbackEventState: eventState,
+        liveEventState,
+        liveOddsContext,
+        nowMs,
+      });
+      if (shouldUseOddsEvent) {
+        eventState = liveEventState;
+        reconciledWithLive = true;
+      }
+
+      let liveWebContext = null;
+      let liveWebEventState = null;
+      const shouldTryWebLiveContext =
+        typeof userStore?.resolveLiveEventContext === 'function' &&
+        (!eventState?.eventName || fallbackDistanceDays > 1 || !liveEventState?.eventName);
+      if (shouldTryWebLiveContext) {
+        const referenceDates = [new Date(nowMs), new Date(nowMs - 4 * 3600000)];
+        for (const referenceDate of referenceDates) {
+          try {
+            const context = await userStore.resolveLiveEventContext({
+              referenceDate,
+              originalMessage,
+            });
+            if (context?.eventName) {
+              liveWebContext = context;
+              break;
+            }
+          } catch (error) {
+            console.error('⚠️ intel event resolveLiveEventContext failed:', error);
+          }
+        }
+        liveWebEventState = buildEventStateFromWebContext({
+          webContext: liveWebContext,
+          fallbackEventState: eventState,
+        });
+        if (
+          shouldPreferWebEventForIntel({
+            fallbackEventState: eventState,
+            webEventState: liveWebEventState,
+            nowMs,
+          })
+        ) {
+          eventState = liveWebEventState;
+          reconciledWithWeb = true;
+        }
+      }
+
+      if (liveEventState && eventsLikelySame(eventState, liveEventState)) {
+        eventState = mergeEventStateWithLiveSignals({
+          baseEventState: eventState,
+          liveEventState,
+        });
+        if (!reconciledWithLive) {
+          mergedLiveSignals = true;
+        }
+      }
+
       if (!eventState?.eventId || !eventState?.eventName) {
         return {
           reply:
@@ -4759,6 +5175,22 @@ export function createBettingWizard({
         eventState.eventDateUtc,
         userTimezone
       )})`;
+      const liveSignalsDetected = reconciledWithLive || reconciledWithWeb || mergedLiveSignals;
+      const reconciliationNotes = [];
+      if (reconciledWithLive) {
+        reconciliationNotes.push('Nota: evento objetivo reconciliado con odds/scores en tiempo real.');
+      }
+      if (reconciledWithWeb) {
+        const source = String(liveWebContext?.source || '').trim();
+        reconciliationNotes.push(
+          source
+            ? `Nota: evento objetivo reconciliado con contexto web live (${source}).`
+            : 'Nota: evento objetivo reconciliado con contexto web live.'
+        );
+      }
+      if (mergedLiveSignals && !reconciledWithLive) {
+        reconciliationNotes.push('Nota: estado de peleas reconciliado con scores live en backend.');
+      }
 
       if (wantsLatestNews) {
         if (!userStore?.listLatestRelevantNews) {
@@ -4796,6 +5228,9 @@ export function createBettingWizard({
         }
 
         const lines = ['📰 Ultimas novedades', `Evento: ${eventLabel}`, ''];
+        if (reconciliationNotes.length) {
+          lines.push(...reconciliationNotes, '');
+        }
         for (const [index, item] of items.entries()) {
           const stamp = formatIsoForUser(item.publishedAt || item.fetchedAt, userTimezone);
           const fighter = item.fighterName ? `${item.fighterName}: ` : '';
@@ -4821,9 +5256,12 @@ export function createBettingWizard({
         };
       }
 
-      const fights = Array.isArray(eventState.mainCard)
+      const allFights = Array.isArray(eventState.mainCard)
         ? eventState.mainCard.filter((fight) => fight?.fighterA && fight?.fighterB)
         : [];
+      const completedCount = allFights.filter((fight) => fight?.isCompleted === true).length;
+      const pendingFights = allFights.filter((fight) => fight?.isCompleted !== true);
+      const fights = pendingFights.length ? pendingFights : allFights;
       if (!fights.length) {
         return {
           reply:
@@ -4869,6 +5307,22 @@ export function createBettingWizard({
           : 'Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).',
         '',
       ];
+      if (reconciliationNotes.length) {
+        lines.push(...reconciliationNotes);
+      }
+      if (completedCount > 0 && pendingFights.length) {
+        lines.push(
+          `Estado live: ${completedCount}/${allFights.length} peleas cerradas; mostrando solo las restantes.`,
+          ''
+        );
+      } else if (completedCount > 0 && completedCount === allFights.length) {
+        lines.push(
+          `Estado live: cartelera cerrada (${completedCount}/${allFights.length} peleas finalizadas).`,
+          ''
+        );
+      } else if (liveSignalsDetected) {
+        lines.push('Estado live: cartelera en curso.', '');
+      }
 
       for (const [index, fight] of fights.entries()) {
         const storedProjection = storedProjections.find((row) =>

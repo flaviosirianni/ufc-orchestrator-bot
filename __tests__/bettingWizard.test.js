@@ -2586,6 +2586,266 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 25 * 60 * 1000).toISOString();
+    const staleIso = new Date(nowMs - 2 * 60 * 1000).toISOString();
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_324_2026-04-18',
+            eventName: 'UFC 324',
+            eventDateUtc: '2026-04-18',
+            mainCard: [
+              { fightId: 'fight_1', fighterA: 'Gaethje', fighterB: 'Pimblett' },
+              { fightId: 'fight_2', fighterA: 'Holloway', fighterB: 'Oliveira' },
+            ],
+            updatedAt: '2026-03-07T12:00:00.000Z',
+          };
+        },
+        listUpcomingOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              lastOddsSyncAt: staleIso,
+              updatedAt: staleIso,
+            },
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Caio Borralho',
+              awayTeam: 'Reinier de Ridder',
+              completed: true,
+              lastOddsSyncAt: staleIso,
+              updatedAt: staleIso,
+            },
+          ];
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              scores: [{ name: 'Max Holloway', score: '0' }],
+              lastScoresSyncAt: staleIso,
+              updatedAt: staleIso,
+            },
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Caio Borralho',
+              awayTeam: 'Reinier de Ridder',
+              completed: true,
+              scores: [{ name: 'Caio Borralho', score: '30' }],
+              lastScoresSyncAt: staleIso,
+              updatedAt: staleIso,
+            },
+          ];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 2 };
+        },
+        listLatestRelevantNews() {
+          return [];
+        },
+        listLatestProjectionSnapshotsForEvent({ eventId }) {
+          if (eventId !== 'ufc_326_2026-03-08') return [];
+          return [
+            {
+              eventId,
+              fightId: 'fight_1',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              predictedWinner: 'Max Holloway',
+              predictedMethod: 'decision_lean',
+              confidencePct: 67,
+              keyFactors: ['Consenso cuotas favorable'],
+              createdAt: staleIso,
+            },
+            {
+              eventId,
+              fightId: 'fight_2',
+              fighterA: 'Caio Borralho',
+              fighterB: 'Reinier de Ridder',
+              predictedWinner: 'Caio Borralho',
+              predictedMethod: 'decision_lean',
+              confidencePct: 64,
+              keyFactors: ['Pelea ya finalizada'],
+              createdAt: staleIso,
+            },
+          ];
+        },
+        listLatestBetScoringForEvent({ eventId }) {
+          if (eventId !== 'ufc_326_2026-03-08') return [];
+          return [
+            {
+              eventId,
+              fightId: 'fight_1',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              marketKey: 'moneyline',
+              selection: 'Max Holloway',
+              recommendation: 'lean',
+              edgePct: 2.2,
+              confidencePct: 58,
+              riskLevel: 'medium',
+              suggestedStakeUnits: 0.9,
+              consensusOdds: 2.03,
+              booksCount: 3,
+              createdAt: staleIso,
+            },
+          ];
+        },
+        listLatestOddsMarketsForFight({ fighterA, fighterB }) {
+          if (fighterA === 'Max Holloway' && fighterB === 'Charles Oliveira') {
+            return [
+              {
+                bookmakerKey: 'dk',
+                outcomeAName: 'Max Holloway',
+                outcomeAPrice: 2.03,
+                outcomeBName: 'Charles Oliveira',
+                outcomeBPrice: 1.82,
+                fetchedAt: staleIso,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame proyecciones para el proximo evento', {
+      chatId: 'chat-intel-proj-live-reconcile-1',
+      userId: 'u-intel-proj-live-reconcile-1',
+      originalMessage: 'mostrame proyecciones para el proximo evento',
+      resolution: {
+        resolvedMessage: 'mostrame proyecciones para el proximo evento',
+      },
+    });
+
+    assert.match(result.reply, /Evento:\s*UFC 326/i);
+    assert.doesNotMatch(result.reply, /Evento:\s*UFC 324/i);
+    assert.match(result.reply, /Estado live: 1\/2 peleas cerradas/i);
+    assert.match(result.reply, /Max Holloway vs Charles Oliveira/i);
+    assert.doesNotMatch(result.reply, /Caio Borralho vs Reinier de Ridder/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const nowMs = Date.now();
+    const liveEventDateIso = new Date(nowMs).toISOString().slice(0, 10);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_324_2026-04-18',
+            eventName: 'UFC 324',
+            eventDateUtc: '2026-04-18',
+            mainCard: [
+              { fightId: 'fight_1', fighterA: 'Gaethje', fighterB: 'Pimblett' },
+              { fightId: 'fight_2', fighterA: 'Holloway', fighterB: 'Oliveira' },
+            ],
+            updatedAt: '2026-03-07T12:00:00.000Z',
+          };
+        },
+        listUpcomingOddsEvents() {
+          return [];
+        },
+        listRecentOddsEvents() {
+          return [];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 0 };
+        },
+        async resolveLiveEventContext() {
+          return {
+            eventName: 'UFC 326',
+            date: liveEventDateIso,
+            source: 'open-web',
+            fights: [
+              {
+                fighterA: 'Max Holloway',
+                fighterB: 'Charles Oliveira',
+              },
+            ],
+          };
+        },
+        listLatestRelevantNews() {
+          return [];
+        },
+        listLatestProjectionSnapshotsForEvent({ eventId }) {
+          if (eventId !== `ufc_326_${liveEventDateIso}`) return [];
+          return [
+            {
+              eventId,
+              fightId: 'fight_1',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              predictedWinner: 'Max Holloway',
+              predictedMethod: 'decision_lean',
+              confidencePct: 65,
+              keyFactors: ['Contexto live reconciliado'],
+              createdAt: new Date(nowMs - 5 * 60 * 1000).toISOString(),
+            },
+          ];
+        },
+        listLatestBetScoringForEvent() {
+          return [];
+        },
+        listLatestOddsMarketsForFight() {
+          return [];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame proyecciones para el proximo evento', {
+      chatId: 'chat-intel-proj-web-live-reconcile-1',
+      userId: 'u-intel-proj-web-live-reconcile-1',
+      originalMessage: 'mostrame proyecciones para el proximo evento',
+      resolution: {
+        resolvedMessage: 'mostrame proyecciones para el proximo evento',
+      },
+    });
+
+    assert.match(result.reply, /Evento:\s*UFC 326/i);
+    assert.doesNotMatch(result.reply, /Evento:\s*UFC 324/i);
+    assert.match(result.reply, /reconciliado con contexto web live/i);
+    assert.match(result.reply, /Max Holloway vs Charles Oliveira/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
     const updatePayloads = [];
 
     const wizard = createBettingWizard({
