@@ -433,6 +433,12 @@ function hasEventProjectionSignals(message = '') {
 function hasLiveEventStatusSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
+  if (
+    /\b(pelea|fight|combate)\b/.test(text) &&
+    /\b(viene|sigue|falta|faltan|proxima|próxima)\b/.test(text)
+  ) {
+    return false;
+  }
   const hasLiveWords = /\b(ahora|ahora mismo|en vivo|vivo|live|en este momento)\b/.test(text);
   const hasEventWords = /\b(ufc|evento|cartelera|main card|main event)\b/.test(text);
   const hasAskWords = /\b(que|cual|fijate|decime|dime|mostrame|hay|esta)\b/.test(text);
@@ -618,6 +624,57 @@ function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now()) {
     if (hints.length >= 4) break;
   }
   return hints;
+}
+
+function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
+  const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
+  if (!rows.length) return null;
+
+  const grouped = new Map();
+  for (const row of rows) {
+    const commenceMs = Date.parse(String(row?.commenceTime || ''));
+    if (!Number.isFinite(commenceMs)) continue;
+    const deltaHours = Math.abs(commenceMs - nowMs) / 3600000;
+    if (deltaHours > 12) continue;
+
+    const eventName = String(row?.eventName || '').trim();
+    if (!eventName) continue;
+    const groupKey =
+      String(row?.eventId || '').trim() || `${normalise(eventName)}::${toIsoDateSafe(row?.commenceTime) || 'na'}`;
+    if (!groupKey) continue;
+
+    const entry =
+      grouped.get(groupKey) ||
+      {
+        eventName,
+        eventDate: toIsoDateSafe(row?.commenceTime),
+        minDeltaMs: Number.POSITIVE_INFINITY,
+        fights: new Set(),
+      };
+
+    entry.minDeltaMs = Math.min(entry.minDeltaMs, Math.abs(commenceMs - nowMs));
+    const home = String(row?.homeTeam || '').trim();
+    const away = String(row?.awayTeam || '').trim();
+    if (home && away) {
+      entry.fights.add(`${home} vs ${away}`);
+    }
+    grouped.set(groupKey, entry);
+  }
+
+  const candidates = Array.from(grouped.values());
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => {
+    const fightsDiff = b.fights.size - a.fights.size;
+    if (fightsDiff !== 0) return fightsDiff;
+    return a.minDeltaMs - b.minDeltaMs;
+  });
+
+  const best = candidates[0];
+  return {
+    eventName: best.eventName,
+    eventDate: best.eventDate || null,
+    fights: Array.from(best.fights).slice(0, 4),
+  };
 }
 
 function buildFightProjection({ fight = {}, newsItems = [] } = {}) {
@@ -925,6 +982,345 @@ function listTopEventBetOpportunities({ rows = [], fights = [], limit = 5 } = {}
     if (output.length >= max) break;
   }
   return output;
+}
+
+function detectTargetMarketKey(message = '') {
+  const text = normalise(message);
+  if (!text) return 'moneyline';
+  if (/\b(metodo|método|ko|tko|sub|sumision|sumisión|decision|decisión)\b/.test(text)) {
+    return 'method';
+  }
+  if (/\b(over|under|totales|total rounds|rounds|rondas)\b/.test(text)) {
+    return 'total_rounds';
+  }
+  return 'moneyline';
+}
+
+function toOddsNumber(value) {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const normalized = raw
+    .replace(/[^\d.,-]/g, '')
+    .replace(/\.(?=.*\.)/g, '')
+    .replace(',', '.');
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 1 || parsed > 30) return null;
+  return parsed;
+}
+
+function extractOddsCandidatesFromText(message = '') {
+  const text = String(message || '');
+  if (!text) return [];
+  const candidates = [];
+
+  const cueRegex = /(?:@|\bcuota(?:s)?\b|\bodds?\b|\bprice\b)\s*[:=]?\s*([1-9]\d?(?:[.,]\d{1,3})?)/gi;
+  for (const match of text.matchAll(cueRegex)) {
+    const value = toOddsNumber(match[1]);
+    if (!value) continue;
+    candidates.push(value);
+  }
+
+  if (!candidates.length && hasOddsSignals(text)) {
+    const decimalRegex = /\b([1-9]\d?(?:[.,]\d{1,3}))\b/g;
+    for (const match of text.matchAll(decimalRegex)) {
+      const value = toOddsNumber(match[1]);
+      if (!value) continue;
+      candidates.push(value);
+    }
+  }
+
+  return Array.from(new Set(candidates.map((value) => Number(value.toFixed(3)))));
+}
+
+function selectionMatchTokens(selection = '') {
+  const normalized = normalise(selection);
+  if (!normalized) return [];
+  const trimmed = normalized.split(/\bpor\b/)[0] || normalized;
+  const words = trimmed
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .filter((word) => word.length >= 3)
+    .filter((word) => !['over', 'under', 'round', 'rounds', 'ml', 'moneyline'].includes(word));
+  const unique = Array.from(new Set(words));
+  if (/\bover\b/.test(normalized)) unique.push('over');
+  if (/\bunder\b/.test(normalized)) unique.push('under');
+  return unique;
+}
+
+function extractOddsCandidatesFromSnapshot(snapshot = {}, { selection = '', marketKey = '' } = {}) {
+  const oddsNode = snapshot?.odds;
+  if (!oddsNode || typeof oddsNode !== 'object') return [];
+
+  const rows = [];
+  const queue = [oddsNode];
+  const visited = new Set();
+
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || typeof node !== 'object') continue;
+    if (visited.has(node)) continue;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (item && typeof item === 'object') queue.push(item);
+      }
+      continue;
+    }
+
+    const label = String(
+      node.selection ||
+        node.name ||
+        node.outcome ||
+        node.outcomeName ||
+        node.fighter ||
+        node.team ||
+        ''
+    ).trim();
+    const market = String(node.market || node.marketKey || node.type || '').trim().toLowerCase();
+
+    const directPrice = toOddsNumber(
+      node.price ?? node.odds ?? node.decimal ?? node.cuota ?? node.value
+    );
+    if (directPrice) {
+      rows.push({ odds: directPrice, label, market });
+    }
+
+    const outcomeA = toOddsNumber(node.outcomeAPrice);
+    const outcomeB = toOddsNumber(node.outcomeBPrice);
+    if (outcomeA && node.outcomeAName) {
+      rows.push({ odds: outcomeA, label: String(node.outcomeAName), market });
+    }
+    if (outcomeB && node.outcomeBName) {
+      rows.push({ odds: outcomeB, label: String(node.outcomeBName), market });
+    }
+
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      }
+    }
+  }
+
+  if (!rows.length) return [];
+
+  let filtered = rows.slice();
+  const key = String(marketKey || '').trim().toLowerCase();
+  if (key === 'method') {
+    const byMarket = filtered.filter((row) => /method|outcome|result/.test(row.market));
+    if (byMarket.length) filtered = byMarket;
+  } else if (key === 'total_rounds') {
+    const byMarket = filtered.filter((row) => /total|round/.test(row.market) || /\bover\b|\bunder\b/.test(normalise(row.label)));
+    if (byMarket.length) filtered = byMarket;
+  }
+
+  const tokens = selectionMatchTokens(selection);
+  if (tokens.length) {
+    const bySelection = filtered.filter((row) => {
+      const haystack = `${normalise(row.label)} ${normalise(row.market)}`;
+      return tokens.some((token) => haystack.includes(token));
+    });
+    if (bySelection.length) filtered = bySelection;
+  }
+
+  return filtered;
+}
+
+function resolveUserOddsForDeterministicAdjustment({
+  originalMessage = '',
+  oddsSnapshot = null,
+  selection = '',
+  marketKey = '',
+} = {}) {
+  const textCandidates = extractOddsCandidatesFromText(originalMessage);
+  if (textCandidates.length === 1) {
+    return {
+      odds: textCandidates[0],
+      source: 'mensaje_usuario',
+      ambiguous: false,
+    };
+  }
+  if (textCandidates.length > 1) {
+    return {
+      odds: null,
+      source: 'mensaje_usuario',
+      ambiguous: true,
+      candidates: textCandidates,
+    };
+  }
+
+  const snapshotCandidates = extractOddsCandidatesFromSnapshot(oddsSnapshot, {
+    selection,
+    marketKey,
+  });
+  if (!snapshotCandidates.length) {
+    return {
+      odds: null,
+      source: null,
+      ambiguous: false,
+    };
+  }
+
+  const distinct = Array.from(
+    new Set(snapshotCandidates.map((row) => Number(row.odds).toFixed(3)))
+  ).map(Number);
+  if (distinct.length === 1) {
+    return {
+      odds: distinct[0],
+      source: 'snapshot_guardado',
+      ambiguous: false,
+    };
+  }
+  return {
+    odds: null,
+    source: 'snapshot_guardado',
+    ambiguous: true,
+    candidates: distinct,
+  };
+}
+
+function computeDeterministicAdjustedScoring(baseRow = {}, userOdds = null) {
+  const odds = toOddsNumber(userOdds);
+  if (!odds) return null;
+
+  const baseEdge = Number(baseRow?.edgePct || 0);
+  const baseConfidence = Number(baseRow?.confidencePct || 50);
+  const impliedBase = Number(baseRow?.impliedProbabilityPct);
+  let modelProb = Number(baseRow?.modelProbabilityPct);
+  if (!Number.isFinite(modelProb)) {
+    modelProb = Number.isFinite(impliedBase) ? impliedBase + baseEdge : NaN;
+  }
+  if (!Number.isFinite(modelProb)) {
+    return null;
+  }
+
+  const impliedUser = 100 / odds;
+  const adjustedEdge = modelProb - impliedUser;
+  const adjustedConfidence = clampNumber(
+    baseConfidence + (adjustedEdge - baseEdge) * 0.9,
+    35,
+    93
+  );
+
+  let recommendation = 'no_bet';
+  let reason = 'edge insuficiente a cuota actual';
+  if (adjustedEdge >= 4 && adjustedConfidence >= 60) {
+    recommendation = 'bet';
+    reason = null;
+  } else if (adjustedEdge >= 1.5 && adjustedConfidence >= 56) {
+    recommendation = 'lean';
+    reason = null;
+  }
+
+  let suggestedStakeUnits = null;
+  if (recommendation !== 'no_bet') {
+    const baseline = Number(baseRow?.suggestedStakeUnits);
+    const growthFactor = 1 + Math.max(-0.45, Math.min(0.8, (adjustedEdge - baseEdge) / 10));
+    const raw =
+      Number.isFinite(baseline) && baseline > 0
+        ? baseline * growthFactor
+        : recommendation === 'bet'
+        ? 1.2 + adjustedEdge * 0.08
+        : 0.75 + adjustedEdge * 0.05;
+    suggestedStakeUnits = clampNumber(raw, recommendation === 'bet' ? 1 : 0.5, recommendation === 'bet' ? 4.5 : 2.2);
+  }
+
+  return {
+    odds: Number(odds.toFixed(3)),
+    modelProbabilityPct: Number(modelProb.toFixed(2)),
+    impliedUserProbabilityPct: Number(impliedUser.toFixed(2)),
+    edgePct: Number(adjustedEdge.toFixed(2)),
+    confidencePct: Number(adjustedConfidence.toFixed(1)),
+    recommendation,
+    noBetReason: reason,
+    suggestedStakeUnits:
+      suggestedStakeUnits === null ? null : Number(suggestedStakeUnits.toFixed(2)),
+  };
+}
+
+function deterministicRecommendationLabel(value = 'no_bet') {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'bet') return '✅ BET';
+  if (key === 'lean') return '🟡 LEAN';
+  return '⛔ NO_BET';
+}
+
+function enforceDeterministicOddsAdjustment({
+  reply = '',
+  originalMessage = '',
+  wantsBetDecision = false,
+  resolvedFight = null,
+  precomputedFightBetScoring = [],
+  oddsSnapshot = null,
+} = {}) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!wantsBetDecision || isLedgerOperationMessage(originalMessage)) return text;
+  if (!isRecommendationReply(text)) return text;
+  if (!resolvedFight?.fighterA || !resolvedFight?.fighterB) return text;
+
+  const rows = Array.isArray(precomputedFightBetScoring) ? precomputedFightBetScoring.slice() : [];
+  if (!rows.length) return text;
+
+  const requestedMarket = detectTargetMarketKey(originalMessage);
+  const marketRows = rows
+    .filter((row) => String(row?.marketKey || '').trim().toLowerCase() === requestedMarket)
+    .sort(compareBetScoringRows);
+  const targetRows = marketRows.length ? marketRows : rows.sort(compareBetScoringRows);
+  const target = targetRows[0];
+  if (!target) return text;
+
+  const userOdds = resolveUserOddsForDeterministicAdjustment({
+    originalMessage,
+    oddsSnapshot,
+    selection: target.selection,
+    marketKey: target.marketKey,
+  });
+
+  if (/\bajuste deterministico\b/i.test(text)) {
+    return text;
+  }
+
+  const marketLabel = betScoringMarketLabel(target.marketKey);
+  const selection = String(target.selection || '').trim() || 'sin seleccion';
+  if (!userOdds?.odds) {
+    const lines = [
+      '🧮 Ajuste deterministico pendiente',
+      `- Mercado objetivo: ${marketLabel}`,
+      `- Seleccion objetivo: ${selection}`,
+      '- Pick final bloqueado hasta validar tu cuota exacta actual en tu bookie.',
+      '- Formato sugerido: `Gaethje ML @2.10 en Bet365` o `Over 2.5 rounds @1.95`.',
+    ];
+    if (userOdds?.ambiguous && Array.isArray(userOdds?.candidates) && userOdds.candidates.length) {
+      lines.push(`- Detecte multiples cuotas candidatas: ${userOdds.candidates.join(', ')}.`);
+    }
+    return `${text}\n\n${lines.join('\n')}`;
+  }
+
+  const adjusted = computeDeterministicAdjustedScoring(target, userOdds.odds);
+  if (!adjusted) {
+    return text;
+  }
+
+  const lines = [
+    '🧮 Ajuste deterministico (cuota de tu bookie)',
+    `- Mercado: ${marketLabel}`,
+    `- Seleccion: ${selection}`,
+    `- Cuota usuario: @${adjusted.odds.toFixed(2)} (${userOdds.source || 'fuente no definida'})`,
+    `- Prob modelo: ${adjusted.modelProbabilityPct.toFixed(1)}% | Prob implícita cuota: ${adjusted.impliedUserProbabilityPct.toFixed(1)}%`,
+    `- Edge ajustado: ${adjusted.edgePct >= 0 ? '+' : ''}${adjusted.edgePct.toFixed(2)}%`,
+    `- Veredicto final: ${deterministicRecommendationLabel(adjusted.recommendation)}`,
+  ];
+
+  if (adjusted.recommendation === 'no_bet') {
+    lines.push(`- Motivo: ${adjusted.noBetReason || 'sin edge suficiente a precio actual'}.`);
+  } else if (Number.isFinite(Number(adjusted.suggestedStakeUnits))) {
+    lines.push(`- Stake sugerido: ${formatUnits(adjusted.suggestedStakeUnits)}u (pre-calibración de perfil).`);
+  }
+
+  return `${text}\n\n${lines.join('\n')}`;
 }
 
 function isLiveFightQueueQuestion(message = '') {
@@ -2216,6 +2612,7 @@ function enforceRationaleSection(reply = '', originalMessage = '') {
 function enforceDecisionQualityGate(reply = '', originalMessage = '') {
   const text = String(reply || '').trim();
   if (!text) return text;
+  if (/\bajuste deterministico\b/i.test(text)) return text;
 
   const userMessage = String(originalMessage || '');
   const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
@@ -3763,13 +4160,7 @@ export function createBettingWizard({
       const userTimezone = userProfile?.timezone || temporalContext.timezone || DEFAULT_USER_TIMEZONE;
       const localNow = extractLocalDateTimeParts(new Date(), userTimezone);
       const nowMs = Date.now();
-
       const nextEventState = userStore?.getEventWatchState?.('next_event') || null;
-      const nextEventDateIso = toIsoDateSafe(nextEventState?.eventDateUtc);
-      const nextEventDayDiff = nextEventDateIso
-        ? Math.abs(dateDiffInDays(nextEventDateIso, localNow.dateIso))
-        : Number.POSITIVE_INFINITY;
-      const canTrustNextEventAsLive = Boolean(nextEventState?.eventName) && nextEventDayDiff <= 1;
 
       const oddsWindowEvents = userStore?.listUpcomingOddsEvents
         ? userStore.listUpcomingOddsEvents({
@@ -3778,6 +4169,7 @@ export function createBettingWizard({
           })
         : [];
       const liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
+      const liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
 
       let liveWebContext = null;
       if (typeof userStore?.resolveLiveEventContext === 'function') {
@@ -3800,10 +4192,10 @@ export function createBettingWizard({
 
       const resolvedEventName =
         String(liveWebContext?.eventName || '').trim() ||
-        (canTrustNextEventAsLive ? String(nextEventState?.eventName || '').trim() : '');
+        String(liveOddsContext?.eventName || '').trim();
       const resolvedEventDate =
         toIsoDateSafe(liveWebContext?.date || '') ||
-        (canTrustNextEventAsLive ? nextEventDateIso : null);
+        toIsoDateSafe(liveOddsContext?.eventDate || '');
 
       if (resolvedEventName) {
         const lines = [
@@ -3823,7 +4215,11 @@ export function createBettingWizard({
               .slice(0, 4)
               .map((fight) => `${fight.fighterA} vs ${fight.fighterB}`)
           : [];
-        const fightHints = webFights.length ? webFights : liveOddsHints;
+        const fightHints = webFights.length
+          ? webFights
+          : Array.isArray(liveOddsContext?.fights) && liveOddsContext.fights.length
+          ? liveOddsContext.fights
+          : liveOddsHints;
         if (fightHints.length) {
           lines.push('', 'Cruces detectados alrededor de ahora:');
           for (const [index, fightText] of fightHints.entries()) {
@@ -3835,6 +4231,8 @@ export function createBettingWizard({
           '',
           liveWebContext?.source
             ? `Fuente primaria: ${liveWebContext.source}.`
+            : liveOddsContext?.eventName
+            ? 'Fuente primaria: indice interno de odds/scores.'
             : 'Fuente primaria: reconciliacion interna (cache + tiempo).'
         );
 
@@ -3864,6 +4262,31 @@ export function createBettingWizard({
           },
         };
       }
+
+      const nextEventLabel =
+        nextEventState?.eventName && nextEventState?.eventDateUtc
+          ? `${nextEventState.eventName} (${formatEventDateLabel(nextEventState.eventDateUtc, userTimezone)})`
+          : nextEventState?.eventName || null;
+
+      const lines = [
+        '🔴 Estado UFC en vivo (validacion actual)',
+        'No pude confirmar un evento UFC en vivo con evidencia suficiente en este turno.',
+        `Referencia temporal usada: ${localNow.dateIso} ${localNow.hour}:${localNow.minute} (${userTimezone})`,
+      ];
+      if (nextEventLabel) {
+        lines.push(`Proximo evento en agenda (no necesariamente en vivo): ${nextEventLabel}`);
+      }
+      lines.push(
+        '',
+        'Si queres, lo reintento con una consulta web puntual para validar el evento live oficial.'
+      );
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
     }
 
     if ((wantsLatestNews || wantsEventProjections) && userStore?.getEventWatchState) {
@@ -5611,6 +6034,21 @@ export function createBettingWizard({
       let committeeBlocked = false;
       let citations = Array.isArray(result.citations) ? result.citations : [];
 
+      let latestOddsSnapshot = oddsSnapshot;
+      if (
+        wantsBetDecision &&
+        userId &&
+        typeof userStore?.getLatestOddsSnapshot === 'function'
+      ) {
+        const refreshed = userStore.getLatestOddsSnapshot(userId, {
+          fighterA: resolution?.resolvedFight?.fighterA || null,
+          fighterB: resolution?.resolvedFight?.fighterB || null,
+        });
+        if (refreshed) {
+          latestOddsSnapshot = refreshed;
+        }
+      }
+
       if (
         shouldRunPickCommittee({
           enabled: PICK_COMMITTEE_ENABLED,
@@ -5679,9 +6117,19 @@ export function createBettingWizard({
       const citationFooter = shouldShowCitations(originalMessage)
         ? formatCitationsFooter(citations)
         : '';
-      const replyWithRationale = committeeBlocked
+      const replyWithDeterministicAdjustment = committeeBlocked
         ? workingReply
-        : enforceRationaleSection(workingReply, originalMessage);
+        : enforceDeterministicOddsAdjustment({
+            reply: workingReply,
+            originalMessage,
+            wantsBetDecision,
+            resolvedFight: resolution?.resolvedFight || runtimeState?.resolvedFight || null,
+            precomputedFightBetScoring,
+            oddsSnapshot: latestOddsSnapshot,
+          });
+      const replyWithRationale = committeeBlocked
+        ? replyWithDeterministicAdjustment
+        : enforceRationaleSection(replyWithDeterministicAdjustment, originalMessage);
       const replyWithStakeCalibration = committeeBlocked
         ? replyWithRationale
         : enforceStakeCalibration(replyWithRationale, originalMessage, userProfile || {});
