@@ -123,6 +123,30 @@ EVENT_INTEL_NEWS_MAX_PER_FIGHTER=6
 EVENT_INTEL_NEWS_USER_LIMIT=8
 EVENT_INTEL_PROJECTION_NEWS_LIMIT=80
 EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT=medium
+ODDS_API_KEY=
+ODDS_API_BASE_URL=https://api.the-odds-api.com/v4
+ODDS_API_TIMEOUT_MS=12000
+ODDS_API_MMA_SPORT_KEY=mma_mixed_martial_arts
+ODDS_API_DEFAULT_REGIONS=us
+ODDS_API_DEFAULT_MARKETS=h2h
+ODDS_API_DEFAULT_ODDS_FORMAT=decimal
+ODDS_API_DEFAULT_DATE_FORMAT=iso
+ODDS_INTEL_ODDS_INTERVAL_MS=7200000
+ODDS_INTEL_EVENTS_INTERVAL_MS=21600000
+ODDS_INTEL_SCORES_INTERVAL_MS=14400000
+ODDS_INTEL_MIN_REQUESTS_REMAINING=20
+ODDS_INTEL_SCORES_DAYS_FROM=2
+ODDS_INTEL_LOOKAHEAD_DAYS=45
+ODDS_API_CACHE_TTL_SPORTS_MS=86400000
+ODDS_API_CACHE_TTL_ODDS_MS=1200000
+ODDS_API_CACHE_TTL_SCORES_MS=300000
+ODDS_API_CACHE_TTL_EVENTS_MS=3600000
+ODDS_API_CACHE_TTL_EVENT_ODDS_MS=600000
+ODDS_API_CACHE_TTL_EVENT_MARKETS_MS=1200000
+ODDS_API_CACHE_TTL_PARTICIPANTS_MS=86400000
+ODDS_API_CACHE_TTL_HISTORICAL_ODDS_MS=604800000
+ODDS_API_CACHE_TTL_HISTORICAL_EVENTS_MS=604800000
+ODDS_API_CACHE_TTL_HISTORICAL_EVENT_ODDS_MS=604800000
 PORT=3000
 ```
 
@@ -163,6 +187,27 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - `Últimas novedades`: latest relevant news for the next UFC event.
   - `Proyecciones`: fight-by-fight projection snapshot with confidence and only relevant signals.
   - `Alertas noticias`: `activar`, `desactivar`, `estado`, `toggle` per-user (stored in `user_intel_prefs`).
+
+### The Odds API Integration (tier-aware)
+
+- A dedicated tool wraps The Odds API V4 endpoints with SQLite cache to minimize token usage.
+- Implemented endpoint coverage:
+  - `sports`
+  - `sports/{sport}/odds`
+  - `sports/{sport}/scores`
+  - `sports/{sport}/events`
+  - `sports/{sport}/events/{eventId}/odds`
+  - `sports/{sport}/events/{eventId}/markets`
+  - `sports/{sport}/participants`
+  - historical equivalents for odds/events/event-odds
+- Background monitor (`oddsIntel`) syncs:
+  - upcoming MMA/UFC events index,
+  - bookmaker odds snapshots,
+  - scores (for completion tracking).
+- Quota guardrails:
+  - stores `x-requests-*` headers on each call,
+  - skips non-critical syncs when remaining quota falls below `ODDS_INTEL_MIN_REQUESTS_REMAINING`.
+- Product note: The Odds API does not provide fighter news articles or deep fighter statistics; for that, the bot keeps using web/news intelligence.
 
 ### Media Inputs (Fotos y Audio)
 

@@ -1623,6 +1623,32 @@ export async function runBettingWizardTests() {
             },
           ];
         },
+        listLatestOddsMarketsForFight({ fighterA, fighterB }) {
+          if (
+            String(fighterA) === 'Alpha One' &&
+            String(fighterB) === 'Bravo Two'
+          ) {
+            return [
+              {
+                bookmakerKey: 'draftkings',
+                outcomeAName: 'Alpha One',
+                outcomeAPrice: 1.82,
+                outcomeBName: 'Bravo Two',
+                outcomeBPrice: 2.04,
+                fetchedAt: '2026-03-07T10:30:00.000Z',
+              },
+              {
+                bookmakerKey: 'fanduel',
+                outcomeAName: 'Alpha One',
+                outcomeAPrice: 1.9,
+                outcomeBName: 'Bravo Two',
+                outcomeBPrice: 1.98,
+                fetchedAt: '2026-03-07T10:31:00.000Z',
+              },
+            ];
+          }
+          return [];
+        },
       },
     });
 
@@ -1639,6 +1665,7 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /Alpha One vs Bravo Two/);
     assert.match(result.reply, /ventaja para Bravo Two/i);
     assert.match(result.reply, /Confianza:\s*\d+%/i);
+    assert.match(result.reply, /Consenso bookies/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 

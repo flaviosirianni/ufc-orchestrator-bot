@@ -216,6 +216,88 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_mp_processed_user_time
       ON mp_processed_payments (telegram_user_id, created_at);
 
+    CREATE TABLE IF NOT EXISTS odds_api_cache (
+      cache_key TEXT PRIMARY KEY,
+      endpoint TEXT NOT NULL,
+      params_json TEXT,
+      response_json TEXT NOT NULL,
+      status_code INTEGER,
+      requests_remaining INTEGER,
+      requests_used INTEGER,
+      requests_last INTEGER,
+      fetched_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_api_cache_expires
+      ON odds_api_cache (expires_at);
+
+    CREATE TABLE IF NOT EXISTS odds_api_usage_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint TEXT NOT NULL,
+      cache_key TEXT,
+      status_code INTEGER,
+      requests_remaining INTEGER,
+      requests_used INTEGER,
+      requests_last INTEGER,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_api_usage_time
+      ON odds_api_usage_log (created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS odds_events_index (
+      event_id TEXT PRIMARY KEY,
+      sport_key TEXT NOT NULL,
+      event_name TEXT,
+      event_norm_key TEXT,
+      commence_time TEXT,
+      home_team TEXT,
+      away_team TEXT,
+      completed INTEGER NOT NULL DEFAULT 0,
+      scores_json TEXT,
+      last_odds_sync_at TEXT,
+      last_scores_sync_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_events_sport_time
+      ON odds_events_index (sport_key, commence_time);
+
+    CREATE TABLE IF NOT EXISTS odds_market_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      sport_key TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      event_name TEXT,
+      event_norm_key TEXT,
+      commence_time TEXT,
+      home_team TEXT,
+      away_team TEXT,
+      fighter_a_norm TEXT,
+      fighter_b_norm TEXT,
+      bookmaker_key TEXT,
+      bookmaker_title TEXT,
+      market_key TEXT NOT NULL,
+      outcome_a_name TEXT,
+      outcome_a_price REAL,
+      outcome_b_name TEXT,
+      outcome_b_price REAL,
+      draw_price REAL,
+      source_last_update TEXT,
+      fetched_at TEXT NOT NULL,
+      payload_json TEXT,
+      dedupe_key TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_odds_market_dedupe
+      ON odds_market_snapshots (dedupe_key);
+    CREATE INDEX IF NOT EXISTS idx_odds_market_event_time
+      ON odds_market_snapshots (event_id, market_key, fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_odds_market_fight_time
+      ON odds_market_snapshots (fighter_a_norm, fighter_b_norm, market_key, fetched_at DESC);
+
     CREATE TABLE IF NOT EXISTS event_watch_state (
       watch_key TEXT PRIMARY KEY,
       event_id TEXT,
@@ -1809,6 +1891,487 @@ export function getLatestOddsSnapshot(userId, query = {}) {
   }
 
   return null;
+}
+
+function parseOddsApiCacheRow(row) {
+  if (!row) return null;
+  return {
+    cacheKey: row.cache_key || null,
+    endpoint: row.endpoint || null,
+    params: parseJsonSafe(row.params_json, {}),
+    responseJson: parseJsonSafe(row.response_json, null),
+    statusCode: row.status_code === null || row.status_code === undefined ? null : Number(row.status_code),
+    requestsRemaining:
+      row.requests_remaining === null || row.requests_remaining === undefined
+        ? null
+        : Number(row.requests_remaining),
+    requestsUsed:
+      row.requests_used === null || row.requests_used === undefined
+        ? null
+        : Number(row.requests_used),
+    requestsLast:
+      row.requests_last === null || row.requests_last === undefined
+        ? null
+        : Number(row.requests_last),
+    fetchedAt: row.fetched_at || null,
+    expiresAt: row.expires_at || null,
+  };
+}
+
+export function getOddsApiCacheEntry(cacheKey = '') {
+  const cleanKey = String(cacheKey || '').trim();
+  if (!cleanKey) return null;
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT cache_key, endpoint, params_json, response_json, status_code,
+              requests_remaining, requests_used, requests_last,
+              fetched_at, expires_at
+       FROM odds_api_cache
+       WHERE cache_key = ?`
+    )
+    .get(cleanKey);
+  return parseOddsApiCacheRow(row);
+}
+
+export function upsertOddsApiCacheEntry(entry = {}) {
+  const cacheKey = String(entry.cacheKey || '').trim();
+  if (!cacheKey) return null;
+  const db = getDb();
+
+  db.prepare(
+    `INSERT INTO odds_api_cache
+      (cache_key, endpoint, params_json, response_json, status_code,
+       requests_remaining, requests_used, requests_last, fetched_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       endpoint = excluded.endpoint,
+       params_json = excluded.params_json,
+       response_json = excluded.response_json,
+       status_code = excluded.status_code,
+       requests_remaining = excluded.requests_remaining,
+       requests_used = excluded.requests_used,
+       requests_last = excluded.requests_last,
+       fetched_at = excluded.fetched_at,
+       expires_at = excluded.expires_at`
+  ).run(
+    cacheKey,
+    entry.endpoint || null,
+    JSON.stringify(entry.params || {}),
+    JSON.stringify(entry.responseJson ?? null),
+    entry.statusCode === null || entry.statusCode === undefined ? null : Number(entry.statusCode),
+    entry.requestsRemaining === null || entry.requestsRemaining === undefined
+      ? null
+      : Number(entry.requestsRemaining),
+    entry.requestsUsed === null || entry.requestsUsed === undefined
+      ? null
+      : Number(entry.requestsUsed),
+    entry.requestsLast === null || entry.requestsLast === undefined
+      ? null
+      : Number(entry.requestsLast),
+    entry.fetchedAt || nowIso(),
+    entry.expiresAt || nowIso()
+  );
+
+  return getOddsApiCacheEntry(cacheKey);
+}
+
+export function logOddsApiUsage(sample = {}) {
+  const endpoint = String(sample.endpoint || '').trim();
+  if (!endpoint) return null;
+  const db = getDb();
+  const ts = sample.createdAt || nowIso();
+
+  const result = db
+    .prepare(
+      `INSERT INTO odds_api_usage_log
+        (endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      endpoint,
+      sample.cacheKey || null,
+      sample.statusCode === null || sample.statusCode === undefined
+        ? null
+        : Number(sample.statusCode),
+      sample.requestsRemaining === null || sample.requestsRemaining === undefined
+        ? null
+        : Number(sample.requestsRemaining),
+      sample.requestsUsed === null || sample.requestsUsed === undefined
+        ? null
+        : Number(sample.requestsUsed),
+      sample.requestsLast === null || sample.requestsLast === undefined
+        ? null
+        : Number(sample.requestsLast),
+      sample.metadata ? JSON.stringify(sample.metadata) : null,
+      ts
+    );
+
+  return {
+    id: Number(result.lastInsertRowid),
+    createdAt: ts,
+  };
+}
+
+export function listRecentOddsApiUsage(limit = 20) {
+  const db = getDb();
+  const max = Math.max(1, Math.min(200, Number(limit) || 20));
+  const rows = db
+    .prepare(
+      `SELECT id, endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at
+       FROM odds_api_usage_log
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(max);
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    endpoint: row.endpoint || null,
+    cacheKey: row.cache_key || null,
+    statusCode:
+      row.status_code === null || row.status_code === undefined
+        ? null
+        : Number(row.status_code),
+    requestsRemaining:
+      row.requests_remaining === null || row.requests_remaining === undefined
+        ? null
+        : Number(row.requests_remaining),
+    requestsUsed:
+      row.requests_used === null || row.requests_used === undefined
+        ? null
+        : Number(row.requests_used),
+    requestsLast:
+      row.requests_last === null || row.requests_last === undefined
+        ? null
+        : Number(row.requests_last),
+    metadata: parseJsonSafe(row.metadata_json, null),
+    createdAt: row.created_at || null,
+  }));
+}
+
+export function getLatestOddsApiQuotaState() {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT requests_remaining, requests_used, requests_last, endpoint, created_at
+       FROM odds_api_usage_log
+       WHERE requests_remaining IS NOT NULL
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get();
+
+  if (!row) {
+    return {
+      requestsRemaining: null,
+      requestsUsed: null,
+      requestsLast: null,
+      endpoint: null,
+      createdAt: null,
+    };
+  }
+
+  return {
+    requestsRemaining:
+      row.requests_remaining === null || row.requests_remaining === undefined
+        ? null
+        : Number(row.requests_remaining),
+    requestsUsed:
+      row.requests_used === null || row.requests_used === undefined
+        ? null
+        : Number(row.requests_used),
+    requestsLast:
+      row.requests_last === null || row.requests_last === undefined
+        ? null
+        : Number(row.requests_last),
+    endpoint: row.endpoint || null,
+    createdAt: row.created_at || null,
+  };
+}
+
+function parseOddsEventIndexRow(row) {
+  if (!row) return null;
+  return {
+    eventId: row.event_id || null,
+    sportKey: row.sport_key || null,
+    eventName: row.event_name || null,
+    eventNormKey: row.event_norm_key || null,
+    commenceTime: row.commence_time || null,
+    homeTeam: row.home_team || null,
+    awayTeam: row.away_team || null,
+    completed: Boolean(row.completed),
+    scores: parseJsonSafe(row.scores_json, null),
+    lastOddsSyncAt: row.last_odds_sync_at || null,
+    lastScoresSyncAt: row.last_scores_sync_at || null,
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function upsertOddsEventsIndex(
+  events = [],
+  { markOddsSyncAt = false, markScoresSyncAt = false } = {}
+) {
+  const rows = Array.isArray(events) ? events : [];
+  if (!rows.length) {
+    return { upsertedCount: 0 };
+  }
+  const db = getDb();
+  const ts = nowIso();
+
+  const upsert = db.prepare(
+    `INSERT INTO odds_events_index
+      (event_id, sport_key, event_name, event_norm_key, commence_time, home_team, away_team,
+       completed, scores_json, last_odds_sync_at, last_scores_sync_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(event_id) DO UPDATE SET
+       sport_key = excluded.sport_key,
+       event_name = excluded.event_name,
+       event_norm_key = excluded.event_norm_key,
+       commence_time = excluded.commence_time,
+       home_team = excluded.home_team,
+       away_team = excluded.away_team,
+       completed = excluded.completed,
+       scores_json = excluded.scores_json,
+       last_odds_sync_at = excluded.last_odds_sync_at,
+       last_scores_sync_at = excluded.last_scores_sync_at,
+       updated_at = excluded.updated_at`
+  );
+
+  const run = db.transaction((inputRows) => {
+    let upsertedCount = 0;
+    for (const row of inputRows) {
+      const eventId = String(row?.eventId || row?.id || '').trim();
+      if (!eventId) continue;
+      upsert.run(
+        eventId,
+        row.sportKey || null,
+        row.eventName || null,
+        row.eventNormKey || null,
+        row.commenceTime || null,
+        row.homeTeam || null,
+        row.awayTeam || null,
+        row.completed ? 1 : 0,
+        row.scores ? JSON.stringify(row.scores) : null,
+        markOddsSyncAt ? ts : row.lastOddsSyncAt || null,
+        markScoresSyncAt ? ts : row.lastScoresSyncAt || null,
+        ts
+      );
+      upsertedCount += 1;
+    }
+    return { upsertedCount };
+  });
+
+  return run(rows);
+}
+
+export function listUpcomingOddsEvents({
+  sportKey = 'mma_mixed_martial_arts',
+  fromIso = null,
+  limit = 30,
+} = {}) {
+  const db = getDb();
+  const max = Math.max(1, Math.min(300, Number(limit) || 30));
+  const from = String(fromIso || nowIso()).trim();
+  const rows = db
+    .prepare(
+      `SELECT event_id, sport_key, event_name, event_norm_key, commence_time, home_team, away_team,
+              completed, scores_json, last_odds_sync_at, last_scores_sync_at, updated_at
+       FROM odds_events_index
+       WHERE sport_key = ?
+         AND completed = 0
+         AND (commence_time IS NULL OR commence_time >= ?)
+       ORDER BY commence_time ASC
+       LIMIT ?`
+    )
+    .all(String(sportKey || 'mma_mixed_martial_arts'), from, max);
+
+  return rows.map(parseOddsEventIndexRow).filter(Boolean);
+}
+
+function parseOddsMarketSnapshotRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    provider: row.provider || null,
+    sportKey: row.sport_key || null,
+    eventId: row.event_id || null,
+    eventName: row.event_name || null,
+    eventNormKey: row.event_norm_key || null,
+    commenceTime: row.commence_time || null,
+    homeTeam: row.home_team || null,
+    awayTeam: row.away_team || null,
+    fighterANorm: row.fighter_a_norm || null,
+    fighterBNorm: row.fighter_b_norm || null,
+    bookmakerKey: row.bookmaker_key || null,
+    bookmakerTitle: row.bookmaker_title || null,
+    marketKey: row.market_key || null,
+    outcomeAName: row.outcome_a_name || null,
+    outcomeAPrice:
+      row.outcome_a_price === null || row.outcome_a_price === undefined
+        ? null
+        : Number(row.outcome_a_price),
+    outcomeBName: row.outcome_b_name || null,
+    outcomeBPrice:
+      row.outcome_b_price === null || row.outcome_b_price === undefined
+        ? null
+        : Number(row.outcome_b_price),
+    drawPrice:
+      row.draw_price === null || row.draw_price === undefined
+        ? null
+        : Number(row.draw_price),
+    sourceLastUpdate: row.source_last_update || null,
+    fetchedAt: row.fetched_at || null,
+    payload: parseJsonSafe(row.payload_json, null),
+    dedupeKey: row.dedupe_key || null,
+  };
+}
+
+export function insertOddsMarketSnapshots(items = []) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) {
+    return { insertedCount: 0 };
+  }
+  const db = getDb();
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO odds_market_snapshots
+      (provider, sport_key, event_id, event_name, event_norm_key, commence_time,
+       home_team, away_team, fighter_a_norm, fighter_b_norm,
+       bookmaker_key, bookmaker_title, market_key, outcome_a_name, outcome_a_price,
+       outcome_b_name, outcome_b_price, draw_price, source_last_update, fetched_at,
+       payload_json, dedupe_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const run = db.transaction((inputRows) => {
+    let insertedCount = 0;
+    for (const row of inputRows) {
+      const dedupeKey = String(row?.dedupeKey || '').trim();
+      if (!dedupeKey) continue;
+      const result = insert.run(
+        row.provider || 'the_odds_api',
+        row.sportKey || 'mma_mixed_martial_arts',
+        row.eventId || null,
+        row.eventName || null,
+        row.eventNormKey || null,
+        row.commenceTime || null,
+        row.homeTeam || null,
+        row.awayTeam || null,
+        row.fighterANorm || null,
+        row.fighterBNorm || null,
+        row.bookmakerKey || null,
+        row.bookmakerTitle || null,
+        row.marketKey || 'h2h',
+        row.outcomeAName || null,
+        row.outcomeAPrice === null || row.outcomeAPrice === undefined
+          ? null
+          : Number(row.outcomeAPrice),
+        row.outcomeBName || null,
+        row.outcomeBPrice === null || row.outcomeBPrice === undefined
+          ? null
+          : Number(row.outcomeBPrice),
+        row.drawPrice === null || row.drawPrice === undefined ? null : Number(row.drawPrice),
+        row.sourceLastUpdate || null,
+        row.fetchedAt || nowIso(),
+        row.payloadJson || null,
+        dedupeKey
+      );
+      if (Number(result.changes) > 0) {
+        insertedCount += 1;
+      }
+    }
+    return { insertedCount };
+  });
+
+  return run(rows);
+}
+
+export function listLatestOddsMarketsForEvent({
+  eventId = '',
+  sportKey = 'mma_mixed_martial_arts',
+  marketKey = 'h2h',
+  limit = 80,
+  maxAgeHours = 72,
+} = {}) {
+  const cleanEventId = String(eventId || '').trim();
+  if (!cleanEventId) return [];
+
+  const db = getDb();
+  const max = Math.max(1, Math.min(500, Number(limit) || 80));
+  const cutoff = new Date(Date.now() - Math.max(1, Number(maxAgeHours) || 72) * 3600 * 1000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT id, provider, sport_key, event_id, event_name, event_norm_key, commence_time,
+              home_team, away_team, fighter_a_norm, fighter_b_norm,
+              bookmaker_key, bookmaker_title, market_key,
+              outcome_a_name, outcome_a_price, outcome_b_name, outcome_b_price,
+              draw_price, source_last_update, fetched_at, payload_json, dedupe_key
+       FROM odds_market_snapshots
+       WHERE event_id = ?
+         AND sport_key = ?
+         AND market_key = ?
+         AND fetched_at >= ?
+       ORDER BY fetched_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(
+      cleanEventId,
+      String(sportKey || 'mma_mixed_martial_arts'),
+      String(marketKey || 'h2h'),
+      cutoff,
+      max
+    );
+
+  return rows.map(parseOddsMarketSnapshotRow).filter(Boolean);
+}
+
+export function listLatestOddsMarketsForFight({
+  fighterA = '',
+  fighterB = '',
+  sportKey = 'mma_mixed_martial_arts',
+  marketKey = 'h2h',
+  limit = 40,
+  maxAgeHours = 72,
+} = {}) {
+  const normA = normalizeName(fighterA);
+  const normB = normalizeName(fighterB);
+  if (!normA || !normB) return [];
+  const db = getDb();
+  const max = Math.max(1, Math.min(500, Number(limit) || 40));
+  const cutoff = new Date(Date.now() - Math.max(1, Number(maxAgeHours) || 72) * 3600 * 1000).toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT id, provider, sport_key, event_id, event_name, event_norm_key, commence_time,
+              home_team, away_team, fighter_a_norm, fighter_b_norm,
+              bookmaker_key, bookmaker_title, market_key,
+              outcome_a_name, outcome_a_price, outcome_b_name, outcome_b_price,
+              draw_price, source_last_update, fetched_at, payload_json, dedupe_key
+       FROM odds_market_snapshots
+       WHERE sport_key = ?
+         AND market_key = ?
+         AND fetched_at >= ?
+         AND (
+           (fighter_a_norm = ? AND fighter_b_norm = ?)
+           OR
+           (fighter_a_norm = ? AND fighter_b_norm = ?)
+         )
+       ORDER BY fetched_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(
+      String(sportKey || 'mma_mixed_martial_arts'),
+      String(marketKey || 'h2h'),
+      cutoff,
+      normA,
+      normB,
+      normB,
+      normA,
+      max
+    );
+
+  return rows.map(parseOddsMarketSnapshotRow).filter(Boolean);
 }
 
 function parseFightHistoryCacheRow(row) {

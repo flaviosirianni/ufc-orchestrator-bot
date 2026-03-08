@@ -5,11 +5,13 @@ import { createRouterChain } from './routerChain.js';
 import * as sheetOps from '../tools/sheetOpsTool.js';
 import * as fightsScalper from '../tools/fightsScalperTool.js';
 import * as webIntel from '../tools/webIntelTool.js';
+import { createOddsApiTool } from '../tools/oddsApiTool.js';
 import { createBettingWizard } from '../agents/bettingWizard.js';
 import { createConversationStore } from './conversationStore.js';
 import { createSessionLogger } from './sessionLogger.js';
 import { startAutoSettlementMonitor } from './autoSettlement.js';
 import { startEventIntelMonitor } from './eventIntel.js';
+import { startOddsIntelMonitor } from './oddsIntel.js';
 import {
   getUserProfile,
   updateUserProfile,
@@ -39,6 +41,14 @@ import {
   listLatestRelevantNews,
   getUserIntelPrefs,
   updateUserIntelPrefs,
+  getOddsApiCacheEntry,
+  upsertOddsApiCacheEntry,
+  logOddsApiUsage,
+  getLatestOddsApiQuotaState,
+  listLatestOddsMarketsForFight,
+  listLatestOddsMarketsForEvent,
+  upsertOddsEventsIndex,
+  insertOddsMarketSnapshots,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -271,6 +281,13 @@ function bootstrap() {
   const conversationStore = createConversationStore();
   const sessionLogger = createSessionLogger();
   console.log('[bootstrap] SQLite DB:', getDbPath());
+  const oddsApi = createOddsApiTool({
+    store: {
+      getOddsApiCacheEntry,
+      upsertOddsApiCacheEntry,
+      logOddsApiUsage,
+    },
+  });
 
   fightsScalper.configureFightHistoryStore({
     getCacheSnapshot: getFightHistoryCacheSnapshot,
@@ -308,6 +325,9 @@ function bootstrap() {
       listLatestRelevantNews,
       getUserIntelPrefs,
       updateUserIntelPrefs,
+      listLatestOddsMarketsForFight,
+      listLatestOddsMarketsForEvent,
+      getLatestOddsApiQuotaState,
     },
   });
 
@@ -344,6 +364,14 @@ function bootstrap() {
     getEventWatchState,
     upsertEventWatchState,
     insertFighterNewsItems,
+  });
+
+  startOddsIntelMonitor({
+    oddsApi,
+    getLatestOddsApiQuotaState,
+    upsertOddsEventsIndex,
+    insertOddsMarketSnapshots,
+    getEventWatchState,
   });
 
   const port = Number(process.env.PORT || 3000);

@@ -598,6 +598,98 @@ function buildFightProjection({ fight = {}, newsItems = [] } = {}) {
   };
 }
 
+function parsePositivePrice(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 1) return null;
+  return parsed;
+}
+
+function impliedProbabilityPct(decimalOdds) {
+  const price = parsePositivePrice(decimalOdds);
+  if (!price) return null;
+  return Math.min(99.99, Math.max(0.01, 100 / price));
+}
+
+function pickFighterPriceFromRow(row = {}, fighterName = '') {
+  const target = normalise(fighterName);
+  if (!target) return null;
+
+  const candidates = [
+    {
+      name: row?.outcomeAName || row?.homeTeam || '',
+      price: parsePositivePrice(row?.outcomeAPrice),
+    },
+    {
+      name: row?.outcomeBName || row?.awayTeam || '',
+      price: parsePositivePrice(row?.outcomeBPrice),
+    },
+  ];
+
+  const direct = candidates.find((item) => normalise(item.name) === target && item.price);
+  if (direct) return direct.price;
+
+  const surname = target.split(/\s+/).filter(Boolean).slice(-1)[0] || '';
+  if (surname.length >= 4) {
+    const bySurname = candidates.find(
+      (item) => normalise(item.name).includes(surname) && item.price
+    );
+    if (bySurname) return bySurname.price;
+  }
+
+  return null;
+}
+
+function buildOddsConsensusForFight({
+  rows = [],
+  fighterA = '',
+  fighterB = '',
+} = {}) {
+  const inputRows = Array.isArray(rows) ? rows : [];
+  if (!inputRows.length) return null;
+
+  const latestByBookmaker = new Map();
+  for (const row of inputRows) {
+    const bookmakerKey = String(row?.bookmakerKey || row?.bookmakerTitle || '').trim();
+    if (!bookmakerKey) continue;
+    const existing = latestByBookmaker.get(bookmakerKey);
+    const thisTs = Date.parse(String(row?.fetchedAt || row?.sourceLastUpdate || '')) || 0;
+    const existingTs = existing
+      ? Date.parse(String(existing?.fetchedAt || existing?.sourceLastUpdate || '')) || 0
+      : 0;
+    if (!existing || thisTs >= existingTs) {
+      latestByBookmaker.set(bookmakerKey, row);
+    }
+  }
+
+  let totalA = 0;
+  let totalB = 0;
+  let count = 0;
+
+  for (const row of latestByBookmaker.values()) {
+    const priceA = pickFighterPriceFromRow(row, fighterA);
+    const priceB = pickFighterPriceFromRow(row, fighterB);
+    if (!priceA || !priceB) continue;
+    totalA += priceA;
+    totalB += priceB;
+    count += 1;
+  }
+
+  if (!count) return null;
+
+  const avgA = totalA / count;
+  const avgB = totalB / count;
+  const impliedA = impliedProbabilityPct(avgA);
+  const impliedB = impliedProbabilityPct(avgB);
+
+  return {
+    bookmakersCount: count,
+    avgPriceA: avgA,
+    avgPriceB: avgB,
+    impliedA,
+    impliedB,
+  };
+}
+
 function isLiveFightQueueQuestion(message = '') {
   const text = normalise(message);
   if (!text) return false;
@@ -3143,6 +3235,20 @@ export function createBettingWizard({
           fight,
           newsItems: items,
         });
+        const oddsRows = userStore?.listLatestOddsMarketsForFight
+          ? userStore.listLatestOddsMarketsForFight({
+              fighterA: fight.fighterA,
+              fighterB: fight.fighterB,
+              marketKey: 'h2h',
+              limit: 40,
+              maxAgeHours: 72,
+            })
+          : [];
+        const oddsConsensus = buildOddsConsensusForFight({
+          rows: oddsRows,
+          fighterA: fight.fighterA,
+          fighterB: fight.fighterB,
+        });
         const fightLabel = `${fight.fighterA} vs ${fight.fighterB}`;
 
         lines.push(`${index + 1}. ${fightLabel}`);
@@ -3155,6 +3261,20 @@ export function createBettingWizard({
         );
         lines.push(`   Confianza: ${projection.confidence}%`);
         lines.push(`   Escenario: ${projection.scenario}`);
+        if (oddsConsensus) {
+          lines.push(
+            `   Consenso bookies (${oddsConsensus.bookmakersCount}): ${fight.fighterA} @${oddsConsensus.avgPriceA.toFixed(
+              2
+            )} vs ${fight.fighterB} @${oddsConsensus.avgPriceB.toFixed(2)}`
+          );
+          if (oddsConsensus.impliedA && oddsConsensus.impliedB) {
+            lines.push(
+              `   Prob. implícita mercado: ${fight.fighterA} ${oddsConsensus.impliedA.toFixed(
+                1
+              )}% | ${fight.fighterB} ${oddsConsensus.impliedB.toFixed(1)}%`
+            );
+          }
+        }
 
         for (const item of projection.evidence) {
           lines.push(

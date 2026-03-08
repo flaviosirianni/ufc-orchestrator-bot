@@ -6,12 +6,14 @@ import { runBettingWizardTests } from './bettingWizard.test.js';
 import { runHistoryScraperTests } from './historyScraper.test.js';
 import { runMessageFormatterTests } from './messageFormatter.test.js';
 import { runAutoSettlementTests } from './autoSettlement.test.js';
+import { runOddsApiToolTests } from './oddsApiTool.test.js';
 
 async function main() {
   await runRouterChainTests();
   await runConversationStoreTests();
   await runToolsHandlersTests();
   await runWebIntelToolTests();
+  await runOddsApiToolTests();
   await runHistoryScraperTests();
   await runAutoSettlementTests();
   await runBettingWizardTests();
