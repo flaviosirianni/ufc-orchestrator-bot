@@ -1990,13 +1990,13 @@ export async function runBettingWizardTests() {
     });
 
     const result = await wizard.handleMessage(
-      'mostrame ultimas novedades relevantes del proximo evento',
+      'mostrame ultimas novedaes del proximo evento',
       {
         chatId: 'chat-intel-news-1',
         userId: 'u-intel-news-1',
-        originalMessage: 'mostrame ultimas novedades relevantes del proximo evento',
+        originalMessage: 'mostrame ultimas novedaes del proximo evento',
         resolution: {
-          resolvedMessage: 'mostrame ultimas novedades relevantes del proximo evento',
+          resolvedMessage: 'mostrame ultimas novedaes del proximo evento',
         },
       }
     );
@@ -2079,6 +2079,58 @@ export async function runBettingWizardTests() {
           }
           return [];
         },
+        listLatestBetScoringForEvent() {
+          return [
+            {
+              eventId: 'ufc_999_2026-03-21',
+              fightId: 'fight_alpha_bravo',
+              fighterA: 'Alpha One',
+              fighterB: 'Bravo Two',
+              marketKey: 'moneyline',
+              selection: 'Bravo Two',
+              recommendation: 'bet',
+              edgePct: 6.4,
+              confidencePct: 68,
+              riskLevel: 'medium',
+              suggestedStakeUnits: 1.7,
+              consensusOdds: 2.03,
+              booksCount: 4,
+              createdAt: '2026-03-07T12:00:00.000Z',
+            },
+            {
+              eventId: 'ufc_999_2026-03-21',
+              fightId: 'fight_alpha_bravo',
+              fighterA: 'Alpha One',
+              fighterB: 'Bravo Two',
+              marketKey: 'method',
+              selection: 'Bravo Two por decision',
+              recommendation: 'lean',
+              edgePct: 2.5,
+              confidencePct: 58,
+              riskLevel: 'high',
+              suggestedStakeUnits: 0.8,
+              consensusOdds: 3.15,
+              booksCount: 3,
+              createdAt: '2026-03-07T12:00:00.000Z',
+            },
+            {
+              eventId: 'ufc_999_2026-03-21',
+              fightId: 'fight_charlie_delta',
+              fighterA: 'Charlie Three',
+              fighterB: 'Delta Four',
+              marketKey: 'total_rounds',
+              selection: 'Over 2.5 rounds',
+              recommendation: 'lean',
+              edgePct: 2.2,
+              confidencePct: 57,
+              riskLevel: 'medium',
+              suggestedStakeUnits: 0.7,
+              consensusOdds: 1.92,
+              booksCount: 3,
+              createdAt: '2026-03-07T12:00:00.000Z',
+            },
+          ];
+        },
       },
     });
 
@@ -2096,6 +2148,9 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /ventaja para Bravo Two/i);
     assert.match(result.reply, /Confianza:\s*\d+%/i);
     assert.match(result.reply, /Consenso bookies/i);
+    assert.match(result.reply, /Recomendacion backend:/i);
+    assert.match(result.reply, /Moneyline/i);
+    assert.match(result.reply, /Oportunidades precomputadas/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 

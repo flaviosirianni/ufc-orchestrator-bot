@@ -417,7 +417,7 @@ function hasCreditSignals(message = '') {
 function hasLatestNewsSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
-  return /\b(ultimas novedades|ultimas noticias|novedades|noticias relevantes|latest news|news)\b/.test(
+  return /\b(ultimas novedades|ultimas noticias|ultimas novedaes|novedades|novedaes|noticias relevantes|latest news|news)\b/.test(
     text
   ) && /\b(ufc|evento|proximo|peleador|peleadores)\b/.test(text);
 }
@@ -795,6 +795,136 @@ function describeProjectedMethod(method = '') {
     return 'Pelea cerrada, con ligera inclinacion a decision.';
   }
   return 'Escenario mixto con leve ventaja del lado proyectado.';
+}
+
+function betScoringRecommendationRank(value = 'no_bet') {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'bet') return 3;
+  if (key === 'lean') return 2;
+  return 1;
+}
+
+function betScoringMarketLabel(marketKey = '') {
+  const key = String(marketKey || '').trim().toLowerCase();
+  if (key === 'moneyline') return 'Moneyline';
+  if (key === 'method') return 'Metodo de victoria';
+  if (key === 'total_rounds') return 'Total rounds';
+  return key || 'Mercado';
+}
+
+function betScoringRecommendationBadge(value = 'no_bet') {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'bet') return '✅ BET';
+  if (key === 'lean') return '🟡 LEAN';
+  return '⛔ NO BET';
+}
+
+function betScoringRiskLabel(value = 'high') {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'low') return 'bajo';
+  if (key === 'medium') return 'medio';
+  return 'alto';
+}
+
+function describeBetScoringNoBetReason(reason = '') {
+  const key = String(reason || '').trim().toLowerCase();
+  if (key === 'projection_missing') return 'falta proyeccion confiable';
+  if (key === 'market_odds_unavailable') return 'sin cuotas disponibles';
+  if (key === 'selection_odds_unavailable') return 'sin precio para la seleccion';
+  if (key === 'insufficient_edge') return 'edge insuficiente';
+  return key ? key.replaceAll('_', ' ') : 'sin edge claro';
+}
+
+function compareBetScoringRows(left = {}, right = {}) {
+  const recDiff =
+    betScoringRecommendationRank(right?.recommendation) -
+    betScoringRecommendationRank(left?.recommendation);
+  if (recDiff !== 0) return recDiff;
+
+  const edgeDiff = Number(right?.edgePct || 0) - Number(left?.edgePct || 0);
+  if (edgeDiff !== 0) return edgeDiff;
+
+  const confidenceDiff = Number(right?.confidencePct || 0) - Number(left?.confidencePct || 0);
+  if (confidenceDiff !== 0) return confidenceDiff;
+
+  const booksDiff = Number(right?.booksCount || 0) - Number(left?.booksCount || 0);
+  if (booksDiff !== 0) return booksDiff;
+
+  const leftTs = Date.parse(String(left?.createdAt || '')) || 0;
+  const rightTs = Date.parse(String(right?.createdAt || '')) || 0;
+  return rightTs - leftTs;
+}
+
+function renderBetScoringLine(snapshot = {}) {
+  const rec = String(snapshot?.recommendation || 'no_bet').trim().toLowerCase();
+  const marketLabel = betScoringMarketLabel(snapshot?.marketKey);
+  const selection = String(snapshot?.selection || '').trim() || 'sin seleccion';
+  const odds =
+    Number.isFinite(Number(snapshot?.consensusOdds)) && Number(snapshot?.consensusOdds) > 1
+      ? ` @${Number(snapshot.consensusOdds).toFixed(2)}`
+      : '';
+
+  if (rec === 'no_bet') {
+    return `${betScoringRecommendationBadge(rec)} ${marketLabel}: ${selection}${odds} (${describeBetScoringNoBetReason(
+      snapshot?.noBetReason
+    )}).`;
+  }
+
+  const edge = Number(snapshot?.edgePct || 0).toFixed(1);
+  const confidence = Number(snapshot?.confidencePct || 0).toFixed(0);
+  const stake =
+    Number.isFinite(Number(snapshot?.suggestedStakeUnits)) &&
+    Number(snapshot?.suggestedStakeUnits) > 0
+      ? ` | stake ${formatUnits(snapshot.suggestedStakeUnits)}u`
+      : '';
+  return `${betScoringRecommendationBadge(rec)} ${marketLabel}: ${selection}${odds} | edge ${edge}% | confianza ${confidence}% | riesgo ${betScoringRiskLabel(
+    snapshot?.riskLevel
+  )}${stake}.`;
+}
+
+function resolveFightLabelForBetScoring(snapshot = {}, fights = []) {
+  const rows = Array.isArray(fights) ? fights : [];
+  for (const fight of rows) {
+    if (projectionSnapshotMatchesFight(snapshot, fight)) {
+      return `${fight.fighterA} vs ${fight.fighterB}`;
+    }
+  }
+  const fighterA = String(snapshot?.fighterA || '').trim();
+  const fighterB = String(snapshot?.fighterB || '').trim();
+  if (fighterA && fighterB) {
+    return `${fighterA} vs ${fighterB}`;
+  }
+  return 'Pelea no identificada';
+}
+
+function listTopEventBetOpportunities({ rows = [], fights = [], limit = 5 } = {}) {
+  const candidates = (Array.isArray(rows) ? rows : [])
+    .filter((row) => {
+      const recommendation = String(row?.recommendation || '').trim().toLowerCase();
+      if (recommendation !== 'bet' && recommendation !== 'lean') return false;
+      if (!Array.isArray(fights) || fights.length === 0) return true;
+      return fights.some((fight) => projectionSnapshotMatchesFight(row, fight));
+    })
+    .sort(compareBetScoringRows);
+
+  const max = Math.max(1, Math.min(10, Number(limit) || 5));
+  const seen = new Set();
+  const output = [];
+  for (const row of candidates) {
+    const fightKey =
+      String(row?.fightId || '').trim() ||
+      `${normalise(row?.fighterA || '')}::${normalise(row?.fighterB || '')}`;
+    const marketKey = String(row?.marketKey || '').trim().toLowerCase();
+    const dedupeKey = `${fightKey}::${marketKey}`;
+    if (!fightKey || !marketKey || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    output.push({
+      ...row,
+      fightLabel: resolveFightLabelForBetScoring(row, fights),
+    });
+    if (output.length >= max) break;
+  }
+  return output;
 }
 
 function isLiveFightQueueQuestion(message = '') {
@@ -3844,12 +3974,22 @@ export function createBettingWizard({
             latestPerFight: true,
           })
         : [];
+      const storedBetScoring = userStore?.listLatestBetScoringForEvent
+        ? userStore.listLatestBetScoringForEvent({
+            eventId: eventState.eventId,
+            limit: Math.max(60, fights.length * 4),
+            latestPerFightMarket: true,
+          })
+        : [];
       const hasStoredProjections = Array.isArray(storedProjections) && storedProjections.length > 0;
+      const hasStoredBetScoring = Array.isArray(storedBetScoring) && storedBetScoring.length > 0;
 
       const lines = [
         '📊 Proyecciones para el evento',
         `Evento: ${eventLabel}`,
-        hasStoredProjections
+        hasStoredProjections && hasStoredBetScoring
+          ? 'Base: proyecciones + scoring precomputado por mercado en backend.'
+          : hasStoredProjections
           ? 'Base: proyecciones precomputadas (noticias + consenso de cuotas) en backend.'
           : 'Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).',
         '',
@@ -3888,6 +4028,13 @@ export function createBettingWizard({
           fighterA: fight.fighterA,
           fighterB: fight.fighterB,
         });
+        const fightBetScoringRows = (Array.isArray(storedBetScoring) ? storedBetScoring : [])
+          .filter((row) => projectionSnapshotMatchesFight(row, fight))
+          .sort(compareBetScoringRows);
+        const primaryBetScoring = fightBetScoringRows[0] || null;
+        const alternativeBetScoring = fightBetScoringRows
+          .filter((row) => String(row?.recommendation || '').trim().toLowerCase() !== 'no_bet')
+          .slice(1, 2);
         const fightLabel = `${fight.fighterA} vs ${fight.fighterB}`;
 
         lines.push(`${index + 1}. ${fightLabel}`);
@@ -3902,6 +4049,12 @@ export function createBettingWizard({
         lines.push(`   Escenario: ${projection.scenario}`);
         if (projection.changeSummary) {
           lines.push(`   Cambio reciente: ${projection.changeSummary}`);
+        }
+        if (primaryBetScoring) {
+          lines.push(`   Recomendacion backend: ${renderBetScoringLine(primaryBetScoring)}`);
+          if (alternativeBetScoring.length) {
+            lines.push(`   Alternativa: ${renderBetScoringLine(alternativeBetScoring[0])}`);
+          }
         }
         if (oddsConsensus) {
           lines.push(
@@ -3918,11 +4071,23 @@ export function createBettingWizard({
           }
         }
 
-        if (Array.isArray(projection.keyFactors) && projection.keyFactors.length) {
+        const hasRelevantNewsEvidence = Array.isArray(projection.evidence)
+          ? projection.evidence.some((item) => impactRank(item?.impactLevel) >= 2)
+          : false;
+        const shouldShowSignals =
+          projection.changeSummary ||
+          (Array.isArray(projection.keyFactors) && projection.keyFactors.length > 0) ||
+          hasRelevantNewsEvidence;
+
+        if (
+          shouldShowSignals &&
+          Array.isArray(projection.keyFactors) &&
+          projection.keyFactors.length
+        ) {
           for (const factor of projection.keyFactors) {
             lines.push(`   Señal relevante: ${truncateText(String(factor || ''), 140)}`);
           }
-        } else {
+        } else if (shouldShowSignals) {
           for (const item of projection.evidence) {
             lines.push(
               `   Señal relevante: ${formatImpactBadge(item.impactLevel)} ${truncateText(
@@ -3931,6 +4096,20 @@ export function createBettingWizard({
               )}`
             );
           }
+        }
+        lines.push('');
+      }
+
+      const topOpportunities = listTopEventBetOpportunities({
+        rows: storedBetScoring,
+        fights,
+        limit: 5,
+      });
+      if (topOpportunities.length) {
+        lines.push('🔥 Oportunidades precomputadas (top del evento)');
+        for (const [index, item] of topOpportunities.entries()) {
+          lines.push(`${index + 1}. ${item.fightLabel}`);
+          lines.push(`   ${renderBetScoringLine(item)}`);
         }
         lines.push('');
       }
