@@ -1408,6 +1408,85 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal: Max Holloway ML.'),
+      responseWithText(
+        '{"eventName":"UFC 326","fighterA":"Max Holloway","fighterB":"Charles Oliveira","moneylineA":2.10,"moneylineB":1.75,"bookmaker":"bet365"}'
+      ),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_326_2026-03-07',
+            eventName: 'UFC 326',
+            eventDateUtc: '2026-03-07',
+            updatedAt: '2026-03-07T20:00:00Z',
+          };
+        },
+        listLatestBetScoringForEvent() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-07',
+              fightId: 'fight_2',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              marketKey: 'moneyline',
+              selection: 'Max Holloway',
+              recommendation: 'bet',
+              edgePct: 5.4,
+              confidencePct: 69,
+              modelProbabilityPct: 58.2,
+              impliedProbabilityPct: 52.8,
+              riskLevel: 'medium',
+              suggestedStakeUnits: 1.7,
+            },
+          ];
+        },
+        getLatestOddsSnapshot() {
+          return null;
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame pick de la estelar', {
+      chatId: 'chat-deterministic-media-1',
+      originalMessage: 'dame pick de la estelar',
+      inputItems: [
+        {
+          type: 'input_image',
+          image_url: 'data:image/jpeg;base64,ZmFrZQ==',
+        },
+      ],
+      mediaStats: {
+        imageCount: 1,
+        audioSeconds: 0,
+      },
+      resolution: {
+        resolvedMessage: 'dame pick de la estelar',
+        resolvedFight: {
+          fightId: 'fight_2',
+          fighterA: 'Max Holloway',
+          fighterB: 'Charles Oliveira',
+        },
+      },
+    });
+
+    assert.match(result.reply, /Ajuste deterministico \(cuota de tu bookie\)/i);
+    assert.match(result.reply, /Cuota usuario: @2\.10 \(media_extraida\)/i);
+    assert.equal(fakeClient.calls.length, 2);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
       responseWithText('Pick principal: Max Holloway ganador.'),
     ]);
 

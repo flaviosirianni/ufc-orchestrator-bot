@@ -1131,6 +1131,7 @@ function extractOddsCandidatesFromSnapshot(snapshot = {}, { selection = '', mark
 function resolveUserOddsForDeterministicAdjustment({
   originalMessage = '',
   oddsSnapshot = null,
+  mediaOddsExtraction = null,
   selection = '',
   marketKey = '',
 } = {}) {
@@ -1149,6 +1150,54 @@ function resolveUserOddsForDeterministicAdjustment({
       ambiguous: true,
       candidates: textCandidates,
     };
+  }
+
+  const media = mediaOddsExtraction?.extracted || null;
+  if (media && String(marketKey || '').trim().toLowerCase() === 'moneyline') {
+    const tokenSource = selectionMatchTokens(selection);
+    const fighterATokens = selectionMatchTokens(media.fighterA || '');
+    const fighterBTokens = selectionMatchTokens(media.fighterB || '');
+    const selectionNorm = normalise(selection);
+
+    const matchesA =
+      tokenSource.some((token) => fighterATokens.includes(token)) ||
+      (media.fighterA && selectionNorm.includes(normalise(media.fighterA)));
+    const matchesB =
+      tokenSource.some((token) => fighterBTokens.includes(token)) ||
+      (media.fighterB && selectionNorm.includes(normalise(media.fighterB)));
+
+    if (matchesA && Number.isFinite(Number(media.moneylineA))) {
+      return {
+        odds: Number(media.moneylineA),
+        source: 'media_extraida',
+        ambiguous: false,
+      };
+    }
+    if (matchesB && Number.isFinite(Number(media.moneylineB))) {
+      return {
+        odds: Number(media.moneylineB),
+        source: 'media_extraida',
+        ambiguous: false,
+      };
+    }
+    const mediaCandidates = [toOddsNumber(media.moneylineA), toOddsNumber(media.moneylineB)].filter(
+      (value) => Number.isFinite(Number(value))
+    );
+    if (mediaCandidates.length === 1) {
+      return {
+        odds: Number(mediaCandidates[0]),
+        source: 'media_extraida',
+        ambiguous: false,
+      };
+    }
+    if (mediaCandidates.length > 1) {
+      return {
+        odds: null,
+        source: 'media_extraida',
+        ambiguous: true,
+        candidates: mediaCandidates.map((value) => Number(Number(value).toFixed(3))),
+      };
+    }
   }
 
   const snapshotCandidates = extractOddsCandidatesFromSnapshot(oddsSnapshot, {
@@ -1254,6 +1303,7 @@ function enforceDeterministicOddsAdjustment({
   resolvedFight = null,
   precomputedFightBetScoring = [],
   oddsSnapshot = null,
+  mediaOddsExtraction = null,
 } = {}) {
   const text = String(reply || '').trim();
   if (!text) return text;
@@ -1275,6 +1325,7 @@ function enforceDeterministicOddsAdjustment({
   const userOdds = resolveUserOddsForDeterministicAdjustment({
     originalMessage,
     oddsSnapshot,
+    mediaOddsExtraction,
     selection: target.selection,
     marketKey: target.marketKey,
   });
@@ -3204,6 +3255,76 @@ async function extractBetRecordFromMedia({
       ok: true,
       extracted,
     };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function extractMoneylineOddsFromMedia({
+  client,
+  model = DECISION_MODEL || MODEL,
+  originalMessage = '',
+  inputItems = [],
+} = {}) {
+  if (!client || !hasImageInputItems(inputItems)) {
+    return { ok: false, error: 'no_media' };
+  }
+
+  const mediaPayload = inputItems.filter(
+    (item) => item?.type === 'input_image' || item?.type === 'input_file'
+  );
+  if (!mediaPayload.length) {
+    return { ok: false, error: 'no_supported_media' };
+  }
+
+  const extractionInstructions = [
+    'Extrae cuotas de una captura de apuestas MMA/UFC.',
+    'Devuelve SOLO JSON válido con estas claves:',
+    'eventName, fight, fighterA, fighterB, moneylineA, moneylineB, bookmaker.',
+    'moneylineA/moneylineB deben ser cuotas decimales (number) o null.',
+    'Si no se puede leer con claridad, devuelve null.',
+    'No agregues texto fuera del JSON.',
+  ].join(' ');
+
+  const extractionPrompt = [
+    '[USER_MESSAGE]',
+    String(originalMessage || '').trim() || 'N/D',
+    '',
+    'Objetivo: rescatar cuotas moneyline para ajuste deterministico.',
+  ].join('\n');
+
+  const input = [
+    {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: extractionPrompt },
+        ...mediaPayload,
+      ],
+    },
+  ];
+
+  try {
+    const response = await client.responses.create({
+      model: model || MODEL,
+      temperature: 0,
+      instructions: extractionInstructions,
+      input,
+    });
+    const text = extractResponseText(response);
+    const parsed = extractFirstJsonObject(text) || {};
+    const extracted = {
+      eventName: parsed.eventName ? String(parsed.eventName).trim() : null,
+      fight: parsed.fight ? String(parsed.fight).trim() : null,
+      fighterA: parsed.fighterA ? String(parsed.fighterA).trim() : null,
+      fighterB: parsed.fighterB ? String(parsed.fighterB).trim() : null,
+      moneylineA: toOddsNumber(parsed.moneylineA),
+      moneylineB: toOddsNumber(parsed.moneylineB),
+      bookmaker: parsed.bookmaker ? String(parsed.bookmaker).trim() : null,
+    };
+    return { ok: true, extracted };
   } catch (error) {
     return {
       ok: false,
@@ -6048,6 +6169,15 @@ export function createBettingWizard({
           latestOddsSnapshot = refreshed;
         }
       }
+      let mediaOddsExtraction = null;
+      if (wantsBetDecision && hasMedia && !hasConcreteOddsContext(originalMessage)) {
+        mediaOddsExtraction = await extractMoneylineOddsFromMedia({
+          client,
+          model: modelToUse || MODEL,
+          originalMessage,
+          inputItems: mediaItems,
+        });
+      }
 
       if (
         shouldRunPickCommittee({
@@ -6126,6 +6256,7 @@ export function createBettingWizard({
             resolvedFight: resolution?.resolvedFight || runtimeState?.resolvedFight || null,
             precomputedFightBetScoring,
             oddsSnapshot: latestOddsSnapshot,
+            mediaOddsExtraction,
           });
       const replyWithRationale = committeeBlocked
         ? replyWithDeterministicAdjustment
