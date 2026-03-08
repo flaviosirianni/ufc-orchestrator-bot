@@ -24,29 +24,17 @@ const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MAIN_MENU_ROWS = [
   [
     { text: 'Apuestas', callback_data: 'menu:bets' },
+    { text: 'Evento', callback_data: 'menu:event' },
+  ],
+  [
     { text: 'Config', callback_data: 'menu:config' },
-  ],
-  [
-    { text: 'Analizar pelea', callback_data: 'qa:analyze_fight' },
-    { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-  ],
-  [
-    { text: 'Proyecciones', callback_data: 'qa:event_projections' },
-    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
-  ],
-  [
-    { text: 'Cargar creditos', callback_data: 'qa:topup_credits' },
     { text: 'Ayuda', callback_data: 'qa:help' },
   ],
 ];
 
 const BETS_MENU_ROWS = [
   [
-    { text: 'Analizar pelea', callback_data: 'qa:analyze_fight' },
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-  ],
-  [
-    { text: 'Abrir (setup)', callback_data: 'act:bet_open' },
     { text: 'Registrar', callback_data: 'act:bet_record' },
   ],
   [
@@ -54,10 +42,18 @@ const BETS_MENU_ROWS = [
     { text: 'Cerrar', callback_data: 'qa:settle_bet' },
   ],
   [
-    { text: 'Corregir ultima', callback_data: 'qa:undo_last' },
-    { text: 'Ayuda', callback_data: 'qa:help' },
+    { text: 'Corregir', callback_data: 'qa:undo_last' },
+    { text: '⬅ Volver', callback_data: 'menu:main' },
+  ],
+];
+
+const EVENT_MENU_ROWS = [
+  [
+    { text: 'Proyecciones', callback_data: 'qa:event_projections' },
+    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
   ],
   [
+    { text: 'Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
     { text: '⬅ Volver', callback_data: 'menu:main' },
   ],
 ];
@@ -65,26 +61,20 @@ const BETS_MENU_ROWS = [
 const CONFIG_MENU_ROWS = [
   [
     { text: 'Ver config', callback_data: 'qa:view_config' },
-    { text: 'Stake minimo', callback_data: 'act:cfg_stake' },
+    { text: 'Unidad', callback_data: 'act:cfg_unit' },
   ],
   [
-    { text: 'Unidad', callback_data: 'act:cfg_unit' },
     { text: 'Riesgo', callback_data: 'act:cfg_risk' },
   ],
   [
     { text: 'Bankroll', callback_data: 'act:cfg_bankroll' },
-    { text: 'Timezone', callback_data: 'act:cfg_timezone' },
+    { text: 'Stake/Exposicion', callback_data: 'act:cfg_stake_exposure' },
   ],
   [
-    { text: 'Exposicion %', callback_data: 'act:cfg_utilization' },
+    { text: 'Timezone', callback_data: 'act:cfg_timezone' },
     { text: 'Creditos', callback_data: 'qa:view_credits' },
   ],
   [
-    { text: 'Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
-    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
-  ],
-  [
-    { text: 'Ayuda', callback_data: 'qa:help' },
     { text: '⬅ Volver', callback_data: 'menu:main' },
   ],
 ];
@@ -184,6 +174,13 @@ const QUICK_ACTION_HINTS = {
     '- `utilizacion objetivo 35%`',
     '- `exposicion objetivo evento 40`',
   ].join('\n'),
+  config_stake_exposure: [
+    '⚙️ Stake / Exposicion',
+    'Podés configurar ambas en mensajes separados o juntos.',
+    'Ejemplos:',
+    '- `mi stake minimo es $3000 y minimo 4u por pick`',
+    '- `utilizacion objetivo 35%`',
+  ].join('\n'),
   config_news_alerts_toggle: [
     '🔔 Alertas de noticias',
     'Activa o desactiva avisos automáticos de cambios relevantes del evento.',
@@ -195,31 +192,33 @@ const QUICK_ACTION_HINTS = {
   help: [
     '🆘 Ayuda de botones',
     '',
+    '🏠 Principal',
+    '- `Apuestas`: operaciones de ledger y lectura de cuotas.',
+    '- `Evento`: proyecciones y novedades del próximo evento.',
+    '- `Config`: ajustes de perfil de staking.',
+    '',
     '📚 Apuestas',
-    '- `Analizar pelea`: lectura cualitativa (sin cuotas).',
     '- `Analizar cuotas`: lectura + EV con odds/quotes.',
-    '- `Abrir (setup)`: plan de entrada y riesgos sin registrar en ledger.',
     '- `Registrar`: guarda la apuesta en ledger.',
     '- `Pendientes`: lista apuestas abiertas con bet_id.',
     '- `Cerrar`: cierra una apuesta (`bet_id + WON/LOST`).',
-    '- `Corregir ultima`: revierte la última mutación sensible.',
+    '- `Corregir`: revierte la última mutación sensible.',
     '',
     '⚙️ Config',
     '- `Ver config`: muestra tus ajustes actuales.',
-    '- `Stake minimo / Unidad / Riesgo / Bankroll / Timezone / Exposicion %`: actualizan tu perfil.',
-    '- `Alertas noticias`: activa/desactiva avisos automáticos de novedades relevantes.',
+    '- `Unidad / Riesgo / Bankroll / Stake-Exposicion / Timezone`: actualizan tu perfil.',
     '- `Creditos`: muestra saldo y movimientos.',
-    '- `Cargar creditos`: abre el flujo de recarga (Mercado Pago) si está configurado.',
     '',
-    '🧠 Intel del evento',
+    '🧠 Evento',
     '- `Proyecciones`: lectura actual pelea por pelea + confianza.',
     '- `Ultimas novedades`: resumen de noticias relevantes recientes.',
+    '- `Alertas noticias`: activa/desactiva avisos automáticos de novedades relevantes.',
     '',
     'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
 };
 
-const MENU_SCOPES = new Set(['main', 'bets', 'config']);
+const MENU_SCOPES = new Set(['main', 'bets', 'event', 'config']);
 
 function normalizeMenuScope(scope = 'main') {
   const normalized = String(scope || '').trim().toLowerCase();
@@ -392,6 +391,11 @@ export function startTelegramBot(router) {
         inline_keyboard: BETS_MENU_ROWS,
       };
     }
+    if (scope === 'event') {
+      return {
+        inline_keyboard: EVENT_MENU_ROWS,
+      };
+    }
     if (scope === 'config') {
       return {
         inline_keyboard: CONFIG_MENU_ROWS,
@@ -459,6 +463,9 @@ export function startTelegramBot(router) {
   async function sendMenu(chatId, scope = 'main') {
     if (scope === 'bets') {
       return sendBotMessage(chatId, '📚 Menu Apuestas', { menuScope: 'bets' });
+    }
+    if (scope === 'event') {
+      return sendBotMessage(chatId, '🧠 Menu Evento', { menuScope: 'event' });
     }
     if (scope === 'config') {
       return sendBotMessage(chatId, '⚙️ Menu Config', { menuScope: 'config' });
@@ -707,6 +714,10 @@ export function startTelegramBot(router) {
       await sendMenu(chatId, 'bets');
       return;
     }
+    if (data === 'menu:event') {
+      await sendMenu(chatId, 'event');
+      return;
+    }
     if (data === 'menu:config') {
       await sendMenu(chatId, 'config');
       return;
@@ -809,6 +820,12 @@ export function startTelegramBot(router) {
       await sendBotMessage(chatId, QUICK_ACTION_HINTS.config_utilization, { menuScope: 'config' });
       return;
     }
+    if (data === 'act:cfg_stake_exposure') {
+      await sendBotMessage(chatId, QUICK_ACTION_HINTS.config_stake_exposure, {
+        menuScope: 'config',
+      });
+      return;
+    }
 
     const syntheticByAction = {
       'qa:list_pending': 'mostrame mis apuestas pending del ledger con bet_id',
@@ -832,7 +849,8 @@ export function startTelegramBot(router) {
       'qa:undo_last': 'bets',
       'qa:view_config': 'config',
       'qa:view_credits': 'config',
-      'qa:event_projections': 'main',
+      'qa:event_projections': 'event',
+      'qa:latest_news': 'event',
       'act:cfg_news_alerts_toggle': 'config',
     };
     const menuScope = menuScopeByAction[data] || getMenuScope(chatId);
