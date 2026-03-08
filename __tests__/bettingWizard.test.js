@@ -898,6 +898,142 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_324_2026-04-18',
+            eventName: 'UFC 324',
+            eventDateUtc: '2026-04-18',
+            mainCard: [],
+            updatedAt: '2026-03-06T00:00:00Z',
+          };
+        },
+        async resolveLiveEventContext() {
+          return {
+            eventName: 'UFC 326',
+            date: '2026-03-07',
+            source: 'ufc.com',
+            fights: [
+              { fighterA: 'Max Holloway', fighterB: 'Charles Oliveira' },
+              { fighterA: 'Caio Borralho', fighterB: 'Reinier de Ridder' },
+            ],
+          };
+        },
+        listUpcomingOddsEvents() {
+          return [];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'fijate online el evento que esta en vivo ahora mismo de la ufc',
+      {
+        chatId: 'chat-live-status-1',
+        originalMessage: 'fijate online el evento que esta en vivo ahora mismo de la ufc',
+        resolution: {
+          resolvedMessage: 'fijate online el evento que esta en vivo ahora mismo de la ufc',
+        },
+      }
+    );
+
+    assert.match(result.reply, /Estado UFC en vivo/i);
+    assert.match(result.reply, /UFC 326/);
+    assert.doesNotMatch(result.reply, /Proyecciones para el evento/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal: Max Holloway ganador.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_326_2026-03-07',
+            eventName: 'UFC 326',
+            eventDateUtc: '2026-03-07',
+            mainCard: [],
+            updatedAt: '2026-03-07T20:00:00Z',
+          };
+        },
+        listLatestProjectionSnapshotsForEvent() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-07',
+              fightId: 'fight_2',
+              fighterA: 'Max Holloway',
+              fighterB: 'Charles Oliveira',
+              predictedWinner: 'Max Holloway',
+              confidencePct: 68,
+              keyFactors: ['Consenso cuotas favorable en 5 casas'],
+              createdAt: '2026-03-07T21:00:00Z',
+            },
+          ];
+        },
+        listLatestOddsMarketsForFight() {
+          return [
+            {
+              bookmakerKey: 'draftkings',
+              fetchedAt: '2026-03-07T22:00:00Z',
+              outcomeAName: 'Max Holloway',
+              outcomeAPrice: 1.78,
+              outcomeBName: 'Charles Oliveira',
+              outcomeBPrice: 2.06,
+            },
+            {
+              bookmakerKey: 'fanduel',
+              fetchedAt: '2026-03-07T22:01:00Z',
+              outcomeAName: 'Max Holloway',
+              outcomeAPrice: 1.8,
+              outcomeBName: 'Charles Oliveira',
+              outcomeBPrice: 2.02,
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick para esta pelea', {
+      chatId: 'chat-precomputed-pick-1',
+      originalMessage: 'dame un pick para esta pelea',
+      resolution: {
+        resolvedMessage: 'dame un pick para esta pelea',
+        resolvedFight: {
+          fightId: 'fight_2',
+          fighterA: 'Max Holloway',
+          fighterB: 'Charles Oliveira',
+        },
+      },
+    });
+
+    assert.match(result.reply, /Pick principal/);
+    assert.match(fakeClient.calls[0]?.input || '', /\[PRECOMPUTED_PROJECTION\]/);
+    assert.match(fakeClient.calls[0]?.input || '', /\[CACHED_ODDS_CONSENSUS\]/);
+    assert.match(fakeClient.calls[0]?.input || '', /Max Holloway/);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('todo bien')]);
 
     const wizard = createBettingWizard({

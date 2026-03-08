@@ -48,6 +48,7 @@ import {
   getLatestOddsApiQuotaState,
   listLatestOddsMarketsForFight,
   listLatestOddsMarketsForEvent,
+  listUpcomingOddsEvents,
   upsertOddsEventsIndex,
   insertOddsMarketSnapshots,
   getLatestProjectionForFight,
@@ -331,8 +332,20 @@ function bootstrap() {
       updateUserIntelPrefs,
       listLatestOddsMarketsForFight,
       listLatestOddsMarketsForEvent,
+      listUpcomingOddsEvents,
       getLatestOddsApiQuotaState,
       listLatestProjectionSnapshotsForEvent,
+      resolveLiveEventContext: async ({ referenceDate } = {}) => {
+        const ref = referenceDate instanceof Date ? referenceDate : new Date();
+        const refIsoDate = ref.toISOString().slice(0, 10);
+        return webIntel.buildWebContextForMessage(
+          `quien pelea en la cartelera ufc del ${refIsoDate}?`,
+          {
+            force: true,
+            referenceDate: ref,
+          }
+        );
+      },
     },
   });
 

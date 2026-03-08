@@ -425,9 +425,18 @@ function hasLatestNewsSignals(message = '') {
 function hasEventProjectionSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
-  return /\b(proyeccion|proyecciones|prediccion|predicciones|que crees que va a pasar|evento)\b/.test(
+  return /\b(proyeccion|proyecciones|prediccion|predicciones|que crees que va a pasar|projections?)\b/.test(
     text
   ) && /\b(ufc|evento|proximo|pelea|peleas)\b/.test(text);
+}
+
+function hasLiveEventStatusSignals(message = '') {
+  const text = normalise(message);
+  if (!text) return false;
+  const hasLiveWords = /\b(ahora|ahora mismo|en vivo|vivo|live|en este momento)\b/.test(text);
+  const hasEventWords = /\b(ufc|evento|cartelera|main card|main event)\b/.test(text);
+  const hasAskWords = /\b(que|cual|fijate|decime|dime|mostrame|hay|esta)\b/.test(text);
+  return hasLiveWords && hasEventWords && hasAskWords;
 }
 
 function parseNewsAlertsIntent(message = '') {
@@ -537,6 +546,63 @@ function formatEventDateLabel(eventDateUtc = '', timezone = DEFAULT_USER_TIMEZON
   if (!raw) return 'N/D';
   const isoLike = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00Z` : raw;
   return formatIsoForUser(isoLike, timezone);
+}
+
+function toIsoDateSafe(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parsedMs = Date.parse(raw);
+  if (!Number.isFinite(parsedMs)) return null;
+  return new Date(parsedMs).toISOString().slice(0, 10);
+}
+
+function dateDiffInDays(isoA = '', isoB = '') {
+  const a = String(isoA || '').trim();
+  const b = String(isoB || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(a) || !/^\d{4}-\d{2}-\d{2}$/.test(b)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const msA = Date.parse(`${a}T00:00:00Z`);
+  const msB = Date.parse(`${b}T00:00:00Z`);
+  if (!Number.isFinite(msA) || !Number.isFinite(msB)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.round((msA - msB) / 86400000);
+}
+
+function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now()) {
+  const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
+  if (!rows.length) return [];
+  const near = rows
+    .filter((row) => {
+      const commenceMs = Date.parse(String(row?.commenceTime || ''));
+      if (!Number.isFinite(commenceMs)) return false;
+      const deltaHours = Math.abs(commenceMs - nowMs) / 3600000;
+      return deltaHours <= 10;
+    })
+    .sort((a, b) => {
+      const aMs = Date.parse(String(a?.commenceTime || '')) || 0;
+      const bMs = Date.parse(String(b?.commenceTime || '')) || 0;
+      const aDelta = Math.abs(aMs - nowMs);
+      const bDelta = Math.abs(bMs - nowMs);
+      if (aDelta !== bDelta) return aDelta - bDelta;
+      return aMs - bMs;
+    });
+
+  const seen = new Set();
+  const hints = [];
+  for (const row of near) {
+    const home = String(row?.homeTeam || '').trim();
+    const away = String(row?.awayTeam || '').trim();
+    if (!home || !away) continue;
+    const key = [normalise(home), normalise(away)].sort().join('::');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    hints.push(`${home} vs ${away}`);
+    if (hints.length >= 4) break;
+  }
+  return hints;
 }
 
 function buildFightProjection({ fight = {}, newsItems = [] } = {}) {
@@ -3022,6 +3088,7 @@ export function createBettingWizard({
     const wantsBetDecision = hasBetDecisionSignals(originalMessage);
     const wantsLatestNews = hasLatestNewsSignals(originalMessage);
     const wantsEventProjections = hasEventProjectionSignals(originalMessage);
+    const wantsLiveEventStatus = hasLiveEventStatusSignals(originalMessage);
     const newsAlertsIntent = parseNewsAlertsIntent(originalMessage);
     let oddsSnapshot = null;
     let ledgerSummary = null;
@@ -3145,6 +3212,113 @@ export function createBettingWizard({
           eventCard: runtimeState.eventCard,
         },
       };
+    }
+
+    if (wantsLiveEventStatus) {
+      const userTimezone = userProfile?.timezone || temporalContext.timezone || DEFAULT_USER_TIMEZONE;
+      const localNow = extractLocalDateTimeParts(new Date(), userTimezone);
+      const nowMs = Date.now();
+
+      const nextEventState = userStore?.getEventWatchState?.('next_event') || null;
+      const nextEventDateIso = toIsoDateSafe(nextEventState?.eventDateUtc);
+      const nextEventDayDiff = nextEventDateIso
+        ? Math.abs(dateDiffInDays(nextEventDateIso, localNow.dateIso))
+        : Number.POSITIVE_INFINITY;
+      const canTrustNextEventAsLive = Boolean(nextEventState?.eventName) && nextEventDayDiff <= 1;
+
+      const oddsWindowEvents = userStore?.listUpcomingOddsEvents
+        ? userStore.listUpcomingOddsEvents({
+            fromIso: new Date(nowMs - 8 * 3600000).toISOString(),
+            limit: 80,
+          })
+        : [];
+      const liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
+
+      let liveWebContext = null;
+      if (typeof userStore?.resolveLiveEventContext === 'function') {
+        const referenceDates = [new Date(nowMs), new Date(nowMs - 4 * 3600000)];
+        for (const referenceDate of referenceDates) {
+          try {
+            const context = await userStore.resolveLiveEventContext({
+              referenceDate,
+              originalMessage,
+            });
+            if (context?.eventName) {
+              liveWebContext = context;
+              break;
+            }
+          } catch (error) {
+            console.error('⚠️ live event web context failed:', error);
+          }
+        }
+      }
+
+      const resolvedEventName =
+        String(liveWebContext?.eventName || '').trim() ||
+        (canTrustNextEventAsLive ? String(nextEventState?.eventName || '').trim() : '');
+      const resolvedEventDate =
+        toIsoDateSafe(liveWebContext?.date || '') ||
+        (canTrustNextEventAsLive ? nextEventDateIso : null);
+
+      if (resolvedEventName) {
+        const lines = [
+          '🔴 Estado UFC en vivo (validacion actual)',
+          `Evento detectado: ${resolvedEventName}`,
+          `Referencia temporal usada: ${localNow.dateIso} ${localNow.hour}:${localNow.minute} (${userTimezone})`,
+        ];
+        if (resolvedEventDate) {
+          lines.push(
+            `Fecha estimada del evento: ${formatEventDateLabel(resolvedEventDate, userTimezone)}`
+          );
+        }
+
+        const webFights = Array.isArray(liveWebContext?.fights)
+          ? liveWebContext.fights
+              .filter((fight) => fight?.fighterA && fight?.fighterB)
+              .slice(0, 4)
+              .map((fight) => `${fight.fighterA} vs ${fight.fighterB}`)
+          : [];
+        const fightHints = webFights.length ? webFights : liveOddsHints;
+        if (fightHints.length) {
+          lines.push('', 'Cruces detectados alrededor de ahora:');
+          for (const [index, fightText] of fightHints.entries()) {
+            lines.push(`${index + 1}. ${fightText}`);
+          }
+        }
+
+        lines.push(
+          '',
+          liveWebContext?.source
+            ? `Fuente primaria: ${liveWebContext.source}.`
+            : 'Fuente primaria: reconciliacion interna (cache + tiempo).'
+        );
+
+        return {
+          reply: lines.join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (liveOddsHints.length) {
+        return {
+          reply: [
+            '🔴 Detecté actividad de peleas UFC/MMA alrededor de ahora, pero no pude confirmar con certeza el nombre oficial del evento en este turno.',
+            `Referencia temporal usada: ${localNow.dateIso} ${localNow.hour}:${localNow.minute} (${userTimezone})`,
+            '',
+            'Cruces detectados:',
+            ...liveOddsHints.map((fight, index) => `${index + 1}. ${fight}`),
+            '',
+            'Si queres, lo reintento con una consulta web puntual para validar el nombre oficial del evento.',
+          ].join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
     }
 
     if ((wantsLatestNews || wantsEventProjections) && userStore?.getEventWatchState) {
@@ -4386,6 +4560,60 @@ export function createBettingWizard({
         }
       }
 
+      let precomputedEventProjections = [];
+      let precomputedFightProjection = null;
+      if (
+        wantsBetDecision &&
+        typeof userStore?.listLatestProjectionSnapshotsForEvent === 'function'
+      ) {
+        const eventState = userStore?.getEventWatchState?.('next_event');
+        if (eventState?.eventId) {
+          precomputedEventProjections =
+            userStore.listLatestProjectionSnapshotsForEvent({
+              eventId: eventState.eventId,
+              limit: 20,
+              latestPerFight: true,
+            }) || [];
+          if (resolution?.resolvedFight) {
+            precomputedFightProjection =
+              precomputedEventProjections.find((snapshot) =>
+                projectionSnapshotMatchesFight(snapshot, resolution.resolvedFight)
+              ) || null;
+          }
+        }
+      }
+
+      let cachedFightOddsConsensus = null;
+      if (
+        wantsBetDecision &&
+        resolution?.resolvedFight?.fighterA &&
+        resolution?.resolvedFight?.fighterB &&
+        typeof userStore?.listLatestOddsMarketsForFight === 'function'
+      ) {
+        const oddsRows = userStore.listLatestOddsMarketsForFight({
+          fighterA: resolution.resolvedFight.fighterA,
+          fighterB: resolution.resolvedFight.fighterB,
+          marketKey: 'h2h',
+          limit: 60,
+          maxAgeHours: 96,
+        });
+        const consensus = buildOddsConsensusForFight({
+          rows: oddsRows,
+          fighterA: resolution.resolvedFight.fighterA,
+          fighterB: resolution.resolvedFight.fighterB,
+        });
+        if (consensus) {
+          cachedFightOddsConsensus = {
+            fight: `${resolution.resolvedFight.fighterA} vs ${resolution.resolvedFight.fighterB}`,
+            bookmakersCount: consensus.bookmakersCount,
+            avgPriceA: Number(consensus.avgPriceA.toFixed(3)),
+            avgPriceB: Number(consensus.avgPriceB.toFixed(3)),
+            impliedA: consensus.impliedA ? Number(consensus.impliedA.toFixed(2)) : null,
+            impliedB: consensus.impliedB ? Number(consensus.impliedB.toFixed(2)) : null,
+          };
+        }
+      }
+
       const extraSections = [];
       if (wantsLedger && ledgerSummary) {
         extraSections.push(
@@ -4403,6 +4631,25 @@ export function createBettingWizard({
 
       if ((wantsOdds || wantsBetDecision) && oddsSnapshot) {
         extraSections.push('[ODDS_SNAPSHOT]', JSON.stringify(oddsSnapshot, null, 2));
+      }
+
+      if (wantsBetDecision && precomputedFightProjection) {
+        extraSections.push(
+          '[PRECOMPUTED_PROJECTION]',
+          JSON.stringify(precomputedFightProjection, null, 2)
+        );
+      } else if (wantsBetDecision && precomputedEventProjections.length) {
+        extraSections.push(
+          '[PRECOMPUTED_EVENT_PROJECTIONS]',
+          JSON.stringify(precomputedEventProjections.slice(0, 8), null, 2)
+        );
+      }
+
+      if (wantsBetDecision && cachedFightOddsConsensus) {
+        extraSections.push(
+          '[CACHED_ODDS_CONSENSUS]',
+          JSON.stringify(cachedFightOddsConsensus, null, 2)
+        );
       }
 
       const userPayload = buildUserPayload({
