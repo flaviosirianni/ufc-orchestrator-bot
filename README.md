@@ -137,6 +137,9 @@ ODDS_INTEL_SCORES_INTERVAL_MS=14400000
 ODDS_INTEL_MIN_REQUESTS_REMAINING=20
 ODDS_INTEL_SCORES_DAYS_FROM=2
 ODDS_INTEL_LOOKAHEAD_DAYS=45
+PRE_FIGHT_ANALYSIS_INTERVAL_MS=10800000
+PRE_FIGHT_ANALYSIS_REASONING_VERSION=v1_news_odds
+PRE_FIGHT_ANALYSIS_CHANGE_THRESHOLD=6
 ODDS_API_CACHE_TTL_SPORTS_MS=86400000
 ODDS_API_CACHE_TTL_ODDS_MS=1200000
 ODDS_API_CACHE_TTL_SCORES_MS=300000
@@ -204,9 +207,12 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - upcoming MMA/UFC events index,
   - bookmaker odds snapshots,
   - scores (for completion tracking).
+- Pre-analysis monitor (`preFightAnalysis`) materializes fight projection snapshots in DB so the wizard can render precomputed recommendations quickly.
 - Quota guardrails:
   - stores `x-requests-*` headers on each call,
   - skips non-critical syncs when remaining quota falls below `ODDS_INTEL_MIN_REQUESTS_REMAINING`.
+- Date guardrail: The Odds API requires `commenceTimeFrom/commenceTimeTo/date` as `YYYY-MM-DDTHH:MM:SSZ` (no milliseconds). The tool now normalizes this automatically.
+- Plan guardrail: historical endpoints return `HISTORICAL_UNAVAILABLE_ON_FREE_USAGE_PLAN` on free tier; current integration logs this cleanly and does not rely on historical data for baseline operation.
 - Product note: The Odds API does not provide fighter news articles or deep fighter statistics; for that, the bot keeps using web/news intelligence.
 
 ### Media Inputs (Fotos y Audio)

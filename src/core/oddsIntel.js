@@ -38,7 +38,7 @@ function toFightKey(a = '', b = '') {
 
 function shiftIsoUtc(daysDelta = 0) {
   const date = new Date(Date.now() + Number(daysDelta || 0) * 86400000);
-  return date.toISOString();
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function mapEventIndexRows(payload = [], sportKey = ODDS_INTEL_SPORT_KEY) {

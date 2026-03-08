@@ -12,6 +12,7 @@ import { createSessionLogger } from './sessionLogger.js';
 import { startAutoSettlementMonitor } from './autoSettlement.js';
 import { startEventIntelMonitor } from './eventIntel.js';
 import { startOddsIntelMonitor } from './oddsIntel.js';
+import { startPreFightAnalysisMonitor } from './preFightAnalysis.js';
 import {
   getUserProfile,
   updateUserProfile,
@@ -49,6 +50,9 @@ import {
   listLatestOddsMarketsForEvent,
   upsertOddsEventsIndex,
   insertOddsMarketSnapshots,
+  getLatestProjectionForFight,
+  insertFightProjectionSnapshots,
+  listLatestProjectionSnapshotsForEvent,
   getDbPath,
 } from './sqliteStore.js';
 import {
@@ -328,6 +332,7 @@ function bootstrap() {
       listLatestOddsMarketsForFight,
       listLatestOddsMarketsForEvent,
       getLatestOddsApiQuotaState,
+      listLatestProjectionSnapshotsForEvent,
     },
   });
 
@@ -372,6 +377,14 @@ function bootstrap() {
     upsertOddsEventsIndex,
     insertOddsMarketSnapshots,
     getEventWatchState,
+  });
+
+  startPreFightAnalysisMonitor({
+    getEventWatchState,
+    listLatestRelevantNews,
+    listLatestOddsMarketsForFight,
+    getLatestProjectionForFight,
+    insertFightProjectionSnapshots,
   });
 
   const port = Number(process.env.PORT || 3000);

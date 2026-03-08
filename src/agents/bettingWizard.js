@@ -690,6 +690,32 @@ function buildOddsConsensusForFight({
   };
 }
 
+function projectionSnapshotMatchesFight(snapshot = {}, fight = {}) {
+  const snapshotFightId = String(snapshot?.fightId || '').trim();
+  const fightId = String(fight?.fightId || '').trim();
+  if (snapshotFightId && fightId && snapshotFightId === fightId) {
+    return true;
+  }
+
+  const snapA = normalise(snapshot?.fighterA || '');
+  const snapB = normalise(snapshot?.fighterB || '');
+  const fightA = normalise(fight?.fighterA || '');
+  const fightB = normalise(fight?.fighterB || '');
+  if (!snapA || !snapB || !fightA || !fightB) return false;
+  return (snapA === fightA && snapB === fightB) || (snapA === fightB && snapB === fightA);
+}
+
+function describeProjectedMethod(method = '') {
+  const key = String(method || '').trim().toLowerCase();
+  if (key === 'inside_distance_or_clear_decision') {
+    return 'Ventaja clara para llevarse la pelea.';
+  }
+  if (key === 'decision_lean') {
+    return 'Pelea cerrada, con ligera inclinacion a decision.';
+  }
+  return 'Escenario mixto con leve ventaja del lado proyectado.';
+}
+
 function isLiveFightQueueQuestion(message = '') {
   const text = normalise(message);
   if (!text) return false;
@@ -3222,19 +3248,43 @@ export function createBettingWizard({
             minImpact: 'low',
           })
         : [];
+      const storedProjections = userStore?.listLatestProjectionSnapshotsForEvent
+        ? userStore.listLatestProjectionSnapshotsForEvent({
+            eventId: eventState.eventId,
+            limit: Math.max(20, fights.length * 2),
+            latestPerFight: true,
+          })
+        : [];
+      const hasStoredProjections = Array.isArray(storedProjections) && storedProjections.length > 0;
 
       const lines = [
         '📊 Proyecciones para el evento',
         `Evento: ${eventLabel}`,
-        `Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).`,
+        hasStoredProjections
+          ? 'Base: proyecciones precomputadas (noticias + consenso de cuotas) en backend.'
+          : 'Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).',
         '',
       ];
 
       for (const [index, fight] of fights.entries()) {
-        const projection = buildFightProjection({
-          fight,
-          newsItems: items,
-        });
+        const storedProjection = storedProjections.find((row) =>
+          projectionSnapshotMatchesFight(row, fight)
+        );
+        const projection = storedProjection
+          ? {
+              projectedWinner: storedProjection.predictedWinner || null,
+              confidence: Math.round(Number(storedProjection.confidencePct || 0)),
+              scenario: describeProjectedMethod(storedProjection.predictedMethod),
+              evidence: [],
+              keyFactors: Array.isArray(storedProjection.keyFactors)
+                ? storedProjection.keyFactors.slice(0, 3)
+                : [],
+              changeSummary: storedProjection.changeSummary || null,
+            }
+          : buildFightProjection({
+              fight,
+              newsItems: items,
+            });
         const oddsRows = userStore?.listLatestOddsMarketsForFight
           ? userStore.listLatestOddsMarketsForFight({
               fighterA: fight.fighterA,
@@ -3261,6 +3311,9 @@ export function createBettingWizard({
         );
         lines.push(`   Confianza: ${projection.confidence}%`);
         lines.push(`   Escenario: ${projection.scenario}`);
+        if (projection.changeSummary) {
+          lines.push(`   Cambio reciente: ${projection.changeSummary}`);
+        }
         if (oddsConsensus) {
           lines.push(
             `   Consenso bookies (${oddsConsensus.bookmakersCount}): ${fight.fighterA} @${oddsConsensus.avgPriceA.toFixed(
@@ -3276,13 +3329,19 @@ export function createBettingWizard({
           }
         }
 
-        for (const item of projection.evidence) {
-          lines.push(
-            `   Señal relevante: ${formatImpactBadge(item.impactLevel)} ${truncateText(
-              item.title || '',
-              140
-            )}`
-          );
+        if (Array.isArray(projection.keyFactors) && projection.keyFactors.length) {
+          for (const factor of projection.keyFactors) {
+            lines.push(`   Señal relevante: ${truncateText(String(factor || ''), 140)}`);
+          }
+        } else {
+          for (const item of projection.evidence) {
+            lines.push(
+              `   Señal relevante: ${formatImpactBadge(item.impactLevel)} ${truncateText(
+                item.title || '',
+                140
+              )}`
+            );
+          }
         }
         lines.push('');
       }

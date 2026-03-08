@@ -77,6 +77,18 @@ function normalizeParams(raw = {}) {
   return out;
 }
 
+function normalizeOddsApiDateTime(value = null) {
+  if (value === undefined || value === null || value === '') return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(raw)) return raw;
+
+  const parsedMs = Date.parse(raw);
+  if (!Number.isFinite(parsedMs)) return raw;
+  return new Date(parsedMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
 function buildCacheKey(pathname = '', params = {}) {
   const normalizedPath = String(pathname || '').trim().replace(/\/+/g, '/');
   const normalizedParams = normalizeParams(params);
@@ -417,8 +429,8 @@ export function createOddsApiTool({
           oddsFormat,
           dateFormat,
           eventIds,
-          commenceTimeFrom,
-          commenceTimeTo,
+          commenceTimeFrom: normalizeOddsApiDateTime(commenceTimeFrom),
+          commenceTimeTo: normalizeOddsApiDateTime(commenceTimeTo),
         },
         force,
         ttlMs,
@@ -457,8 +469,8 @@ export function createOddsApiTool({
         path: `sports/${sport}/events`,
         params: {
           dateFormat,
-          commenceTimeFrom,
-          commenceTimeTo,
+          commenceTimeFrom: normalizeOddsApiDateTime(commenceTimeFrom),
+          commenceTimeTo: normalizeOddsApiDateTime(commenceTimeTo),
         },
         force,
         ttlMs,
@@ -544,7 +556,7 @@ export function createOddsApiTool({
       return request({
         path: `historical/sports/${sport}/odds`,
         params: {
-          date,
+          date: normalizeOddsApiDateTime(date),
           regions,
           markets,
           bookmakers,
@@ -566,7 +578,7 @@ export function createOddsApiTool({
       return request({
         path: `historical/sports/${sport}/events`,
         params: {
-          date,
+          date: normalizeOddsApiDateTime(date),
           dateFormat,
         },
         force,
@@ -593,7 +605,7 @@ export function createOddsApiTool({
       return request({
         path: `historical/sports/${sport}/events/${cleanEventId}/odds`,
         params: {
-          date,
+          date: normalizeOddsApiDateTime(date),
           regions,
           markets,
           bookmakers,

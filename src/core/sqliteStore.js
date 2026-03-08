@@ -2374,6 +2374,163 @@ export function listLatestOddsMarketsForFight({
   return rows.map(parseOddsMarketSnapshotRow).filter(Boolean);
 }
 
+function parseProjectionSnapshotRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    eventId: row.event_id || null,
+    fightId: row.fight_id || null,
+    fighterA: row.fighter_a || null,
+    fighterB: row.fighter_b || null,
+    predictedWinner: row.predicted_winner || null,
+    predictedMethod: row.predicted_method || null,
+    confidencePct:
+      row.confidence_pct === null || row.confidence_pct === undefined
+        ? null
+        : Number(row.confidence_pct),
+    keyFactors: parseJsonSafe(row.key_factors_json, []),
+    relevantNewsIds: parseJsonSafe(row.relevant_news_ids_json, []),
+    reasoningVersion: row.reasoning_version || null,
+    changedFromPrev: Boolean(row.changed_from_prev),
+    changeSummary: row.change_summary || null,
+    createdAt: row.created_at || null,
+  };
+}
+
+export function insertFightProjectionSnapshots(items = []) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) {
+    return { insertedCount: 0 };
+  }
+  const db = getDb();
+  const ts = nowIso();
+
+  const insert = db.prepare(
+    `INSERT INTO fight_projection_snapshots
+      (event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
+       confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
+       changed_from_prev, change_summary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const run = db.transaction((inputRows) => {
+    let insertedCount = 0;
+    for (const row of inputRows) {
+      const eventId = String(row?.eventId || '').trim();
+      const fightId = String(row?.fightId || '').trim();
+      const fighterA = String(row?.fighterA || '').trim();
+      const fighterB = String(row?.fighterB || '').trim();
+      if (!eventId || !fightId || !fighterA || !fighterB) continue;
+
+      insert.run(
+        eventId,
+        fightId,
+        fighterA,
+        fighterB,
+        row.predictedWinner || null,
+        row.predictedMethod || null,
+        row.confidencePct === null || row.confidencePct === undefined
+          ? 0
+          : Number(row.confidencePct),
+        JSON.stringify(Array.isArray(row.keyFactors) ? row.keyFactors : []),
+        JSON.stringify(Array.isArray(row.relevantNewsIds) ? row.relevantNewsIds : []),
+        row.reasoningVersion || 'v1',
+        row.changedFromPrev ? 1 : 0,
+        row.changeSummary || null,
+        row.createdAt || ts
+      );
+      insertedCount += 1;
+    }
+    return { insertedCount };
+  });
+
+  return run(rows);
+}
+
+export function getLatestProjectionForFight({
+  eventId = '',
+  fightId = '',
+  fighterA = '',
+  fighterB = '',
+} = {}) {
+  const cleanEventId = String(eventId || '').trim();
+  if (!cleanEventId) return null;
+  const db = getDb();
+
+  if (fightId) {
+    const row = db
+      .prepare(
+        `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
+                confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
+                changed_from_prev, change_summary, created_at
+         FROM fight_projection_snapshots
+         WHERE event_id = ? AND fight_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get(cleanEventId, String(fightId));
+    return parseProjectionSnapshotRow(row);
+  }
+
+  const normA = normalizeName(fighterA);
+  const normB = normalizeName(fighterB);
+  if (!normA || !normB) return null;
+
+  const row = db
+    .prepare(
+      `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
+              confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
+              changed_from_prev, change_summary, created_at
+       FROM fight_projection_snapshots
+       WHERE event_id = ?
+         AND (
+           (lower(fighter_a) = ? AND lower(fighter_b) = ?)
+           OR
+           (lower(fighter_a) = ? AND lower(fighter_b) = ?)
+         )
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(cleanEventId, normA, normB, normB, normA);
+  return parseProjectionSnapshotRow(row);
+}
+
+export function listLatestProjectionSnapshotsForEvent({
+  eventId = '',
+  limit = 20,
+  latestPerFight = true,
+} = {}) {
+  const cleanEventId = String(eventId || '').trim();
+  if (!cleanEventId) return [];
+  const db = getDb();
+  const max = Math.max(1, Math.min(200, Number(limit) || 20));
+  const rows = db
+    .prepare(
+      `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
+              confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
+              changed_from_prev, change_summary, created_at
+       FROM fight_projection_snapshots
+       WHERE event_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(cleanEventId, Math.max(max * 4, max));
+
+  const parsed = rows.map(parseProjectionSnapshotRow).filter(Boolean);
+  if (!latestPerFight) {
+    return parsed.slice(0, max);
+  }
+
+  const byFight = new Map();
+  for (const row of parsed) {
+    const fightKey = String(row.fightId || '').trim() || `${row.fighterA}::${row.fighterB}`;
+    if (!fightKey || byFight.has(fightKey)) continue;
+    byFight.set(fightKey, row);
+    if (byFight.size >= max) break;
+  }
+  return Array.from(byFight.values());
+}
+
 function parseFightHistoryCacheRow(row) {
   if (!row) return null;
   let rows = [];

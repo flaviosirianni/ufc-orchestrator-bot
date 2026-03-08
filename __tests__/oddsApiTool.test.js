@@ -131,6 +131,44 @@ export async function runOddsApiToolTests() {
     assert.equal(historicalEventOdds.ok, false);
   });
 
+  tests.push(async () => {
+    const fetchCalls = [];
+    const tool = createOddsApiTool({
+      apiKey: 'test-api-key',
+      fetchImpl: async (url) => {
+        fetchCalls.push(String(url));
+        return createMockResponse({ body: [] });
+      },
+    });
+
+    await tool.getEvents({
+      commenceTimeFrom: '2026-03-08T02:37:52.860Z',
+      commenceTimeTo: '2026-03-09T02:37:52.120Z',
+      force: true,
+    });
+
+    await tool.getHistoricalEvents({
+      date: '2026-03-08T02:37:52.999Z',
+      force: true,
+    });
+
+    const eventsUrl = new URL(fetchCalls[0]);
+    assert.equal(
+      eventsUrl.searchParams.get('commenceTimeFrom'),
+      '2026-03-08T02:37:52Z'
+    );
+    assert.equal(
+      eventsUrl.searchParams.get('commenceTimeTo'),
+      '2026-03-09T02:37:52Z'
+    );
+
+    const historicalEventsUrl = new URL(fetchCalls[1]);
+    assert.equal(
+      historicalEventsUrl.searchParams.get('date'),
+      '2026-03-08T02:37:52Z'
+    );
+  });
+
   for (const test of tests) {
     await test();
   }
