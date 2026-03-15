@@ -1333,6 +1333,88 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    const calls = [];
+    let callIndex = 0;
+    let observedToolError = null;
+    let applySingleCalls = 0;
+
+    const fakeClient = {
+      calls,
+      responses: {
+        async create(payload) {
+          calls.push(JSON.parse(JSON.stringify(payload)));
+          callIndex += 1;
+
+          if (callIndex === 1) {
+            return responseWithFunctionCall(
+              'mutate_user_bets',
+              {
+                transactionPolicy: 'all_or_nothing',
+                steps: [
+                  { operation: 'settle', result: 'loss', betIds: [301] },
+                  { operation: 'archive', betIds: [302] },
+                ],
+              },
+              'call-composite-no-atomic-store'
+            );
+          }
+
+          const output = payload.input?.[0]?.output;
+          const parsed = output ? JSON.parse(output) : {};
+          observedToolError = parsed?.error || null;
+          return responseWithText('No pude aplicar el lote por política atómica.');
+        },
+      },
+    };
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewCompositeBetMutations() {
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            requiresConfirmation: false,
+            stepResults: [
+              { index: 0, ok: true, operation: 'settle', candidateCount: 1 },
+              { index: 1, ok: true, operation: 'archive', candidateCount: 1 },
+            ],
+          };
+        },
+        applyBetMutation() {
+          applySingleCalls += 1;
+          return {
+            ok: true,
+            operation: 'settle',
+            affectedCount: 1,
+            receipts: [{ betId: 301, previousResult: 'pending', newResult: 'loss' }],
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('ejecuta lote compuesto', {
+      chatId: 'chat-composite-no-atomic-store',
+      userId: 'u-composite-no-atomic-store',
+      originalMessage: 'ejecuta lote compuesto',
+      resolution: {
+        resolvedMessage: 'ejecuta lote compuesto',
+      },
+    });
+
+    assert.match(result.reply, /No pude aplicar el lote/i);
+    assert.equal(observedToolError, 'composite_apply_requires_atomic_store_support');
+    assert.equal(applySingleCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no debería usarse')]);
 
     const wizard = createBettingWizard({

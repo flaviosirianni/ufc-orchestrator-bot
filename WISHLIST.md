@@ -492,7 +492,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir UX de confirmacion para no generar friccion excesiva.
    - **Prioridad:** critico.
-   - **Estado:** en progreso (preview + confirm por token activo para casos ambiguos/masivos; falta cerrar politica final de atomicidad/rollback en batches mixtos).
+   - **Estado:** en progreso (preview + confirm por token + `all_or_nothing` transaccional implementados para mutaciones de ledger existentes; falta cobertura E2E de fallo runtime a mitad de transaccion en entorno integrado).
 
 19. **Ejecucion multi-accion robusta en un mismo turno (close + delete + create)**
    - **Objetivo:** procesar instrucciones compuestas del usuario sin perder pasos ni inventar estado.
@@ -524,7 +524,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir politica por defecto de transaccion para operaciones mixtas.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (planner compuesto activo para `settle/set_pending/archive` con `stepResults`; pendiente extender a mixed ops con `create` y parser de adjuntos).
 
 20. **Automatizar `history:sync` para rellenar la planilla sin ejecucion manual**
    - **Objetivo:** asegurar que la sheet de Fight History se mantenga actualizada sin depender de que alguien ejecute el comando a mano.

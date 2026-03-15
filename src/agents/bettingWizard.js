@@ -5969,60 +5969,11 @@ export function createBettingWizard({
         if (typeof userStore?.applyCompositeBetMutations === 'function') {
           return userStore.applyCompositeBetMutations(userId, applyPayload);
         }
-        if (typeof userStore?.applyBetMutation !== 'function') {
-          return {
-            ok: false,
-            error: 'userStore no soporta applyBetMutation para fallback de lote.',
-          };
-        }
-
-        const stepResults = [];
-        const receipts = [];
-        let lastLedgerSummary = null;
-        for (const [index, step] of applyPayload.steps.entries()) {
-          const fallbackPayload = {
-            ...(step || {}),
-            confirm: true,
-            metadata: {
-              ...applyMetadata,
-              ...(step?.metadata || {}),
-              transactionPolicy: applyPayload.transactionPolicy || 'all_or_nothing',
-              compositeStepIndex: index,
-              fallbackCompositeApply: true,
-            },
-          };
-          const appliedStep = userStore.applyBetMutation(userId, fallbackPayload);
-          if (!appliedStep?.ok) {
-            return {
-              ok: false,
-              error: 'composite_apply_failed',
-              failedStepIndex: index,
-              failedStep: appliedStep,
-              stepResults,
-            };
-          }
-
-          const stepReceipts = Array.isArray(appliedStep.receipts) ? appliedStep.receipts : [];
-          stepResults.push({
-            index,
-            operation: String(step?.operation || '').trim().toLowerCase() || null,
-            result: normalizeBetResult(step?.result) || null,
-            affectedCount: Number(appliedStep.affectedCount) || stepReceipts.length,
-            receipts: stepReceipts,
-          });
-          receipts.push(...stepReceipts);
-          if (appliedStep.ledgerSummary) {
-            lastLedgerSummary = appliedStep.ledgerSummary;
-          }
-        }
-
         return {
-          ok: true,
-          transactionPolicy: applyPayload.transactionPolicy || 'all_or_nothing',
-          affectedCount: receipts.length,
-          stepResults,
-          receipts,
-          ledgerSummary: lastLedgerSummary,
+          ok: false,
+          error: 'composite_apply_requires_atomic_store_support',
+          message:
+            'El userStore actual no soporta applyCompositeBetMutations; se bloquea para no romper all_or_nothing.',
         };
       }
 

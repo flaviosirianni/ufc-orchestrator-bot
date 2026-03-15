@@ -21,6 +21,11 @@ Objetivo: atacar primero riesgo de integridad de datos y luego mejorar precision
   - Implementado: guardrail de contexto de exposicion post-registro para evitar claims falsos de "peleas restantes/comprometido/remanente" cuando no hay base en ledger.
   - Implementado: reconciliacion de eventos "hoy/manana/ahora" usando fecha local del usuario (no solo UTC) en logica de seleccion de evento.
   - Implementado: nuevas pruebas de regresion para los escenarios anteriores en `__tests__/bettingWizard.test.js`.
+- 2026-03-15: cierre de politica transaccional para lotes de ledger.
+  - Implementado: `CompositeMutationPlanner` operativo en `mutate_user_bets` con `steps[]` + `transactionPolicy=all_or_nothing`.
+  - Implementado: `preview/apply` compuesto en store con transaccion unica y `stepResults` por sub-accion.
+  - Implementado: bloqueo explicito de fallback no atomico en wizard cuando falta `applyCompositeBetMutations`.
+  - Implementado: pruebas nuevas en wizard + store (`sqliteStoreComposite`) para atomicidad, confirmacion y no-mutacion en fallo de preview.
 
 ## PR 1 - Ledger Safety Core (Bloqueante)
 
@@ -65,9 +70,11 @@ Estado actual del alcance:
   - Receipts de escritura y soporte de `undo_last_mutation`.
   - Confirmacion por token para mutaciones sensibles (especialmente bulk/ambiguas).
   - Guardrails adicionales para evitar cierres sobre targets ambiguos.
+  - `CompositeMutationPlanner` para mutaciones existentes (`settle/set_pending/archive`) con `stepResults`.
+  - Politica `all_or_nothing` para lotes multi-ID con soporte transaccional en store y sin fallback no atomico.
 - Pendiente:
-  - `CompositeMutationPlanner` completo para instrucciones multi-accion en un solo turno.
-  - Politica final para lotes multi-ID (confirmacion/atomicidad) y rollback explicito por batch complejo.
+  - Extender planner compuesto a operaciones mixtas que incluyan altas (`create`) en el mismo turno.
+  - Integrar fase 2 de item 19: parsing de adjuntos/screenshot dentro de steps compuestos.
 
 ## PR 2 - Temporal/Factual Reliability
 
