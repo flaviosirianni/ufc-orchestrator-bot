@@ -7,8 +7,13 @@ import '../core/env.js';
 const DB_PATH =
   process.env.DB_PATH || path.resolve(process.cwd(), 'data', 'bot.db');
 const LEDGER_UNDO_WINDOW_MINUTES = Number(process.env.LEDGER_UNDO_WINDOW_MINUTES ?? '30');
+const DB_STARTUP_QUICK_CHECK =
+  String(process.env.DB_STARTUP_QUICK_CHECK ?? 'true').toLowerCase() !== 'false';
+const ODDS_CACHE_SELF_HEAL_ENABLED =
+  String(process.env.ODDS_CACHE_SELF_HEAL_ENABLED ?? 'true').toLowerCase() !== 'false';
 
 let dbInstance = null;
+let oddsCacheRecoveryInFlight = false;
 
 function ensureDir(filePath) {
   const dir = path.dirname(filePath);
@@ -456,6 +461,165 @@ function ensureUserProfileSchema(db) {
   }
 }
 
+function ensureOddsApiCacheSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS odds_api_cache (
+      cache_key TEXT PRIMARY KEY,
+      endpoint TEXT NOT NULL,
+      params_json TEXT,
+      response_json TEXT NOT NULL,
+      status_code INTEGER,
+      requests_remaining INTEGER,
+      requests_used INTEGER,
+      requests_last INTEGER,
+      fetched_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_api_cache_expires
+      ON odds_api_cache (expires_at);
+
+    CREATE TABLE IF NOT EXISTS odds_api_usage_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint TEXT NOT NULL,
+      cache_key TEXT,
+      status_code INTEGER,
+      requests_remaining INTEGER,
+      requests_used INTEGER,
+      requests_last INTEGER,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_api_usage_time
+      ON odds_api_usage_log (created_at DESC);
+  `);
+}
+
+function isSqliteCorruptionError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '');
+  if (code === 'SQLITE_CORRUPT' || code === 'SQLITE_NOTADB') {
+    return true;
+  }
+  return /database disk image is malformed|malformed|not a database|corrupt/i.test(message);
+}
+
+function pragmaMessages(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => {
+      if (!row || typeof row !== 'object') return '';
+      const firstValue = Object.values(row)[0];
+      return String(firstValue || '').trim();
+    })
+    .filter(Boolean);
+}
+
+function resetOddsCacheArtifacts(db, { reason = 'unknown' } = {}) {
+  if (!ODDS_CACHE_SELF_HEAL_ENABLED) return false;
+  if (oddsCacheRecoveryInFlight) return false;
+  oddsCacheRecoveryInFlight = true;
+  try {
+    console.warn(`[sqliteStore] odds cache self-heal triggered (${reason}).`);
+    db.exec('BEGIN IMMEDIATE');
+    db.exec('DROP INDEX IF EXISTS idx_odds_api_cache_expires');
+    db.exec('DROP TABLE IF EXISTS odds_api_cache');
+    db.exec('DROP INDEX IF EXISTS idx_odds_api_usage_time');
+    db.exec('DROP TABLE IF EXISTS odds_api_usage_log');
+    ensureOddsApiCacheSchema(db);
+    db.exec('COMMIT');
+    console.warn('[sqliteStore] odds cache self-heal completed.');
+    return true;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // noop
+    }
+    console.error('[sqliteStore] odds cache self-heal failed:', error);
+    return false;
+  } finally {
+    oddsCacheRecoveryInFlight = false;
+  }
+}
+
+function runStartupDbHealthCheck(db) {
+  let shouldRecoverOddsCache = false;
+  let reason = '';
+
+  try {
+    db.prepare('SELECT cache_key FROM odds_api_cache ORDER BY fetched_at DESC LIMIT 1').get();
+    db.prepare('SELECT id FROM odds_api_usage_log ORDER BY created_at DESC LIMIT 1').get();
+  } catch (error) {
+    if (!isSqliteCorruptionError(error)) {
+      throw error;
+    }
+    shouldRecoverOddsCache = true;
+    reason = 'startup_odds_cache_probe_failed';
+  }
+
+  if (!shouldRecoverOddsCache && DB_STARTUP_QUICK_CHECK) {
+    try {
+      const messages = pragmaMessages(db.prepare('PRAGMA quick_check').all());
+      const hasErrors = messages.some((message) => message.toLowerCase() !== 'ok');
+      if (hasErrors) {
+        shouldRecoverOddsCache = true;
+        reason = `startup_quick_check:${messages[0] || 'unknown'}`;
+      }
+    } catch (error) {
+      if (!isSqliteCorruptionError(error)) {
+        throw error;
+      }
+      shouldRecoverOddsCache = true;
+      reason = 'startup_quick_check_failed';
+    }
+  }
+
+  if (!shouldRecoverOddsCache) {
+    return;
+  }
+
+  const recovered = resetOddsCacheArtifacts(db, { reason });
+  if (!recovered) {
+    return;
+  }
+
+  if (DB_STARTUP_QUICK_CHECK) {
+    try {
+      const messages = pragmaMessages(db.prepare('PRAGMA quick_check').all());
+      const hasErrors = messages.some((message) => message.toLowerCase() !== 'ok');
+      if (hasErrors) {
+        console.error(
+          `[sqliteStore] quick_check still reports issues after odds cache self-heal: ${
+            messages[0] || 'unknown'
+          }`
+        );
+      }
+    } catch (error) {
+      console.error('[sqliteStore] quick_check failed after odds cache self-heal:', error);
+    }
+  }
+}
+
+function withOddsCacheAutoHeal(db, contextLabel, operation) {
+  try {
+    return operation();
+  } catch (error) {
+    if (!isSqliteCorruptionError(error) || !ODDS_CACHE_SELF_HEAL_ENABLED) {
+      throw error;
+    }
+
+    const recovered = resetOddsCacheArtifacts(db, {
+      reason: `runtime_${String(contextLabel || 'unknown')}`,
+    });
+    if (!recovered) {
+      throw error;
+    }
+
+    return operation();
+  }
+}
+
 export function getDb() {
   if (dbInstance) {
     return dbInstance;
@@ -468,6 +632,8 @@ export function getDb() {
   initSchema(db);
   ensureBetSchema(db);
   ensureUserProfileSchema(db);
+  ensureOddsApiCacheSchema(db);
+  runStartupDbHealthCheck(db);
   dbInstance = db;
   return dbInstance;
 }
@@ -1945,11 +2111,8 @@ function parseOddsApiCacheRow(row) {
   };
 }
 
-export function getOddsApiCacheEntry(cacheKey = '') {
-  const cleanKey = String(cacheKey || '').trim();
-  if (!cleanKey) return null;
-  const db = getDb();
-  const row = db
+function getOddsApiCacheRowByKey(db, cleanKey) {
+  return db
     .prepare(
       `SELECT cache_key, endpoint, params_json, response_json, status_code,
               requests_remaining, requests_used, requests_last,
@@ -1958,7 +2121,15 @@ export function getOddsApiCacheEntry(cacheKey = '') {
        WHERE cache_key = ?`
     )
     .get(cleanKey);
-  return parseOddsApiCacheRow(row);
+}
+
+export function getOddsApiCacheEntry(cacheKey = '') {
+  const cleanKey = String(cacheKey || '').trim();
+  if (!cleanKey) return null;
+  const db = getDb();
+  return withOddsCacheAutoHeal(db, 'getOddsApiCacheEntry', () =>
+    parseOddsApiCacheRow(getOddsApiCacheRowByKey(db, cleanKey))
+  );
 }
 
 export function upsertOddsApiCacheEntry(entry = {}) {
@@ -1966,41 +2137,45 @@ export function upsertOddsApiCacheEntry(entry = {}) {
   if (!cacheKey) return null;
   const db = getDb();
 
-  db.prepare(
-    `INSERT INTO odds_api_cache
-      (cache_key, endpoint, params_json, response_json, status_code,
-       requests_remaining, requests_used, requests_last, fetched_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(cache_key) DO UPDATE SET
-       endpoint = excluded.endpoint,
-       params_json = excluded.params_json,
-       response_json = excluded.response_json,
-       status_code = excluded.status_code,
-       requests_remaining = excluded.requests_remaining,
-       requests_used = excluded.requests_used,
-       requests_last = excluded.requests_last,
-       fetched_at = excluded.fetched_at,
-       expires_at = excluded.expires_at`
-  ).run(
-    cacheKey,
-    entry.endpoint || null,
-    JSON.stringify(entry.params || {}),
-    JSON.stringify(entry.responseJson ?? null),
-    entry.statusCode === null || entry.statusCode === undefined ? null : Number(entry.statusCode),
-    entry.requestsRemaining === null || entry.requestsRemaining === undefined
-      ? null
-      : Number(entry.requestsRemaining),
-    entry.requestsUsed === null || entry.requestsUsed === undefined
-      ? null
-      : Number(entry.requestsUsed),
-    entry.requestsLast === null || entry.requestsLast === undefined
-      ? null
-      : Number(entry.requestsLast),
-    entry.fetchedAt || nowIso(),
-    entry.expiresAt || nowIso()
-  );
+  return withOddsCacheAutoHeal(db, 'upsertOddsApiCacheEntry', () => {
+    db.prepare(
+      `INSERT INTO odds_api_cache
+        (cache_key, endpoint, params_json, response_json, status_code,
+         requests_remaining, requests_used, requests_last, fetched_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(cache_key) DO UPDATE SET
+         endpoint = excluded.endpoint,
+         params_json = excluded.params_json,
+         response_json = excluded.response_json,
+         status_code = excluded.status_code,
+         requests_remaining = excluded.requests_remaining,
+         requests_used = excluded.requests_used,
+         requests_last = excluded.requests_last,
+         fetched_at = excluded.fetched_at,
+         expires_at = excluded.expires_at`
+    ).run(
+      cacheKey,
+      entry.endpoint || null,
+      JSON.stringify(entry.params || {}),
+      JSON.stringify(entry.responseJson ?? null),
+      entry.statusCode === null || entry.statusCode === undefined
+        ? null
+        : Number(entry.statusCode),
+      entry.requestsRemaining === null || entry.requestsRemaining === undefined
+        ? null
+        : Number(entry.requestsRemaining),
+      entry.requestsUsed === null || entry.requestsUsed === undefined
+        ? null
+        : Number(entry.requestsUsed),
+      entry.requestsLast === null || entry.requestsLast === undefined
+        ? null
+        : Number(entry.requestsLast),
+      entry.fetchedAt || nowIso(),
+      entry.expiresAt || nowIso()
+    );
 
-  return getOddsApiCacheEntry(cacheKey);
+    return parseOddsApiCacheRow(getOddsApiCacheRowByKey(db, cacheKey));
+  });
 }
 
 export function logOddsApiUsage(sample = {}) {
@@ -2009,85 +2184,91 @@ export function logOddsApiUsage(sample = {}) {
   const db = getDb();
   const ts = sample.createdAt || nowIso();
 
-  const result = db
-    .prepare(
-      `INSERT INTO odds_api_usage_log
-        (endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      endpoint,
-      sample.cacheKey || null,
-      sample.statusCode === null || sample.statusCode === undefined
-        ? null
-        : Number(sample.statusCode),
-      sample.requestsRemaining === null || sample.requestsRemaining === undefined
-        ? null
-        : Number(sample.requestsRemaining),
-      sample.requestsUsed === null || sample.requestsUsed === undefined
-        ? null
-        : Number(sample.requestsUsed),
-      sample.requestsLast === null || sample.requestsLast === undefined
-        ? null
-        : Number(sample.requestsLast),
-      sample.metadata ? JSON.stringify(sample.metadata) : null,
-      ts
-    );
+  return withOddsCacheAutoHeal(db, 'logOddsApiUsage', () => {
+    const result = db
+      .prepare(
+        `INSERT INTO odds_api_usage_log
+          (endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        endpoint,
+        sample.cacheKey || null,
+        sample.statusCode === null || sample.statusCode === undefined
+          ? null
+          : Number(sample.statusCode),
+        sample.requestsRemaining === null || sample.requestsRemaining === undefined
+          ? null
+          : Number(sample.requestsRemaining),
+        sample.requestsUsed === null || sample.requestsUsed === undefined
+          ? null
+          : Number(sample.requestsUsed),
+        sample.requestsLast === null || sample.requestsLast === undefined
+          ? null
+          : Number(sample.requestsLast),
+        sample.metadata ? JSON.stringify(sample.metadata) : null,
+        ts
+      );
 
-  return {
-    id: Number(result.lastInsertRowid),
-    createdAt: ts,
-  };
+    return {
+      id: Number(result.lastInsertRowid),
+      createdAt: ts,
+    };
+  });
 }
 
 export function listRecentOddsApiUsage(limit = 20) {
   const db = getDb();
   const max = Math.max(1, Math.min(200, Number(limit) || 20));
-  const rows = db
-    .prepare(
-      `SELECT id, endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at
-       FROM odds_api_usage_log
-       ORDER BY created_at DESC, id DESC
-       LIMIT ?`
-    )
-    .all(max);
+  return withOddsCacheAutoHeal(db, 'listRecentOddsApiUsage', () => {
+    const rows = db
+      .prepare(
+        `SELECT id, endpoint, cache_key, status_code, requests_remaining, requests_used, requests_last, metadata_json, created_at
+         FROM odds_api_usage_log
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(max);
 
-  return rows.map((row) => ({
-    id: Number(row.id),
-    endpoint: row.endpoint || null,
-    cacheKey: row.cache_key || null,
-    statusCode:
-      row.status_code === null || row.status_code === undefined
-        ? null
-        : Number(row.status_code),
-    requestsRemaining:
-      row.requests_remaining === null || row.requests_remaining === undefined
-        ? null
-        : Number(row.requests_remaining),
-    requestsUsed:
-      row.requests_used === null || row.requests_used === undefined
-        ? null
-        : Number(row.requests_used),
-    requestsLast:
-      row.requests_last === null || row.requests_last === undefined
-        ? null
-        : Number(row.requests_last),
-    metadata: parseJsonSafe(row.metadata_json, null),
-    createdAt: row.created_at || null,
-  }));
+    return rows.map((row) => ({
+      id: Number(row.id),
+      endpoint: row.endpoint || null,
+      cacheKey: row.cache_key || null,
+      statusCode:
+        row.status_code === null || row.status_code === undefined
+          ? null
+          : Number(row.status_code),
+      requestsRemaining:
+        row.requests_remaining === null || row.requests_remaining === undefined
+          ? null
+          : Number(row.requests_remaining),
+      requestsUsed:
+        row.requests_used === null || row.requests_used === undefined
+          ? null
+          : Number(row.requests_used),
+      requestsLast:
+        row.requests_last === null || row.requests_last === undefined
+          ? null
+          : Number(row.requests_last),
+      metadata: parseJsonSafe(row.metadata_json, null),
+      createdAt: row.created_at || null,
+    }));
+  });
 }
 
 export function getLatestOddsApiQuotaState() {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT requests_remaining, requests_used, requests_last, endpoint, created_at
-       FROM odds_api_usage_log
-       WHERE requests_remaining IS NOT NULL
-       ORDER BY created_at DESC, id DESC
-       LIMIT 1`
-    )
-    .get();
+  const row = withOddsCacheAutoHeal(db, 'getLatestOddsApiQuotaState', () =>
+    db
+      .prepare(
+        `SELECT requests_remaining, requests_used, requests_last, endpoint, created_at
+         FROM odds_api_usage_log
+         WHERE requests_remaining IS NOT NULL
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get()
+  );
 
   if (!row) {
     return {
