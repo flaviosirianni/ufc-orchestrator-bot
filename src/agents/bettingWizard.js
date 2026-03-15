@@ -592,10 +592,26 @@ function dateDiffInDays(isoA = '', isoB = '') {
   return Math.round((msA - msB) / 86400000);
 }
 
-function isEventStateNearToday(eventState = null, nowMs = Date.now(), maxDistanceDays = 1) {
+function resolveReferenceDateIso({
+  referenceDateIso = null,
+  nowMs = Date.now(),
+  timezone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const explicit = toIsoDateSafe(referenceDateIso || '');
+  if (explicit) return explicit;
+  const localNow = extractLocalDateTimeParts(new Date(nowMs), normalizeTimeZone(timezone));
+  return toIsoDateSafe(localNow.dateIso) || new Date(nowMs).toISOString().slice(0, 10);
+}
+
+function isEventStateNearToday(
+  eventState = null,
+  nowMs = Date.now(),
+  maxDistanceDays = 1,
+  { referenceDateIso = null, timezone = DEFAULT_USER_TIMEZONE } = {}
+) {
   const eventDate = toIsoDateSafe(eventState?.eventDateUtc || '');
   if (!eventDate) return false;
-  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const todayIso = resolveReferenceDateIso({ referenceDateIso, nowMs, timezone });
   const distance = Math.abs(dateDiffInDays(eventDate, todayIso));
   return Number.isFinite(distance) && distance <= Math.max(0, Number(maxDistanceDays) || 0);
 }
@@ -791,6 +807,8 @@ function shouldPreferOddsEventForIntel({
   liveEventState = null,
   liveOddsContext = null,
   nowMs = Date.now(),
+  referenceDateIso = null,
+  timezone = DEFAULT_USER_TIMEZONE,
 } = {}) {
   if (!liveEventState?.eventName) return false;
   if (!fallbackEventState?.eventName) return true;
@@ -799,7 +817,7 @@ function shouldPreferOddsEventForIntel({
   const liveName = normalise(liveEventState?.eventName || '');
   const sameName = Boolean(fallbackName && liveName && fallbackName === liveName);
 
-  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const todayIso = resolveReferenceDateIso({ referenceDateIso, nowMs, timezone });
   const fallbackDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
   const liveDate = toIsoDateSafe(liveEventState?.eventDateUtc || liveOddsContext?.eventDate || '');
   const fallbackDistance = fallbackDate
@@ -980,12 +998,14 @@ function shouldPreferWebEventForIntel({
   fallbackEventState = null,
   webEventState = null,
   nowMs = Date.now(),
+  referenceDateIso = null,
+  timezone = DEFAULT_USER_TIMEZONE,
 } = {}) {
   if (!webEventState?.eventName) return false;
   if (!fallbackEventState?.eventName) return true;
 
   const sameEvent = eventsLikelySame(fallbackEventState, webEventState);
-  const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+  const todayIso = resolveReferenceDateIso({ referenceDateIso, nowMs, timezone });
   const fallbackDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
   const webDate = toIsoDateSafe(webEventState?.eventDateUtc || '');
   const fallbackDistance = fallbackDate
@@ -1001,9 +1021,14 @@ function shouldPreferWebEventForIntel({
   return false;
 }
 
-function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
+function buildLiveOddsEventContext(
+  oddsEvents = [],
+  nowMs = Date.now(),
+  { referenceDateIso = null, timezone = DEFAULT_USER_TIMEZONE } = {}
+) {
   const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
   if (!rows.length) return null;
+  const todayIso = resolveReferenceDateIso({ referenceDateIso, nowMs, timezone });
 
   const grouped = new Map();
   for (const row of rows) {
@@ -1059,12 +1084,7 @@ function buildLiveOddsEventContext(oddsEvents = [], nowMs = Date.now()) {
   const scored = candidates.map((entry) => {
     const minDeltaHours = entry.minDeltaMs / 3600000;
     const eventDateDiff = entry.eventDate
-      ? Math.abs(
-          dateDiffInDays(
-            entry.eventDate,
-            new Date(nowMs).toISOString().slice(0, 10)
-          )
-        )
+      ? Math.abs(dateDiffInDays(entry.eventDate, todayIso))
       : Number.POSITIVE_INFINITY;
     const freshnessHours =
       entry.latestSyncMs > 0 ? (nowMs - entry.latestSyncMs) / 3600000 : Number.POSITIVE_INFINITY;
@@ -2552,8 +2572,8 @@ function shiftIsoDate(isoDate, daysDelta) {
 function extractDateHints(message = '', timezone = DEFAULT_USER_TIMEZONE) {
   const text = String(message || '');
   const hints = [];
-  const localNow = extractLocalDateTimeParts(new Date(), timezone);
-  const currentYear = Number(localNow.year) || new Date().getUTCFullYear();
+  const localNow = extractLocalDateTimeParts(new Date(Date.now()), timezone);
+  const currentYear = Number(localNow.year) || new Date(Date.now()).getUTCFullYear();
 
   const isoMatch = text.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
   if (isoMatch) {
@@ -2600,7 +2620,7 @@ function buildTemporalContextSection({
   originalMessage = '',
 } = {}) {
   const resolvedTimeZone = normalizeTimeZone(timezone);
-  const nowLocal = extractLocalDateTimeParts(new Date(), resolvedTimeZone);
+  const nowLocal = extractLocalDateTimeParts(new Date(Date.now()), resolvedTimeZone);
   const previousDate = shiftIsoDate(nowLocal.dateIso, -1);
   const nextDate = shiftIsoDate(nowLocal.dateIso, 1);
   const dateHints = extractDateHints(originalMessage, resolvedTimeZone);
@@ -2649,6 +2669,49 @@ function isLedgerOperationMessage(message = '') {
   return /\b(ledger|bet[\s_-]?id|pending|won|lost|settl\w*|archiv\w*|borr\w*|elimin\w*|cerr\w*|anot\w*|registr\w*|liquid\w*|marc\w*)\b/.test(
     normalized
   );
+}
+
+function hasOperationalLedgerToolUsage(turnContext = null) {
+  if (!turnContext || typeof turnContext !== 'object') return false;
+  return Boolean(
+    turnContext.hasOperationalLedgerToolCall ||
+      turnContext.hasLedgerCreateReceipt ||
+      turnContext.hasLedgerMutationReceipt
+  );
+}
+
+function pruneExposureClaims(text = '') {
+  const lines = String(text || '').split('\n');
+  if (!lines.length) return String(text || '').trim();
+
+  const exposurePatterns = [
+    /\bpeleas restantes\b/i,
+    /\bplan de exposicion\b/i,
+    /\bmismo evento donde tenias\b/i,
+    /\bpresupuesto objetivo\b/i,
+    /\bcomprometido en esta recomendacion\b/i,
+    /\bremanente estimado\b/i,
+    /\bexposicion maxima\b/i,
+  ];
+
+  const filtered = [];
+  for (const line of lines) {
+    const shouldDrop = exposurePatterns.some((pattern) => pattern.test(line));
+    if (!shouldDrop) {
+      filtered.push(line);
+    }
+  }
+
+  const compact = [];
+  let previousBlank = false;
+  for (const line of filtered) {
+    const isBlank = line.trim().length === 0;
+    if (isBlank && previousBlank) continue;
+    compact.push(line);
+    previousBlank = isBlank;
+  }
+
+  return compact.join('\n').trim();
 }
 
 function normalizeRiskProfile(rawValue = '') {
@@ -3147,14 +3210,16 @@ function calibrateStakeLine(line = '', config = {}) {
   };
 }
 
-function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}) {
+function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}, turnContext = null) {
   const text = String(reply || '').trim();
   if (!text) return text;
 
   const userMessage = String(originalMessage || '');
   const looksLikeDecisionTurn =
     hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || /\b(stake|cuota|pick)\b/i.test(userMessage);
-  if (!looksLikeDecisionTurn || isLedgerOperationMessage(userMessage)) {
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(userMessage) || hasOperationalLedgerToolUsage(turnContext);
+  if (!looksLikeDecisionTurn || isOperationalLedgerTurn) {
     return text;
   }
 
@@ -3241,7 +3306,7 @@ function enforceStakeCalibration(reply = '', originalMessage = '', userProfile =
   return resultLines.join('\n');
 }
 
-function enforceRationaleSection(reply = '', originalMessage = '') {
+function enforceRationaleSection(reply = '', originalMessage = '', turnContext = null) {
   const text = String(reply || '').trim();
   const userMessage = String(originalMessage || '');
   const explicitRationaleRequest = /\b(fundament|explica|por que)\b/.test(
@@ -3249,7 +3314,8 @@ function enforceRationaleSection(reply = '', originalMessage = '') {
   );
   const looksLikeDecisionTurn =
     hasBetDecisionSignals(userMessage) || hasOddsSignals(userMessage) || explicitRationaleRequest;
-  const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(userMessage) || hasOperationalLedgerToolUsage(turnContext);
 
   if (
     !text ||
@@ -3264,13 +3330,14 @@ function enforceRationaleSection(reply = '', originalMessage = '') {
   return `${text}\n\nFundamento de la elección:\n- Tesis: el pick se basa en el cruce de estilos, contexto reciente y precio actual.\n- Riesgo: alta varianza en MMA; si cambia la linea o falta contexto, baja la confianza.\n- Regla de entrada: tomar solo si la cuota se mantiene en el umbral indicado; si empeora, no-bet.`;
 }
 
-function enforceDecisionQualityGate(reply = '', originalMessage = '') {
+function enforceDecisionQualityGate(reply = '', originalMessage = '', turnContext = null) {
   const text = String(reply || '').trim();
   if (!text) return text;
   if (/\bajuste deterministico\b/i.test(text)) return text;
 
   const userMessage = String(originalMessage || '');
-  const isOperationalLedgerTurn = isLedgerOperationMessage(userMessage);
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(userMessage) || hasOperationalLedgerToolUsage(turnContext);
   if (isOperationalLedgerTurn) {
     return text;
   }
@@ -3294,6 +3361,31 @@ function enforceDecisionQualityGate(reply = '', originalMessage = '') {
   }
 
   return `${text}\n\n⚠️ Control de calidad: pick condicional (NO_BET por ahora).\n- Falta contexto de cuotas reales de tu bookie para validar edge y entry.\n- Para volverlo ejecutable: pasame screenshot/quotes completos (mercado + cuota actual).`;
+}
+
+function enforceLedgerExposureContext(
+  reply = '',
+  { turnContext = null, userStore = null, userId = null } = {}
+) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!turnContext?.hasLedgerCreateReceipt) return text;
+
+  if (!userId || typeof userStore?.listUserBets !== 'function') {
+    return pruneExposureClaims(text);
+  }
+
+  const pendingBets = userStore.listUserBets(userId, {
+    status: 'pending',
+    includeArchived: false,
+    limit: 120,
+  });
+  const pendingCount = Array.isArray(pendingBets) ? pendingBets.length : 0;
+
+  if (pendingCount <= 1) {
+    return pruneExposureClaims(text);
+  }
+  return text;
 }
 
 function containsAbsoluteDate(text = '') {
@@ -4907,7 +4999,10 @@ export function createBettingWizard({
 
       let oddsWindowEvents = loadOddsLiveRows();
       let liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
-      let liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
+      let liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs, {
+        referenceDateIso: localNow.dateIso,
+        timezone: userTimezone,
+      });
       if (
         (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
         typeof userStore?.refreshLiveScores === 'function'
@@ -4916,7 +5011,10 @@ export function createBettingWizard({
           await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
           oddsWindowEvents = loadOddsLiveRows();
           liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
-          liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs);
+          liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs, {
+            referenceDateIso: localNow.dateIso,
+            timezone: userTimezone,
+          });
         } catch (error) {
           console.error('⚠️ live event score refresh failed:', error);
         }
@@ -4949,7 +5047,11 @@ export function createBettingWizard({
       const webEventDate = toIsoDateSafe(liveWebContext?.date || '');
       const oddsEventName = String(liveOddsContext?.eventName || '').trim();
       const oddsEventDate = toIsoDateSafe(liveOddsContext?.eventDate || '');
-      const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+      const todayIso = resolveReferenceDateIso({
+        referenceDateIso: localNow.dateIso,
+        nowMs,
+        timezone: userTimezone,
+      });
       const webDistanceDays = webEventDate
         ? Math.abs(dateDiffInDays(webEventDate, todayIso))
         : Number.POSITIVE_INFINITY;
@@ -5144,16 +5246,28 @@ export function createBettingWizard({
 
       const currentEventState = userStore.getEventWatchState('current_event');
       const nextEventState = userStore.getEventWatchState('next_event');
-      const preferCurrentEvent = isEventStateNearToday(currentEventState, nowMs, 1);
+      const referenceDateIso = temporalContext?.nowLocal?.dateIso || null;
+      const referenceTimezone = temporalContext?.timezone || DEFAULT_USER_TIMEZONE;
+      const preferCurrentEvent = isEventStateNearToday(currentEventState, nowMs, 1, {
+        referenceDateIso,
+        timezone: referenceTimezone,
+      });
       let eventState = preferCurrentEvent ? currentEventState : nextEventState;
       const fallbackEventState = eventState || null;
-      const todayIso = new Date(nowMs).toISOString().slice(0, 10);
+      const todayIso = resolveReferenceDateIso({
+        referenceDateIso,
+        nowMs,
+        timezone: referenceTimezone,
+      });
       const fallbackEventDate = toIsoDateSafe(fallbackEventState?.eventDateUtc || '');
       const fallbackDistanceDays = fallbackEventDate
         ? Math.abs(dateDiffInDays(fallbackEventDate, todayIso))
         : Number.POSITIVE_INFINITY;
       let oddsLiveRows = loadOddsLiveRows();
-      let liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs);
+      let liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs, {
+        referenceDateIso,
+        timezone: referenceTimezone,
+      });
       if (
         (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
         typeof userStore?.refreshLiveScores === 'function'
@@ -5161,7 +5275,10 @@ export function createBettingWizard({
         try {
           await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
           oddsLiveRows = loadOddsLiveRows();
-          liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs);
+          liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs, {
+            referenceDateIso,
+            timezone: referenceTimezone,
+          });
         } catch (error) {
           console.error('⚠️ intel event refreshLiveScores failed:', error);
         }
@@ -5179,6 +5296,8 @@ export function createBettingWizard({
         liveEventState,
         liveOddsContext,
         nowMs,
+        referenceDateIso,
+        timezone: referenceTimezone,
       });
       if (shouldUseOddsEvent) {
         eventState = liveEventState;
@@ -5215,6 +5334,8 @@ export function createBettingWizard({
             fallbackEventState: eventState,
             webEventState: liveWebEventState,
             nowMs,
+            referenceDateIso,
+            timezone: referenceTimezone,
           })
         ) {
           eventState = liveWebEventState;
@@ -6157,7 +6278,14 @@ export function createBettingWizard({
       };
     }
 
+    const turnToolEffects = {
+      hasOperationalLedgerToolCall: false,
+      hasLedgerCreateReceipt: false,
+      hasLedgerMutationReceipt: false,
+    };
+
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
+      turnToolEffects.hasOperationalLedgerToolCall = true;
       if (!userId) {
         return { ok: false, error: 'userId no disponible para mutaciones de apuestas.' };
       }
@@ -6174,17 +6302,20 @@ export function createBettingWizard({
       const inferredBetIds =
         explicitBetIds.length > 0 ? [] : extractBetIdsFromMessage(originalMessage);
       const betIds = explicitBetIds.length ? explicitBetIds : inferredBetIds;
-      const inferredFight =
-        String(rawArgs.fight || '').trim() ||
-        resolvedFightLabel(runtimeState.resolvedFight || resolution?.resolvedFight || null) ||
-        '';
+      const explicitEventName = rawArgs.eventName ? String(rawArgs.eventName).trim() : '';
+      const explicitFight = rawArgs.fight ? String(rawArgs.fight).trim() : '';
+      const explicitPick = rawArgs.pick ? String(rawArgs.pick).trim() : '';
+      const inferredFightFromContext = resolvedFightLabel(
+        runtimeState.resolvedFight || resolution?.resolvedFight || null
+      );
+      const canUseFuzzyFightRecovery = Boolean(explicitFight);
       let payload = {
         operation,
         result: normalizedResult || undefined,
         betIds: betIds.length ? betIds : undefined,
-        eventName: rawArgs.eventName ? String(rawArgs.eventName).trim() : undefined,
-        fight: inferredFight || undefined,
-        pick: rawArgs.pick ? String(rawArgs.pick).trim() : undefined,
+        eventName: explicitEventName || undefined,
+        fight: explicitFight || undefined,
+        pick: explicitPick || undefined,
         limit: Number.isFinite(Number(rawArgs.limit)) ? Number(rawArgs.limit) : undefined,
         metadata: {
           source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
@@ -6192,6 +6323,13 @@ export function createBettingWizard({
           isDestructive: operation === 'archive' || operation === 'settle',
           chatId,
           originalMessage: truncateText(originalMessage, 300),
+          selector: {
+            usedExplicitBetIds: explicitBetIds.length > 0,
+            usedBetIdsFromMessage: explicitBetIds.length === 0 && inferredBetIds.length > 0,
+            usedExplicitFight: Boolean(explicitFight),
+            usedExplicitEventName: Boolean(explicitEventName),
+            usedExplicitPick: Boolean(explicitPick),
+          },
         },
       };
 
@@ -6213,7 +6351,14 @@ export function createBettingWizard({
       }
 
       const ambiguousReference = hasAmbiguousFightReference(originalMessage);
-      if (operation === 'settle' && ambiguousReference && !betIds.length) {
+      if (
+        (operation === 'settle' || operation === 'set_pending') &&
+        ambiguousReference &&
+        !explicitBetIds.length &&
+        !explicitFight &&
+        !explicitEventName &&
+        !explicitPick
+      ) {
         const candidates = userStore?.listUserBets
           ? userStore.listUserBets(userId, {
               status: 'pending',
@@ -6227,15 +6372,15 @@ export function createBettingWizard({
           requiresDisambiguation: true,
           candidates,
           message:
-            'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de cerrar.',
+            'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de mutar el ledger.',
         };
       }
 
       const hasStrongSelector =
         betIds.length > 0 ||
-        Boolean(payload.eventName) ||
-        Boolean(payload.fight) ||
-        Boolean(payload.pick);
+        Boolean(explicitEventName) ||
+        Boolean(explicitFight) ||
+        Boolean(explicitPick);
       if (
         (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
         !hasStrongSelector
@@ -6254,6 +6399,30 @@ export function createBettingWizard({
           candidates,
           message:
             'Necesito desambiguar que apuesta querés tocar. Indicame bet_id (o pelea exacta + pick) y lo ejecuto.',
+        };
+      }
+
+      if (
+        (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
+        !explicitBetIds.length &&
+        !betIds.length &&
+        !explicitFight &&
+        inferredFightFromContext
+      ) {
+        const candidates = userStore?.listUserBets
+          ? userStore.listUserBets(userId, {
+              status: operation === 'settle' ? 'pending' : null,
+              includeArchived: false,
+              limit: 8,
+            })
+          : [];
+        return {
+          ok: false,
+          error: 'context_fight_requires_explicit_selector',
+          requiresDisambiguation: true,
+          candidates,
+          message:
+            'Para evitar cerrar la pelea equivocada, necesito selector explícito del usuario (bet_id o pelea exacta) y no solo contexto previo.',
         };
       }
 
@@ -6304,6 +6473,7 @@ export function createBettingWizard({
         if (!applied?.ok) {
           return applied;
         }
+        turnToolEffects.hasLedgerMutationReceipt = true;
 
         return {
           ok: true,
@@ -6321,6 +6491,7 @@ export function createBettingWizard({
         !preview?.ok &&
         preview?.error === 'no_matching_bets' &&
         !betIds.length &&
+        canUseFuzzyFightRecovery &&
         payload.fight &&
         typeof userStore?.listUserBets === 'function' &&
         (operation === 'settle' || operation === 'archive' || operation === 'set_pending')
@@ -6396,6 +6567,7 @@ export function createBettingWizard({
       if (!applied?.ok) {
         return applied;
       }
+      turnToolEffects.hasLedgerMutationReceipt = true;
 
       return {
         ok: true,
@@ -6520,6 +6692,7 @@ export function createBettingWizard({
         }
 
         case 'record_user_bet': {
+          turnToolEffects.hasOperationalLedgerToolCall = true;
           if (!userId) {
             return { ok: false, error: 'userId no disponible para apuestas.' };
           }
@@ -6598,6 +6771,7 @@ export function createBettingWizard({
           }
 
           const stored = userStore.addBetRecord(userId, record);
+          turnToolEffects.hasLedgerCreateReceipt = true;
           return {
             ok: true,
             record: stored,
@@ -6611,6 +6785,7 @@ export function createBettingWizard({
         }
 
         case 'list_user_bets': {
+          turnToolEffects.hasOperationalLedgerToolCall = true;
           if (!userId) {
             return { ok: false, error: 'userId no disponible para apuestas.' };
           }
@@ -6642,6 +6817,7 @@ export function createBettingWizard({
         }
 
         case 'undo_last_mutation': {
+          turnToolEffects.hasOperationalLedgerToolCall = true;
           if (!userId) {
             return { ok: false, error: 'userId no disponible para undo.' };
           }
@@ -6651,11 +6827,15 @@ export function createBettingWizard({
               error: 'userStore no soporta undoLastBetMutation.',
             };
           }
-          return userStore.undoLastBetMutation(userId, {
+          const undone = userStore.undoLastBetMutation(userId, {
             windowMinutes: Number.isFinite(Number(args.windowMinutes))
               ? Number(args.windowMinutes)
               : undefined,
           });
+          if (undone?.ok) {
+            turnToolEffects.hasLedgerMutationReceipt = true;
+          }
+          return undone;
         }
 
         case 'store_user_odds': {
@@ -7162,15 +7342,33 @@ export function createBettingWizard({
           });
       const replyWithRationale = committeeBlocked
         ? replyWithDeterministicAdjustment
-        : enforceRationaleSection(replyWithDeterministicAdjustment, originalMessage);
+        : enforceRationaleSection(
+            replyWithDeterministicAdjustment,
+            originalMessage,
+            turnToolEffects
+          );
       const replyWithStakeCalibration = committeeBlocked
         ? replyWithRationale
-        : enforceStakeCalibration(replyWithRationale, originalMessage, userProfile || {});
+        : enforceStakeCalibration(
+            replyWithRationale,
+            originalMessage,
+            userProfile || {},
+            turnToolEffects
+          );
       const replyWithDecisionGate = committeeBlocked
         ? replyWithStakeCalibration
-        : enforceDecisionQualityGate(replyWithStakeCalibration, originalMessage);
+        : enforceDecisionQualityGate(
+            replyWithStakeCalibration,
+            originalMessage,
+            turnToolEffects
+          );
+      const replyWithExposureGuard = enforceLedgerExposureContext(replyWithDecisionGate, {
+        turnContext: turnToolEffects,
+        userStore,
+        userId,
+      });
       const replyWithTemporalGuard = enforceCalendarNoEventContext(
-        replyWithDecisionGate,
+        replyWithExposureGuard,
         originalMessage,
         temporalContext
       );

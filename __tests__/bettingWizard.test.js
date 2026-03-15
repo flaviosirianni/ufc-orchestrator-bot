@@ -806,6 +806,91 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'record_user_bet',
+        {
+          eventName: 'UFC FN',
+          fight: 'Charles Johnson vs Bruno Silva',
+          pick: 'Charles Johnson ML',
+          odds: 1.62,
+          stake: 2000,
+          units: 5,
+          result: 'pending',
+        },
+        'call_record_exposure_guard'
+      ),
+      responseWithText(
+        [
+          'Perfecto, ya la tengo registrada ✅',
+          '',
+          '🥊 Apuesta: Charles Johnson vs Bruno Silva',
+          '• Pick: Charles Johnson ML',
+          '• Cuota: @1.62',
+          '• Stake: $2.000 ARS',
+          '',
+          'Si queres, decime si esta apuesta corresponde al mismo evento donde tenias "6 peleas restantes", asi te voy armando el plan de exposicion por pelea para no pasarnos de riesgo en la cartelera.',
+          '',
+          'Plan de evento: presupuesto objetivo $14.000 ARS (35% del bankroll).',
+          'Comprometido en esta recomendacion: $5.080 ARS | Remanente estimado: $8.920 ARS.',
+        ].join('\n')
+      ),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord() {
+          return {
+            id: 43,
+            eventName: 'UFC FN',
+            fight: 'Charles Johnson vs Bruno Silva',
+            pick: 'Charles Johnson ML',
+            result: 'pending',
+            updatedAt: '2026-03-15T00:01:00.000Z',
+          };
+        },
+        listUserBets() {
+          return [
+            {
+              id: 43,
+              eventName: 'UFC FN',
+              fight: 'Charles Johnson vs Bruno Silva',
+              pick: 'Charles Johnson ML',
+              result: 'pending',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'Charles Johnson ML @1.62 stake 2000, registrala por favor',
+      {
+        chatId: 'chat-exposure-guard-1',
+        userId: 'u-exposure-guard-1',
+        originalMessage: 'Charles Johnson ML @1.62 stake 2000, registrala por favor',
+        resolution: {
+          resolvedMessage: 'Charles Johnson ML @1.62 stake 2000, registrala por favor',
+        },
+      }
+    );
+
+    assert.match(result.reply, /registrada/i);
+    assert.doesNotMatch(result.reply, /6 peleas restantes/i);
+    assert.doesNotMatch(result.reply, /plan de exposicion/i);
+    assert.doesNotMatch(result.reply, /Comprometido en esta recomendacion/i);
+    assert.doesNotMatch(result.reply, /Remanente estimado/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
       responseWithFunctionCall('mutate_user_bets', {
         operation: 'archive',
         fight: 'A vs B',
@@ -1089,6 +1174,64 @@ export async function runBettingWizardTests() {
     });
 
     assert.match(result.reply, /bet_id/i);
+    assert.equal(previewCalls, 0);
+    assert.equal(applyCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          operation: 'settle',
+          result: 'loss',
+        },
+        'call_context_only_settle'
+      ),
+      responseWithText('Necesito selector explicito.'),
+    ]);
+
+    let previewCalls = 0;
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [{ id: 201, fight: 'Drew Dober vs Michael Johnson', result: 'pending' }];
+        },
+        previewBetMutation() {
+          previewCalls += 1;
+          return { ok: true, operation: 'settle', candidates: [{ id: 201 }] };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return { ok: true, operation: 'settle', affectedCount: 1, receipts: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cerrala como perdida', {
+      chatId: 'chat-context-guard-1',
+      userId: 'u-context-guard-1',
+      originalMessage: 'cerrala como perdida',
+      resolution: {
+        resolvedMessage: 'cerrala como perdida',
+        resolvedFight: {
+          fighterA: 'Drew Dober',
+          fighterB: 'Michael Johnson',
+        },
+      },
+    });
+
+    assert.match(result.reply, /selector explicito|desambiguar|bet_id/i);
     assert.equal(previewCalls, 0);
     assert.equal(applyCalls, 0);
   });
@@ -2943,6 +3086,110 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /Max Holloway vs Charles Oliveira/i);
     assert.doesNotMatch(result.reply, /Caio Borralho vs Reinier de Ridder/i);
     assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const realDateNow = Date.now;
+    const fixedNowMs = Date.parse('2026-03-08T02:30:00.000Z');
+    Date.now = () => fixedNowMs;
+    try {
+      const conversationStore = createConversationStore();
+      const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+      const wizard = createBettingWizard({
+        conversationStore,
+        client: fakeClient,
+        fightsScalper: {
+          async getFighterHistory() {
+            return { fighters: [], rows: [] };
+          },
+        },
+        userStore: {
+          getUserProfile() {
+            return {
+              timezone: 'America/Argentina/Buenos_Aires',
+            };
+          },
+          getEventWatchState(watchKey = 'next_event') {
+            if (watchKey === 'current_event') {
+              return {
+                eventId: 'ufc_999_2026-03-06',
+                eventName: 'UFC 999',
+                eventDateUtc: '2026-03-06',
+                mainCard: [
+                  {
+                    fightId: 'fight_1',
+                    fighterA: 'Max Holloway',
+                    fighterB: 'Charles Oliveira',
+                    isCompleted: false,
+                  },
+                ],
+                updatedAt: '2026-03-08T02:25:00.000Z',
+              };
+            }
+            return {
+              eventId: 'ufc_324_2026-04-18',
+              eventName: 'UFC 324',
+              eventDateUtc: '2026-04-18',
+              mainCard: [
+                { fightId: 'fight_1', fighterA: 'Gaethje', fighterB: 'Pimblett' },
+                { fightId: 'fight_2', fighterA: 'Holloway', fighterB: 'Oliveira' },
+              ],
+              updatedAt: '2026-03-07T12:00:00.000Z',
+            };
+          },
+          listUpcomingOddsEvents() {
+            return [];
+          },
+          listRecentOddsEvents() {
+            return [];
+          },
+          async refreshLiveScores() {
+            return { ok: true, upsertedCount: 0 };
+          },
+          listLatestRelevantNews() {
+            return [];
+          },
+          listLatestProjectionSnapshotsForEvent({ eventId }) {
+            if (eventId !== 'ufc_999_2026-03-06') return [];
+            return [
+              {
+                eventId,
+                fightId: 'fight_1',
+                fighterA: 'Max Holloway',
+                fighterB: 'Charles Oliveira',
+                predictedWinner: 'Max Holloway',
+                predictedMethod: 'decision_lean',
+                confidencePct: 62,
+                keyFactors: ['Ventana local nocturna'],
+                createdAt: '2026-03-08T02:20:00.000Z',
+              },
+            ];
+          },
+          listLatestBetScoringForEvent() {
+            return [];
+          },
+          listLatestOddsMarketsForFight() {
+            return [];
+          },
+        },
+      });
+
+      const result = await wizard.handleMessage('mostrame proyecciones para el proximo evento', {
+        chatId: 'chat-intel-proj-local-window-1',
+        userId: 'u-intel-proj-local-window-1',
+        originalMessage: 'mostrame proyecciones para el proximo evento',
+        resolution: {
+          resolvedMessage: 'mostrame proyecciones para el proximo evento',
+        },
+      });
+
+      assert.match(result.reply, /Evento:\s*UFC 999/i);
+      assert.doesNotMatch(result.reply, /Evento:\s*UFC 324/i);
+      assert.equal(fakeClient.calls.length, 0);
+    } finally {
+      Date.now = realDateNow;
+    }
   });
 
   tests.push(async () => {
