@@ -1571,6 +1571,195 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const applyPayloads = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return {
+            fighters: ['Josh Emmett', 'Kevin Vallejos', 'Amanda Lemos', 'Gillian Robertson', 'Max Holloway', 'Charles Oliveira'],
+            rows: [
+              ['2026-03-15', 'UFC 999', 'Josh Emmett', 'Kevin Vallejos', '', 'Kevin Vallejos', 'Decision'],
+              ['2026-03-15', 'UFC 999', 'Amanda Lemos', 'Gillian Robertson', '', 'Amanda Lemos', 'Decision'],
+              ['2026-03-15', 'UFC 999', 'Max Holloway', 'Charles Oliveira', '', 'Charles Oliveira', 'KO/TKO'],
+            ],
+          };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [
+            {
+              id: 101,
+              eventName: 'UFC 999',
+              fight: 'Josh Emmett vs Kevin Vallejos',
+              pick: 'Josh Emmett ganador',
+              result: 'pending',
+              createdAt: '2026-03-14T20:00:00.000Z',
+            },
+            {
+              id: 102,
+              eventName: 'UFC 999',
+              fight: 'Josh Emmett vs Kevin Vallejos',
+              pick: 'Kevin Vallejos ganador',
+              result: 'pending',
+              createdAt: '2026-03-14T20:00:00.000Z',
+            },
+            {
+              id: 103,
+              eventName: 'UFC 999',
+              fight: 'Amanda Lemos vs Gillian Robertson',
+              pick: 'Gillian Robertson por sumision',
+              result: 'pending',
+              createdAt: '2026-03-14T20:00:00.000Z',
+            },
+            {
+              id: 104,
+              eventName: 'UFC 999',
+              fight: 'Max Holloway vs Charles Oliveira',
+              pick: 'Charles Oliveira por sumision',
+              result: 'pending',
+              createdAt: '2026-03-14T20:00:00.000Z',
+            },
+          ];
+        },
+        previewCompositeBetMutations() {
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            requiresConfirmation: false,
+            stepResults: [],
+          };
+        },
+        applyCompositeBetMutations(_userId, payload = {}) {
+          applyPayloads.push(payload);
+          const steps = Array.isArray(payload.steps) ? payload.steps : [];
+          const receipts = steps.map((step) => ({
+            betId: step.betIds?.[0] || null,
+            previousResult: 'pending',
+            newResult: step.result || null,
+            eventName: 'UFC 999',
+            fight: 'N/D',
+            pick: 'N/D',
+          }));
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            affectedCount: receipts.length,
+            stepResults: steps.map((step, index) => ({
+              index,
+              operation: step.operation,
+              result: step.result,
+              affectedCount: 1,
+              receipts: receipts[index] ? [receipts[index]] : [],
+            })),
+            receipts,
+          };
+        },
+      },
+    });
+
+    const first = await wizard.handleMessage(
+      'te podes fijar como salieron esas peleas para cerrar las apuestas?',
+      {
+        chatId: 'chat-bulk-verified-settle-1',
+        userId: 'u-bulk-verified-settle-1',
+        originalMessage: 'te podes fijar como salieron esas peleas para cerrar las apuestas?',
+        resolution: {
+          resolvedMessage: 'te podes fijar como salieron esas peleas para cerrar las apuestas?',
+        },
+      }
+    );
+
+    assert.match(first.reply, /Verificadas para cierre:\s*4\s*\(WIN 1 \/ LOSS 3\)/i);
+    assert.match(first.reply, /no voy a cerrar todo como ganado/i);
+    const tokenMatch = first.reply.match(/confirmo\s+(mut_[a-z0-9]+)/i);
+    assert.ok(tokenMatch?.[1]);
+    assert.equal(fakeClient.calls.length, 0);
+
+    const confirmMessage = `confirmo ${tokenMatch[1]}`;
+    const second = await wizard.handleMessage(confirmMessage, {
+      chatId: 'chat-bulk-verified-settle-1',
+      userId: 'u-bulk-verified-settle-1',
+      originalMessage: confirmMessage,
+      resolution: {
+        resolvedMessage: confirmMessage,
+      },
+    });
+
+    assert.equal(applyPayloads.length, 1);
+    const appliedSteps = Array.isArray(applyPayloads[0]?.steps) ? applyPayloads[0].steps : [];
+    assert.equal(appliedSteps.length, 4);
+    assert.deepEqual(
+      appliedSteps.map((step) => ({ id: step.betIds?.[0], result: step.result })),
+      [
+        { id: 101, result: 'loss' },
+        { id: 102, result: 'win' },
+        { id: 103, result: 'loss' },
+        { id: 104, result: 'loss' },
+      ]
+    );
+    assert.match(second.reply, /Confirmación aplicada: 1 mutación/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    let applyCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return {
+            fighters: ['Fighter A', 'Fighter B'],
+            rows: [],
+          };
+        },
+      },
+      userStore: {
+        listUserBets() {
+          return [
+            {
+              id: 201,
+              fight: 'Fighter A vs Fighter B',
+              pick: 'Fighter A ganador',
+              result: 'pending',
+              createdAt: '2026-03-14T20:00:00.000Z',
+            },
+          ];
+        },
+        applyCompositeBetMutations() {
+          applyCalls += 1;
+          return { ok: true, affectedCount: 0, receipts: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'fijate como salieron y cerra mis apuestas pendientes',
+      {
+        chatId: 'chat-bulk-verified-settle-no-evidence-1',
+        userId: 'u-bulk-verified-settle-no-evidence-1',
+        originalMessage: 'fijate como salieron y cerra mis apuestas pendientes',
+        resolution: {
+          resolvedMessage: 'fijate como salieron y cerra mis apuestas pendientes',
+        },
+      }
+    );
+
+    assert.match(result.reply, /No pude verificar con confianza/i);
+    assert.match(result.reply, /No voy a cerrarlas como ganadas sin evidencia/i);
+    assert.equal(applyCalls, 0);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('Pick principal: Over 2.5 @1.90.')]);
 
     const wizard = createBettingWizard({

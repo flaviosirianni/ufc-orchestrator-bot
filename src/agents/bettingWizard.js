@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import OpenAI from 'openai';
 import '../core/env.js';
+import { resolveAutoSettlementCandidate } from '../core/autoSettlement.js';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MODEL = process.env.BETTING_MODEL || 'gpt-4.1-mini';
@@ -484,13 +485,16 @@ function hasFightResultLookupSignals(message = '') {
   const text = normalise(message);
   if (!text) return false;
   if (
-    /\b(como salio|como termino|resultado|quien gano|quien ganó|ya termino|ya terminó|ya finalizo|ya finalizó)\b/.test(
+    /\b(como salio|como salieron|como termino|como terminaron|resultado|quien gano|quien ganó|ya termino|ya terminó|ya finalizo|ya finalizó|ya terminaron|ya finalizaron)\b/.test(
       text
     )
   ) {
     return true;
   }
-  const hasResultWords = /\b(resultado|salio|termino|finalizo|gano|ganador|winner)\b/.test(text);
+  const hasResultWords =
+    /\b(resultado|salio|salieron|termino|terminaron|finalizo|finalizaron|gano|ganaron|ganador|winner)\b/.test(
+      text
+    );
   const hasFightWords = /\b(pelea|fight|combate|vs|versus|evento|ufc)\b/.test(text);
   return hasResultWords && hasFightWords;
 }
@@ -2585,6 +2589,45 @@ function isLedgerMutationIntentMessage(message = '') {
   return /\b(cerr\w*|liquid\w*|settl\w*|anot\w*|registr\w*|archiv\w*|borr\w*|elimin\w*|marc\w*|deshac\w*|undo|revert\w*)\b/.test(
     text
   );
+}
+
+function isBulkSettlementReviewRequest(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+  const wantsReview =
+    /\b(fijate|revis\w*|verific\w*|cheque\w*|confirm\w*|como salio|como salieron|como termino|como terminaron|resultado)\b/.test(
+      text
+    );
+  const wantsSettle = /\b(cerr\w*|liquid\w*|settl\w*|marc\w*)\b/.test(text);
+  const targetsMultiple = /\b(apuestas|pending|pendientes|todas|esas|estas)\b/.test(text);
+  return wantsReview && wantsSettle && targetsMultiple;
+}
+
+function splitFightLabelForSettlement(label = '') {
+  const value = String(label || '').trim();
+  if (!value) return null;
+  const parts = value.split(/\s+(?:vs\.?|versus|v)\s+/i).map((part) => part.trim());
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  return {
+    fighterA: parts[0],
+    fighterB: parts[1],
+  };
+}
+
+function collectUniqueFightersFromBets(bets = []) {
+  const output = [];
+  const seen = new Set();
+  for (const bet of Array.isArray(bets) ? bets : []) {
+    const parsed = splitFightLabelForSettlement(bet?.fight || '');
+    if (!parsed) continue;
+    for (const fighterName of [parsed.fighterA, parsed.fighterB]) {
+      const key = normalizeText(fighterName);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      output.push(fighterName);
+    }
+  }
+  return output.slice(0, 24);
 }
 
 function normalizeTimeZone(timezone = '') {
@@ -6469,6 +6512,212 @@ export function createBettingWizard({
           },
         };
       }
+    }
+
+    if (
+      userId &&
+      wantsFightResultLookup &&
+      isLedgerMutationIntentMessage(originalMessage) &&
+      isBulkSettlementReviewRequest(originalMessage) &&
+      userStore?.listUserBets
+    ) {
+      const pendingBets = userStore.listUserBets(userId, {
+        status: 'pending',
+        includeArchived: false,
+        limit: 120,
+      });
+      if (!Array.isArray(pendingBets) || !pendingBets.length) {
+        return {
+          reply: 'No tenes apuestas pendientes para cerrar en este momento.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (typeof userStore?.applyCompositeBetMutations !== 'function') {
+        return {
+          reply:
+            'No puedo preparar un cierre masivo seguro en este entorno porque falta soporte transaccional compuesto.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      if (typeof fightsScalper?.getFighterHistory !== 'function') {
+        return {
+          reply:
+            'No tengo disponible el modulo de verificacion de resultados en este entorno. Pasame bet_id + resultado y lo cierro manualmente.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const fighterPool = collectUniqueFightersFromBets(pendingBets);
+      let historyRows = [];
+      try {
+        const history = await fightsScalper.getFighterHistory({
+          message: fighterPool.join(' vs '),
+          fighters: fighterPool,
+          strict: false,
+        });
+        historyRows = Array.isArray(history?.rows) ? history.rows : [];
+      } catch (error) {
+        console.error('⚠️ bulk settle history lookup failed:', error);
+      }
+
+      const settlements = [];
+      const unresolved = [];
+      for (const bet of pendingBets) {
+        const settlement = resolveAutoSettlementCandidate(
+          {
+            id: bet?.id,
+            fight: bet?.fight,
+            pick: bet?.pick,
+          },
+          historyRows
+        );
+
+        if (!settlement || settlement.confidence !== 'high') {
+          unresolved.push({
+            bet,
+            reason: 'without_verified_result',
+          });
+          continue;
+        }
+
+        const matchedDate = toIsoDateSafe(settlement?.matchedRow?.date || '');
+        const betRecordedDate = toIsoDateSafe(
+          bet?.recordedAt || bet?.createdAt || bet?.updatedAt || ''
+        );
+        if (matchedDate && betRecordedDate) {
+          const deltaVsRecorded = dateDiffInDays(matchedDate, betRecordedDate);
+          if (Number.isFinite(deltaVsRecorded) && deltaVsRecorded < -3) {
+            unresolved.push({
+              bet,
+              reason: 'matched_result_precedes_bet',
+            });
+            continue;
+          }
+        }
+
+        settlements.push({
+          bet,
+          settlement,
+        });
+      }
+
+      if (!settlements.length) {
+        return {
+          reply: [
+            'No pude verificar con confianza el resultado de tus apuestas pendientes en este turno.',
+            'No voy a cerrarlas como ganadas sin evidencia por pelea.',
+            'Si queres, pasame winner/method por bet_id y las cierro al toque.',
+          ].join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const maxSteps = 12;
+      const selectedSettlements = settlements.slice(0, maxSteps);
+      const omittedByLimit = Math.max(0, settlements.length - selectedSettlements.length);
+      const compositePayload = {
+        transactionPolicy: 'all_or_nothing',
+        steps: selectedSettlements.map(({ bet, settlement }) => ({
+          operation: 'settle',
+          result: settlement.result,
+          betIds: [Number(bet.id)],
+          reason: 'verified_pending_result',
+        })),
+        metadata: {
+          source: 'bulk_verified_settlement',
+          reason: 'verified_pending_results',
+          chatId,
+          originalMessage: truncateText(originalMessage, 300),
+        },
+      };
+
+      if (typeof userStore?.previewCompositeBetMutations === 'function') {
+        const preview = userStore.previewCompositeBetMutations(userId, compositePayload);
+        if (!preview?.ok) {
+          return {
+            reply: `No pude preparar el cierre verificado: ${preview?.error || 'preview_failed'}.`,
+            metadata: {
+              resolvedFight: runtimeState.resolvedFight,
+              eventCard: runtimeState.eventCard,
+            },
+          };
+        }
+      }
+
+      const mutationScope = mutationScopeKey({ chatId, userId });
+      const confirmationToken = savePendingMutation(mutationScope, {
+        payload: compositePayload,
+      });
+      const winCount = selectedSettlements.filter(
+        (entry) => String(entry?.settlement?.result || '') === 'win'
+      ).length;
+      const lossCount = selectedSettlements.filter(
+        (entry) => String(entry?.settlement?.result || '') === 'loss'
+      ).length;
+
+      const lines = [
+        'Revision completa: no voy a cerrar todo como ganado sin validar pelea por pelea.',
+        `- Verificadas para cierre: ${selectedSettlements.length} (WIN ${winCount} / LOSS ${lossCount}).`,
+      ];
+      if (omittedByLimit > 0) {
+        lines.push(`- Omitidas por limite operativo (${maxSteps}): ${omittedByLimit}.`);
+      }
+      if (unresolved.length) {
+        lines.push(`- Sin evidencia suficiente en este turno: ${unresolved.length}.`);
+      }
+
+      lines.push('', 'Propuesta de cierre verificado:');
+      for (const entry of selectedSettlements.slice(0, 8)) {
+        const bet = entry.bet || {};
+        const settlement = entry.settlement || {};
+        const sourceWinner = settlement?.matchedRow?.winner || 'N/D';
+        const sourceMethod = settlement?.matchedRow?.method || 'metodo N/D';
+        const sourceDate = settlement?.matchedRow?.date || 'fecha N/D';
+        lines.push(
+          `- bet_id ${bet.id}: ${String(settlement.result || '').toUpperCase()} | ${bet.fight || 'Pelea N/D'} | ${bet.pick || 'Pick N/D'} | fuente ${sourceDate} (${sourceWinner}, ${sourceMethod})`
+        );
+      }
+      if (selectedSettlements.length > 8) {
+        lines.push(`- ... y ${selectedSettlements.length - 8} apuesta(s) mas.`);
+      }
+      if (unresolved.length) {
+        lines.push('', 'Pendientes sin verificacion automatica (siguen OPEN):');
+        for (const item of unresolved.slice(0, 6)) {
+          const bet = item?.bet || {};
+          lines.push(`- bet_id ${bet.id || 'N/D'}: ${bet.fight || 'Pelea N/D'} | ${bet.pick || 'Pick N/D'}`);
+        }
+        if (unresolved.length > 6) {
+          lines.push(`- ... y ${unresolved.length - 6} apuesta(s) mas sin verificar.`);
+        }
+      }
+
+      lines.push(
+        '',
+        `Si queres ejecutarlo, confirma con: "confirmo ${confirmationToken}"`,
+        'Se aplicara en modo all_or_nothing solo sobre las apuestas verificadas.'
+      );
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
     }
 
     if (wantsFightResultLookup && !isLedgerMutationIntentMessage(originalMessage)) {
