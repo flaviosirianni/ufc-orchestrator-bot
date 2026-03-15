@@ -869,3 +869,46 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir copy legal/comercial final de recarga y devolucion.
    - **Prioridad:** alta.
    - **Estado:** pendiente (entrypoint inicial en Home implementado; falta UX completa de packs y selector).
+
+30. **Evitar contexto falso de exposicion/evento cuando no hay apuestas abiertas previas**
+   - **Objetivo de negocio/UX:** preservar confianza operacional y evitar recomendaciones de riesgo basadas en un estado de ledger incorrecto.
+   - **Problema observado (ejemplo real):**
+     - Luego de registrar una apuesta nueva, el bot respondio:
+       - "Si queres, decime si esta apuesta corresponde al mismo evento donde tenias '6 peleas restantes'..."
+     - El usuario reporto que no deberian existir apuestas abiertas previas en ese momento.
+   - **Comportamiento deseado para el usuario final:**
+     - El bot solo menciona contexto de "apuestas abiertas", "peleas restantes" o "exposicion comprometida" cuando esos datos existen y son consistentes con ledger.
+     - Si no hay apuestas abiertas previas, el mensaje post-registro debe tratar la apuesta como primera posicion abierta (sin arrastrar contexto inexistente).
+     - Si no puede mapear con confianza el evento activo, debe preguntar sin asumir estado previo.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `LedgerExposureContextGate` deterministico antes de renderizar el bloque post-registro.
+     - Inputs obligatorios del gate:
+       - snapshot de apuestas `pending` no archivadas del usuario (antes y despues de la mutacion),
+       - bet recien creada (`bet_id`, `event_name`, `fight`, `created_at`),
+       - contexto de evento activo (`current_event`/`next_event`) con score de matching.
+     - Reglas de salida:
+       - `pending_before = 0` -> prohibido decir "tenias X peleas restantes".
+       - `pending_after = 1` -> copy de "primera abierta" (sin plan multi-pelea implicito).
+       - Solo mostrar "plan de exposicion por pelea" si `pending_after > 1` y hay `same_event_confidence >= umbral`.
+       - Si el matching de evento es ambiguo, usar `exposure_context_unknown` y pedir confirmacion del evento sin numeros heredados.
+     - Guardrails:
+       - bloquear claims numericos (`N peleas restantes`, `comprometido`, `remanente`) sin evidencia calculada en backend.
+       - si el texto generado por LLM contradice el estado deterministico, priorizar template backend.
+     - Estados sugeridos:
+       - `post_record_receipt_ready`
+       - `exposure_context_verified`
+       - `exposure_context_unknown`
+   - **Criterios de aceptacion verificables:**
+     - Con `0` apuestas `pending` previas, nunca aparece texto de "tenias X abiertas/restantes".
+     - Los valores de exposicion y conteos coinciden 1:1 con ledger al momento de responder.
+     - En ambiguedad de evento, el bot pregunta confirmacion y evita inferencias de historial inexistente.
+   - **Pruebas de regresion necesarias:**
+     - Registro de apuesta con `pending_before=0` -> respuesta sin contexto heredado falso.
+     - Registro con multiples `pending` del mismo evento -> conteos correctos de abiertas/restantes.
+     - Registro con `pending` de otro evento -> no mezclar exposicion entre eventos.
+     - Apuestas archivadas/cerradas -> no contabilizarlas en contexto de exposicion.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir formula canonica de "peleas restantes" (main card vs total cartelera) para estandarizar el copy.
+     - Decision abierta: definir prioridad final de matching (`event_id` vs `event_name` normalizado) cuando faltan IDs consistentes.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
