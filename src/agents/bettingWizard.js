@@ -179,7 +179,7 @@ const FUNCTION_TOOLS = [
     type: 'function',
     name: 'mutate_user_bets',
     description:
-      'Actualiza apuestas existentes (settle/set_pending/archive) con guardrails. Solo pide confirmacion cuando la seleccion es ambigua.',
+      'Actualiza apuestas existentes (settle/set_pending/archive) con guardrails. Acepta mutacion simple o compuesta por pasos.',
     parameters: {
       type: 'object',
       properties: {
@@ -209,8 +209,39 @@ const FUNCTION_TOOLS = [
           description: 'Token devuelto por la previsualizacion requerida.',
         },
         reason: { type: 'string' },
+        transactionPolicy: {
+          type: 'string',
+          description: 'Para steps compuestos: all_or_nothing.',
+        },
+        steps: {
+          type: 'array',
+          description:
+            'Lista de mutaciones a ejecutar en lote (cada paso usa el mismo esquema de operation/result/selectores).',
+          items: {
+            type: 'object',
+            properties: {
+              operation: {
+                type: 'string',
+                description: 'settle | set_pending | archive',
+              },
+              result: {
+                type: 'string',
+                description: 'Requerido en settle: win | loss | push',
+              },
+              betIds: {
+                type: 'array',
+                items: { type: 'number' },
+              },
+              eventName: { type: 'string' },
+              fight: { type: 'string' },
+              pick: { type: 'string' },
+              limit: { type: 'number' },
+              reason: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+        },
       },
-      required: ['operation'],
       additionalProperties: false,
     },
     strict: false,
@@ -3654,6 +3685,7 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Si el usuario pregunta por su ledger/balance/apuestas previas, usa get_user_profile para responder con su historial y resumen.',
     'Para listar apuestas existentes y resolver referencias ambiguas, usa list_user_bets.',
     'Para cambiar estado de apuestas existentes (WON/LOST/PENDING) o borrar/archivar, usa mutate_user_bets, nunca record_user_bet.',
+    'Si el usuario pide varias mutaciones de ledger juntas, usa mutate_user_bets con steps[] y transactionPolicy=all_or_nothing.',
     'record_user_bet solo se usa para ALTA de apuesta nueva y exige campos minimos completos: fight, pick, odds y stake.',
     'Si la referencia de pelea es ambigua (esa/anterior/recien), no ejecutes mutaciones: pedi desambiguacion con bet_id.',
     'Si el target de mutacion es inequivoco (bet_id explicito o selector unico), ejecuta directo sin pedir confirmacion extra.',
@@ -5880,8 +5912,131 @@ export function createBettingWizard({
 
     const mutationScope = mutationScopeKey({ chatId, userId });
     const confirmationIntent = parseConfirmationIntent(originalMessage);
+    const extractMutationDescriptors = (payload = {}) => {
+      if (!payload || typeof payload !== 'object') return [];
+      if (Array.isArray(payload.steps) && payload.steps.length) {
+        return payload.steps
+          .map((step) => {
+            if (!step || typeof step !== 'object') return null;
+            return {
+              operation: String(step.operation || '').trim().toLowerCase(),
+              result: normalizeBetResult(step.result),
+            };
+          })
+          .filter((entry) => entry?.operation);
+      }
+      const operation = String(payload.operation || '')
+        .trim()
+        .toLowerCase();
+      if (!operation) return [];
+      return [
+        {
+          operation,
+          result: normalizeBetResult(payload.result),
+        },
+      ];
+    };
 
-    if (userId && userStore?.applyBetMutation) {
+    const formatMutationPayloadLabel = (payload = {}) => {
+      const descriptors = extractMutationDescriptors(payload);
+      const uniqueOperations = Array.from(
+        new Set(descriptors.map((item) => item.operation).filter(Boolean))
+      );
+      if (uniqueOperations.length === 1) {
+        return formatMutationActionLabel(uniqueOperations[0]);
+      }
+      if (uniqueOperations.length > 1) {
+        return 'COMPOSITE';
+      }
+      return formatMutationActionLabel(String(payload.operation || '').trim().toLowerCase());
+    };
+
+    const applyMutationPayload = (payload = {}, { confirmationToken = '', confirmationSource = '' } = {}) => {
+      const applyMetadata = {
+        ...(payload?.metadata || {}),
+        ...(confirmationToken ? { confirmationToken } : {}),
+        ...(confirmationSource ? { confirmationSource } : {}),
+      };
+      const applyPayload = {
+        ...(payload || {}),
+        confirm: true,
+        metadata: applyMetadata,
+      };
+      const hasCompositeSteps =
+        Array.isArray(applyPayload.steps) && applyPayload.steps.length > 0;
+
+      if (hasCompositeSteps) {
+        if (typeof userStore?.applyCompositeBetMutations === 'function') {
+          return userStore.applyCompositeBetMutations(userId, applyPayload);
+        }
+        if (typeof userStore?.applyBetMutation !== 'function') {
+          return {
+            ok: false,
+            error: 'userStore no soporta applyBetMutation para fallback de lote.',
+          };
+        }
+
+        const stepResults = [];
+        const receipts = [];
+        let lastLedgerSummary = null;
+        for (const [index, step] of applyPayload.steps.entries()) {
+          const fallbackPayload = {
+            ...(step || {}),
+            confirm: true,
+            metadata: {
+              ...applyMetadata,
+              ...(step?.metadata || {}),
+              transactionPolicy: applyPayload.transactionPolicy || 'all_or_nothing',
+              compositeStepIndex: index,
+              fallbackCompositeApply: true,
+            },
+          };
+          const appliedStep = userStore.applyBetMutation(userId, fallbackPayload);
+          if (!appliedStep?.ok) {
+            return {
+              ok: false,
+              error: 'composite_apply_failed',
+              failedStepIndex: index,
+              failedStep: appliedStep,
+              stepResults,
+            };
+          }
+
+          const stepReceipts = Array.isArray(appliedStep.receipts) ? appliedStep.receipts : [];
+          stepResults.push({
+            index,
+            operation: String(step?.operation || '').trim().toLowerCase() || null,
+            result: normalizeBetResult(step?.result) || null,
+            affectedCount: Number(appliedStep.affectedCount) || stepReceipts.length,
+            receipts: stepReceipts,
+          });
+          receipts.push(...stepReceipts);
+          if (appliedStep.ledgerSummary) {
+            lastLedgerSummary = appliedStep.ledgerSummary;
+          }
+        }
+
+        return {
+          ok: true,
+          transactionPolicy: applyPayload.transactionPolicy || 'all_or_nothing',
+          affectedCount: receipts.length,
+          stepResults,
+          receipts,
+          ledgerSummary: lastLedgerSummary,
+        };
+      }
+
+      if (typeof userStore?.applyBetMutation !== 'function') {
+        return {
+          ok: false,
+          error: 'userStore no soporta applyBetMutation.',
+        };
+      }
+
+      return userStore.applyBetMutation(userId, applyPayload);
+    };
+
+    if (userId && (userStore?.applyBetMutation || userStore?.applyCompositeBetMutations)) {
       const pendingNow = getPendingMutationsForScope(mutationScope);
       if (
         pendingNow.length &&
@@ -5903,34 +6058,31 @@ export function createBettingWizard({
               return true;
             }
 
-            const operation = String(entry.payload?.operation || '').trim();
-            const result = String(entry.payload?.result || '').trim();
+            const descriptors = extractMutationDescriptors(entry.payload);
             let hasSpecificHint = false;
 
             if (confirmationIntent.wantsArchive) {
               hasSpecificHint = true;
-              if (operation === 'archive') {
+              if (descriptors.some((item) => item.operation === 'archive')) {
                 return true;
               }
             }
 
             if (confirmationIntent.wantsSetPending) {
               hasSpecificHint = true;
-              if (operation === 'set_pending') {
+              if (descriptors.some((item) => item.operation === 'set_pending')) {
                 return true;
               }
             }
 
             if (confirmationIntent.wantsSettle || confirmationIntent.settleResult) {
               hasSpecificHint = true;
-              if (operation === 'settle') {
-                if (!confirmationIntent.settleResult) {
-                  return true;
-                }
-                if (result === confirmationIntent.settleResult) {
-                  return true;
-                }
-              }
+              const hasMatchingSettle = descriptors.some((item) => {
+                if (item.operation !== 'settle') return false;
+                if (!confirmationIntent.settleResult) return true;
+                return item.result === confirmationIntent.settleResult;
+              });
+              if (hasMatchingSettle) return true;
             }
 
             // Flexible default: plain "confirmo" applies all pending.
@@ -5966,19 +6118,13 @@ export function createBettingWizard({
 
         const outcomes = [];
         for (const entry of selectedEntries) {
-          const applyPayload = {
-            ...entry.payload,
-            confirm: true,
-            metadata: {
-              ...(entry.payload?.metadata || {}),
-              confirmationToken: entry.token,
-              confirmationSource: 'user_confirm_message',
-            },
-          };
-          const applied = userStore.applyBetMutation(userId, applyPayload);
+          const applied = applyMutationPayload(entry.payload, {
+            confirmationToken: entry.token,
+            confirmationSource: 'user_confirm_message',
+          });
           outcomes.push({
             token: entry.token,
-            operation: entry.payload?.operation || '',
+            operationLabel: formatMutationPayloadLabel(entry.payload),
             applied,
           });
         }
@@ -5990,9 +6136,8 @@ export function createBettingWizard({
         if (success.length) {
           lines.push(`✅ Confirmación aplicada: ${success.length} mutación(es).`);
           for (const item of success) {
-            const operation = formatMutationActionLabel(item.operation);
             const count = Number(item.applied?.affectedCount) || 0;
-            lines.push(`- ${operation} (${item.token}): ${count} apuesta(s) afectada(s).`);
+            lines.push(`- ${item.operationLabel} (${item.token}): ${count} apuesta(s) afectada(s).`);
             const receipts = Array.isArray(item.applied?.receipts)
               ? item.applied.receipts.slice(0, 5)
               : [];
@@ -6013,7 +6158,7 @@ export function createBettingWizard({
           lines.push('', `⚠️ Mutaciones con error: ${failed.length}.`);
           for (const item of failed) {
             lines.push(
-              `- ${formatMutationActionLabel(item.operation)} (${item.token}): ${
+              `- ${item.operationLabel} (${item.token}): ${
                 item.applied?.error || 'error_desconocido'
               }`
             );
@@ -6289,145 +6434,435 @@ export function createBettingWizard({
       if (!userId) {
         return { ok: false, error: 'userId no disponible para mutaciones de apuestas.' };
       }
-      if (!userStore?.previewBetMutation || !userStore?.applyBetMutation) {
-        return {
-          ok: false,
-          error: 'userStore no soporta previewBetMutation/applyBetMutation.',
-        };
-      }
-
-      const operation = String(rawArgs.operation || '').trim().toLowerCase();
-      const normalizedResult = normalizeBetResult(rawArgs.result);
-      const explicitBetIds = parseBetIds(rawArgs.betIds);
-      const inferredBetIds =
-        explicitBetIds.length > 0 ? [] : extractBetIdsFromMessage(originalMessage);
-      const betIds = explicitBetIds.length ? explicitBetIds : inferredBetIds;
-      const explicitEventName = rawArgs.eventName ? String(rawArgs.eventName).trim() : '';
-      const explicitFight = rawArgs.fight ? String(rawArgs.fight).trim() : '';
-      const explicitPick = rawArgs.pick ? String(rawArgs.pick).trim() : '';
-      const inferredFightFromContext = resolvedFightLabel(
-        runtimeState.resolvedFight || resolution?.resolvedFight || null
+      const hasPreviewSupport = Boolean(
+        userStore?.previewBetMutation || userStore?.previewCompositeBetMutations
       );
-      const canUseFuzzyFightRecovery = Boolean(explicitFight);
-      let payload = {
-        operation,
-        result: normalizedResult || undefined,
-        betIds: betIds.length ? betIds : undefined,
-        eventName: explicitEventName || undefined,
-        fight: explicitFight || undefined,
-        pick: explicitPick || undefined,
-        limit: Number.isFinite(Number(rawArgs.limit)) ? Number(rawArgs.limit) : undefined,
-        metadata: {
-          source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
-          reason: rawArgs.reason ? String(rawArgs.reason).trim() : null,
-          isDestructive: operation === 'archive' || operation === 'settle',
-          chatId,
-          originalMessage: truncateText(originalMessage, 300),
-          selector: {
-            usedExplicitBetIds: explicitBetIds.length > 0,
-            usedBetIdsFromMessage: explicitBetIds.length === 0 && inferredBetIds.length > 0,
-            usedExplicitFight: Boolean(explicitFight),
-            usedExplicitEventName: Boolean(explicitEventName),
-            usedExplicitPick: Boolean(explicitPick),
-          },
-        },
-      };
-
-      if (operation === 'settle' && !normalizedResult) {
+      const hasApplySupport = Boolean(
+        userStore?.applyBetMutation || userStore?.applyCompositeBetMutations
+      );
+      if (!hasPreviewSupport || !hasApplySupport) {
         return {
           ok: false,
-          error: 'settle_requires_result',
-        };
-      }
-
-      const fightNotStartedSignals = /\b(no empezo|no empezó|todavia no empezo|todavía no empezó|aun no empezo|aún no empezó)\b/i;
-      if (operation === 'settle' && fightNotStartedSignals.test(originalMessage)) {
-        return {
-          ok: false,
-          error: 'fight_not_finished_guard',
-          message:
-            'No se puede cerrar WON/LOST una pelea marcada como no iniciada. Confirmá el resultado al finalizar.',
-        };
-      }
-
-      const ambiguousReference = hasAmbiguousFightReference(originalMessage);
-      if (
-        (operation === 'settle' || operation === 'set_pending') &&
-        ambiguousReference &&
-        !explicitBetIds.length &&
-        !explicitFight &&
-        !explicitEventName &&
-        !explicitPick
-      ) {
-        const candidates = userStore?.listUserBets
-          ? userStore.listUserBets(userId, {
-              status: 'pending',
-              includeArchived: false,
-              limit: 8,
-            })
-          : [];
-        return {
-          ok: false,
-          error: 'ambiguous_fight_reference',
-          requiresDisambiguation: true,
-          candidates,
-          message:
-            'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de mutar el ledger.',
-        };
-      }
-
-      const hasStrongSelector =
-        betIds.length > 0 ||
-        Boolean(explicitEventName) ||
-        Boolean(explicitFight) ||
-        Boolean(explicitPick);
-      if (
-        (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
-        !hasStrongSelector
-      ) {
-        const candidates = userStore?.listUserBets
-          ? userStore.listUserBets(userId, {
-              status: operation === 'settle' ? 'pending' : null,
-              includeArchived: false,
-              limit: 8,
-            })
-          : [];
-        return {
-          ok: false,
-          error: 'missing_disambiguation_selector',
-          requiresDisambiguation: true,
-          candidates,
-          message:
-            'Necesito desambiguar que apuesta querés tocar. Indicame bet_id (o pelea exacta + pick) y lo ejecuto.',
-        };
-      }
-
-      if (
-        (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
-        !explicitBetIds.length &&
-        !betIds.length &&
-        !explicitFight &&
-        inferredFightFromContext
-      ) {
-        const candidates = userStore?.listUserBets
-          ? userStore.listUserBets(userId, {
-              status: operation === 'settle' ? 'pending' : null,
-              includeArchived: false,
-              limit: 8,
-            })
-          : [];
-        return {
-          ok: false,
-          error: 'context_fight_requires_explicit_selector',
-          requiresDisambiguation: true,
-          candidates,
-          message:
-            'Para evitar cerrar la pelea equivocada, necesito selector explícito del usuario (bet_id o pelea exacta) y no solo contexto previo.',
+          error: 'userStore no soporta preview/apply para mutaciones de apuestas.',
         };
       }
 
       const confirm = rawArgs.confirm === true;
       const confirmationToken = String(rawArgs.confirmationToken || '').trim();
+      const transactionPolicy = String(rawArgs.transactionPolicy || 'all_or_nothing')
+        .trim()
+        .toLowerCase();
+      const normalizeMutationResponse = (applied = {}, fallbackOperation = null) => {
+        const hasStepResults =
+          Array.isArray(applied.stepResults) && applied.stepResults.length > 0;
+        const operation = hasStepResults
+          ? 'composite'
+          : applied.operation || fallbackOperation || null;
+        const receipts = Array.isArray(applied.receipts) ? applied.receipts : [];
+
+        return {
+          operation,
+          transactionPolicy: hasStepResults
+            ? applied.transactionPolicy || transactionPolicy || null
+            : null,
+          affectedCount: Number(applied.affectedCount) || receipts.length,
+          stepResults: hasStepResults ? applied.stepResults : undefined,
+          receipts,
+        };
+      };
+
+      const rawSteps = Array.isArray(rawArgs.steps)
+        ? rawArgs.steps
+            .map((step) => (step && typeof step === 'object' ? step : null))
+            .filter(Boolean)
+        : [];
+      const inferredFightFromContext = resolvedFightLabel(
+        runtimeState.resolvedFight || resolution?.resolvedFight || null
+      );
+      const fightNotStartedSignals = /\b(no empezo|no empezó|todavia no empezo|todavía no empezó|aun no empezo|aún no empezó)\b/i;
+      const ambiguousReference = hasAmbiguousFightReference(originalMessage);
+      const buildMutationPayload = (stepArgs = {}, { stepIndex = null, allowInferredIds = true } = {}) => {
+        const operation = String(stepArgs.operation || '')
+          .trim()
+          .toLowerCase();
+        const normalizedResult = normalizeBetResult(stepArgs.result);
+        const explicitBetIds = parseBetIds(stepArgs.betIds);
+        const inferredBetIds =
+          allowInferredIds && explicitBetIds.length === 0
+            ? extractBetIdsFromMessage(originalMessage)
+            : [];
+        const betIds = explicitBetIds.length ? explicitBetIds : inferredBetIds;
+        const explicitEventName = stepArgs.eventName ? String(stepArgs.eventName).trim() : '';
+        const explicitFight = stepArgs.fight ? String(stepArgs.fight).trim() : '';
+        const explicitPick = stepArgs.pick ? String(stepArgs.pick).trim() : '';
+        const payload = {
+          operation,
+          result: normalizedResult || undefined,
+          betIds: betIds.length ? betIds : undefined,
+          eventName: explicitEventName || undefined,
+          fight: explicitFight || undefined,
+          pick: explicitPick || undefined,
+          limit: Number.isFinite(Number(stepArgs.limit)) ? Number(stepArgs.limit) : undefined,
+          metadata: {
+            source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
+            reason: stepArgs.reason ? String(stepArgs.reason).trim() : null,
+            isDestructive: operation === 'archive' || operation === 'settle',
+            chatId,
+            originalMessage: truncateText(originalMessage, 300),
+            selector: {
+              usedExplicitBetIds: explicitBetIds.length > 0,
+              usedBetIdsFromMessage: explicitBetIds.length === 0 && inferredBetIds.length > 0,
+              usedExplicitFight: Boolean(explicitFight),
+              usedExplicitEventName: Boolean(explicitEventName),
+              usedExplicitPick: Boolean(explicitPick),
+            },
+            ...(Number.isInteger(stepIndex) ? { compositeStepIndex: stepIndex } : {}),
+          },
+        };
+
+        return {
+          payload,
+          operation,
+          normalizedResult,
+          explicitBetIds,
+          betIds,
+          explicitEventName,
+          explicitFight,
+          explicitPick,
+        };
+      };
+      const validateMutationSelection = (details, { stepIndex = null } = {}) => {
+        const {
+          operation,
+          normalizedResult,
+          explicitBetIds,
+          betIds,
+          explicitEventName,
+          explicitFight,
+          explicitPick,
+        } = details || {};
+        const stepContext = Number.isInteger(stepIndex)
+          ? { stepIndex, failedStepIndex: stepIndex }
+          : {};
+
+        if (!['settle', 'set_pending', 'archive'].includes(operation)) {
+          return {
+            ok: false,
+            error: 'invalid_operation',
+            ...stepContext,
+          };
+        }
+
+        if (operation === 'settle' && !normalizedResult) {
+          return {
+            ok: false,
+            error: 'settle_requires_result',
+            ...stepContext,
+          };
+        }
+
+        if (operation === 'settle' && fightNotStartedSignals.test(originalMessage)) {
+          return {
+            ok: false,
+            error: 'fight_not_finished_guard',
+            message:
+              'No se puede cerrar WON/LOST una pelea marcada como no iniciada. Confirmá el resultado al finalizar.',
+            ...stepContext,
+          };
+        }
+
+        if (
+          (operation === 'settle' || operation === 'set_pending') &&
+          ambiguousReference &&
+          !explicitBetIds.length &&
+          !explicitFight &&
+          !explicitEventName &&
+          !explicitPick
+        ) {
+          const candidates = userStore?.listUserBets
+            ? userStore.listUserBets(userId, {
+                status: 'pending',
+                includeArchived: false,
+                limit: 8,
+              })
+            : [];
+          return {
+            ok: false,
+            error: 'ambiguous_fight_reference',
+            requiresDisambiguation: true,
+            candidates,
+            message:
+              'La referencia de pelea es ambigua (ej: "anterior/esa"). Pasame el bet_id exacto o confirmá la pelea exacta antes de mutar el ledger.',
+            ...stepContext,
+          };
+        }
+
+        const hasStrongSelector =
+          betIds.length > 0 ||
+          Boolean(explicitEventName) ||
+          Boolean(explicitFight) ||
+          Boolean(explicitPick);
+        if (
+          (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
+          !hasStrongSelector
+        ) {
+          const candidates = userStore?.listUserBets
+            ? userStore.listUserBets(userId, {
+                status: operation === 'settle' ? 'pending' : null,
+                includeArchived: false,
+                limit: 8,
+              })
+            : [];
+          return {
+            ok: false,
+            error: 'missing_disambiguation_selector',
+            requiresDisambiguation: true,
+            candidates,
+            message:
+              'Necesito desambiguar que apuesta querés tocar. Indicame bet_id (o pelea exacta + pick) y lo ejecuto.',
+            ...stepContext,
+          };
+        }
+
+        if (
+          (operation === 'settle' || operation === 'archive' || operation === 'set_pending') &&
+          !explicitBetIds.length &&
+          !betIds.length &&
+          !explicitFight &&
+          inferredFightFromContext
+        ) {
+          const candidates = userStore?.listUserBets
+            ? userStore.listUserBets(userId, {
+                status: operation === 'settle' ? 'pending' : null,
+                includeArchived: false,
+                limit: 8,
+              })
+            : [];
+          return {
+            ok: false,
+            error: 'context_fight_requires_explicit_selector',
+            requiresDisambiguation: true,
+            candidates,
+            message:
+              'Para evitar cerrar la pelea equivocada, necesito selector explícito del usuario (bet_id o pelea exacta) y no solo contexto previo.',
+            ...stepContext,
+          };
+        }
+
+        return { ok: true };
+      };
+
+      if (rawSteps.length) {
+        if (transactionPolicy !== 'all_or_nothing') {
+          return {
+            ok: false,
+            error: 'invalid_transaction_policy',
+            message: 'Por ahora solo está soportado transactionPolicy=all_or_nothing.',
+          };
+        }
+        if (rawSteps.length > 12) {
+          return {
+            ok: false,
+            error: 'too_many_steps',
+            maxSteps: 12,
+          };
+        }
+
+        const steps = [];
+        for (const [index, rawStep] of rawSteps.entries()) {
+          const details = buildMutationPayload(rawStep, {
+            stepIndex: index,
+            allowInferredIds: false,
+          });
+          const validation = validateMutationSelection(details, { stepIndex: index });
+          if (!validation?.ok) {
+            return validation;
+          }
+          steps.push({
+            ...details.payload,
+            metadata: {
+              ...(details.payload.metadata || {}),
+              transactionPolicy,
+            },
+          });
+        }
+
+        const compositePayload = {
+          transactionPolicy,
+          steps,
+          metadata: {
+            source: fromLegacyRecordTool ? 'legacy_record_user_bet' : 'mutate_user_bets',
+            reason: rawArgs.reason ? String(rawArgs.reason).trim() : null,
+            isDestructive: steps.some(
+              (step) => step.operation === 'archive' || step.operation === 'settle'
+            ),
+            chatId,
+            originalMessage: truncateText(originalMessage, 300),
+            composite: true,
+          },
+        };
+        const previewCompositeMutation = () => {
+          if (typeof userStore?.previewCompositeBetMutations === 'function') {
+            return userStore.previewCompositeBetMutations(userId, compositePayload);
+          }
+          if (typeof userStore?.previewBetMutation !== 'function') {
+            return {
+              ok: false,
+              error: 'userStore no soporta previewBetMutation para fallback de lote.',
+            };
+          }
+
+          const stepResults = [];
+          let requiresConfirmation = false;
+          for (const [index, stepPayload] of compositePayload.steps.entries()) {
+            const previewStep = userStore.previewBetMutation(userId, stepPayload);
+            if (!previewStep?.ok) {
+              stepResults.push({
+                index,
+                ok: false,
+                operation: String(stepPayload.operation || ''),
+                result: normalizeBetResult(stepPayload.result),
+                error: previewStep?.error || 'step_preview_failed',
+              });
+              return {
+                ok: false,
+                error: 'composite_preview_failed',
+                failedStepIndex: index,
+                stepResults,
+                transactionPolicy,
+              };
+            }
+
+            const result = {
+              index,
+              ok: true,
+              operation: previewStep.operation,
+              result: previewStep.result || null,
+              requiresConfirmation: Boolean(previewStep.requiresConfirmation),
+              confirmationReason: previewStep.confirmationReason || null,
+              candidateCount: previewStep.candidates?.length || 0,
+              candidates: previewStep.candidates || [],
+            };
+            stepResults.push(result);
+            requiresConfirmation = requiresConfirmation || result.requiresConfirmation;
+          }
+
+          return {
+            ok: true,
+            transactionPolicy,
+            requiresConfirmation,
+            stepResults,
+          };
+        };
+
+        if (confirm) {
+          let pending = null;
+          if (confirmationToken) {
+            pending = consumePendingMutation(mutationScope, confirmationToken);
+          } else {
+            const pendingByScope = getPendingMutationsForScope(mutationScope);
+            const matching = pendingByScope.filter((entry) => {
+              const entrySteps = Array.isArray(entry.payload?.steps) ? entry.payload.steps : [];
+              return (
+                entrySteps.length === compositePayload.steps.length &&
+                String(entry.payload?.transactionPolicy || 'all_or_nothing') === transactionPolicy
+              );
+            });
+            if (matching.length === 1) {
+              pending = consumePendingMutation(mutationScope, matching[0].token);
+            }
+          }
+
+          if (!pending) {
+            return {
+              ok: false,
+              error: 'invalid_or_expired_confirmation_token',
+              needsConfirmation: true,
+              pendingTokens: getPendingMutationsForScope(mutationScope).map((entry) => ({
+                token: entry.token,
+                operation: formatMutationPayloadLabel(entry.payload),
+              })),
+            };
+          }
+
+          const applied = applyMutationPayload(pending.payload, {
+            confirmationToken: confirmationToken || pending.token,
+            confirmationSource: 'tool_confirm_flag',
+          });
+          if (!applied?.ok) {
+            return applied;
+          }
+          turnToolEffects.hasLedgerMutationReceipt = true;
+          const receipt = normalizeMutationResponse(applied, 'composite');
+
+          return {
+            ok: true,
+            mutationReceipt: receipt,
+            ledgerSummary: applied.ledgerSummary || null,
+          };
+        }
+
+        const preview = previewCompositeMutation();
+        if (!preview?.ok) {
+          return preview;
+        }
+
+        if (preview.requiresConfirmation) {
+          const token = savePendingMutation(mutationScope, { payload: compositePayload });
+          const firstReason = (preview.stepResults || []).find(
+            (item) => item?.requiresConfirmation && item?.confirmationReason
+          );
+          const reasonMessage = firstReason
+            ? formatConfirmationReason(firstReason.confirmationReason)
+            : 'Mutación compuesta sensible detectada.';
+          return {
+            ok: false,
+            requiresConfirmation: true,
+            confirmationToken: token,
+            preview: {
+              operation: 'composite',
+              transactionPolicy,
+              stepResults: preview.stepResults || [],
+            },
+            message: `${reasonMessage} Pedi confirmacion explicita del usuario y luego reintenta con confirm=true + confirmationToken.`,
+          };
+        }
+
+        const applied = applyMutationPayload(compositePayload, {
+          confirmationSource: 'tool_auto_apply',
+        });
+        if (!applied?.ok) {
+          return applied;
+        }
+        turnToolEffects.hasLedgerMutationReceipt = true;
+        const receipt = normalizeMutationResponse(applied, 'composite');
+
+        return {
+          ok: true,
+          mutationReceipt: receipt,
+          ledgerSummary: applied.ledgerSummary || null,
+        };
+      }
+
+      const singleMutation = buildMutationPayload(rawArgs, {
+        allowInferredIds: true,
+      });
+      const {
+        operation,
+        normalizedResult,
+        explicitBetIds,
+        betIds,
+        explicitEventName,
+        explicitFight,
+        explicitPick,
+      } = singleMutation;
+      const canUseFuzzyFightRecovery = Boolean(explicitFight);
+      let payload = singleMutation.payload;
+
+      const validation = validateMutationSelection(singleMutation);
+      if (!validation?.ok) {
+        return validation;
+      }
 
       if (confirm) {
         let pending = null;
@@ -6454,34 +6889,24 @@ export function createBettingWizard({
             needsConfirmation: true,
             pendingTokens: getPendingMutationsForScope(mutationScope).map((entry) => ({
               token: entry.token,
-              operation: entry.payload?.operation || null,
-              result: entry.payload?.result || null,
+              operation: formatMutationPayloadLabel(entry.payload),
             })),
           };
         }
 
-        const applyPayload = {
-          ...pending.payload,
-          confirm: true,
-          metadata: {
-            ...pending.payload.metadata,
-            confirmationToken,
-          },
-        };
-
-        const applied = userStore.applyBetMutation(userId, applyPayload);
+        const applied = applyMutationPayload(pending.payload, {
+          confirmationToken: confirmationToken || pending.token,
+          confirmationSource: 'tool_confirm_flag',
+        });
         if (!applied?.ok) {
           return applied;
         }
         turnToolEffects.hasLedgerMutationReceipt = true;
+        const receipt = normalizeMutationResponse(applied, operation);
 
         return {
           ok: true,
-          mutationReceipt: {
-            operation: applied.operation,
-            affectedCount: applied.affectedCount,
-            receipts: applied.receipts || [],
-          },
+          mutationReceipt: receipt,
           ledgerSummary: applied.ledgerSummary || null,
         };
       }
@@ -6560,22 +6985,18 @@ export function createBettingWizard({
         };
       }
 
-      const applied = userStore.applyBetMutation(userId, {
-        ...payload,
-        confirm: true,
+      const applied = applyMutationPayload(payload, {
+        confirmationSource: 'tool_auto_apply',
       });
       if (!applied?.ok) {
         return applied;
       }
       turnToolEffects.hasLedgerMutationReceipt = true;
+      const receipt = normalizeMutationResponse(applied, operation);
 
       return {
         ok: true,
-        mutationReceipt: {
-          operation: applied.operation,
-          affectedCount: applied.affectedCount,
-          receipts: applied.receipts || [],
-        },
+        mutationReceipt: receipt,
         ledgerSummary: applied.ledgerSummary || null,
       };
     };

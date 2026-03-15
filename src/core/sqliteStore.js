@@ -1246,6 +1246,185 @@ export function previewBetMutation(userId, payload = {}) {
   return buildMutationPreview(userId, payload);
 }
 
+function normalizeCompositeTransactionPolicy(value = '') {
+  const policy = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (!policy) return 'all_or_nothing';
+  if (policy === 'all_or_nothing') return policy;
+  return null;
+}
+
+function buildCompositeMutationPreview(userId, payload = {}) {
+  const transactionPolicy = normalizeCompositeTransactionPolicy(payload.transactionPolicy);
+  if (!transactionPolicy) {
+    return { ok: false, error: 'invalid_transaction_policy' };
+  }
+
+  const steps = Array.isArray(payload.steps)
+    ? payload.steps
+        .map((step) => (step && typeof step === 'object' ? step : null))
+        .filter(Boolean)
+    : [];
+  if (!steps.length) {
+    return { ok: false, error: 'missing_steps' };
+  }
+  if (steps.length > 12) {
+    return { ok: false, error: 'too_many_steps', maxSteps: 12 };
+  }
+
+  const stepResults = [];
+  const stepPreviews = [];
+  let requiresConfirmation = false;
+
+  for (let index = 0; index < steps.length; index += 1) {
+    const stepPayload = steps[index];
+    const preview = buildMutationPreview(userId, stepPayload);
+    if (!preview?.ok) {
+      stepResults.push({
+        index,
+        ok: false,
+        operation: String(stepPayload?.operation || '')
+          .trim()
+          .toLowerCase(),
+        result: normalizeResult(stepPayload?.result) || null,
+        error: preview?.error || 'invalid_step',
+      });
+
+      return {
+        ok: false,
+        error: 'composite_preview_failed',
+        transactionPolicy,
+        failedStepIndex: index,
+        stepResults,
+      };
+    }
+
+    const stepResult = {
+      index,
+      ok: true,
+      operation: preview.operation,
+      result: preview.result || null,
+      requiresConfirmation: Boolean(preview.requiresConfirmation),
+      confirmationReason: preview.confirmationReason || null,
+      candidateCount: preview.candidates?.length || 0,
+      candidates: preview.candidates || [],
+    };
+
+    requiresConfirmation = requiresConfirmation || stepResult.requiresConfirmation;
+    stepResults.push(stepResult);
+    stepPreviews.push({
+      index,
+      payload: stepPayload,
+      preview,
+    });
+  }
+
+  return {
+    ok: true,
+    transactionPolicy,
+    requiresConfirmation,
+    stepResults,
+    stepPreviews,
+  };
+}
+
+function applyMutationPreviewInTransaction(
+  db,
+  userId,
+  preview,
+  { metadata = null, at = nowIso(), strictCandidates = false } = {}
+) {
+  const operation = preview.operation;
+  const nextResult =
+    operation === 'settle'
+      ? preview.result
+      : operation === 'set_pending'
+      ? 'pending'
+      : null;
+
+  const receipts = [];
+  for (const candidate of preview.candidates) {
+    const before = db
+      .prepare(
+        `SELECT id, result, archived_at
+         FROM bets
+         WHERE id = ? AND telegram_user_id = ?`
+      )
+      .get(candidate.id, userId);
+    if (!before) {
+      if (strictCandidates) {
+        const error = new Error('mutation_candidate_not_found');
+        error.code = 'mutation_candidate_not_found';
+        error.betId = candidate.id;
+        throw error;
+      }
+      continue;
+    }
+
+    if (operation === 'archive') {
+      db.prepare(
+        `UPDATE bets
+         SET archived_at = ?, updated_at = ?
+         WHERE id = ? AND telegram_user_id = ?`
+      ).run(at, at, candidate.id, userId);
+    } else if (operation === 'set_pending') {
+      db.prepare(
+        `UPDATE bets
+         SET result = ?, settled_at = NULL, updated_at = ?
+         WHERE id = ? AND telegram_user_id = ?`
+      ).run('pending', at, candidate.id, userId);
+    } else {
+      db.prepare(
+        `UPDATE bets
+         SET result = ?, settled_at = ?, updated_at = ?
+         WHERE id = ? AND telegram_user_id = ?`
+      ).run(nextResult, at, at, candidate.id, userId);
+    }
+
+    const after = db
+      .prepare(
+        `SELECT id, event_name, fight, pick, result, archived_at, updated_at
+         FROM bets
+         WHERE id = ? AND telegram_user_id = ?`
+      )
+      .get(candidate.id, userId);
+    if (!after) {
+      const error = new Error('mutation_candidate_missing_after_apply');
+      error.code = 'mutation_candidate_missing_after_apply';
+      error.betId = candidate.id;
+      throw error;
+    }
+
+    logBetMutation(db, {
+      userId,
+      betId: candidate.id,
+      action: operation,
+      prevResult: normalizeResult(before.result) || 'pending',
+      nextResult: normalizeResult(after?.result) || 'pending',
+      prevArchivedAt: before.archived_at || null,
+      nextArchivedAt: after?.archived_at || null,
+      metadata,
+      at,
+    });
+
+    receipts.push({
+      action: operation,
+      betId: candidate.id,
+      eventName: after?.event_name || null,
+      fight: after?.fight || null,
+      pick: after?.pick || null,
+      previousResult: normalizeResult(before.result) || 'pending',
+      newResult: normalizeResult(after?.result) || 'pending',
+      previousArchivedAt: before.archived_at || null,
+      newArchivedAt: after?.archived_at || null,
+      updatedAt: after?.updated_at || at,
+    });
+  }
+
+  return receipts;
+}
+
 export function applyBetMutation(userId, payload = {}) {
   if (!userId) return { ok: false, error: 'missing_user_id' };
   const preview = buildMutationPreview(userId, payload);
@@ -1264,89 +1443,142 @@ export function applyBetMutation(userId, payload = {}) {
   const db = getDb();
   const ts = nowIso();
   const operation = preview.operation;
-  const nextResult =
-    operation === 'settle'
-      ? preview.result
-      : operation === 'set_pending'
-      ? 'pending'
-      : null;
 
-  const apply = db.transaction(() => {
-    const receipts = [];
-    for (const candidate of preview.candidates) {
-      const before = db
-        .prepare(
-          `SELECT id, result, archived_at
-           FROM bets
-           WHERE id = ? AND telegram_user_id = ?`
-        )
-        .get(candidate.id, userId);
-      if (!before) continue;
-
-      if (operation === 'archive') {
-        db.prepare(
-          `UPDATE bets
-           SET archived_at = ?, updated_at = ?
-           WHERE id = ? AND telegram_user_id = ?`
-        ).run(ts, ts, candidate.id, userId);
-      } else if (operation === 'set_pending') {
-        db.prepare(
-          `UPDATE bets
-           SET result = ?, settled_at = NULL, updated_at = ?
-           WHERE id = ? AND telegram_user_id = ?`
-        ).run('pending', ts, candidate.id, userId);
-      } else {
-        db.prepare(
-          `UPDATE bets
-           SET result = ?, settled_at = ?, updated_at = ?
-           WHERE id = ? AND telegram_user_id = ?`
-        ).run(nextResult, ts, ts, candidate.id, userId);
-      }
-
-      const after = db
-        .prepare(
-          `SELECT id, event_name, fight, pick, result, archived_at, updated_at
-           FROM bets
-           WHERE id = ? AND telegram_user_id = ?`
-        )
-        .get(candidate.id, userId);
-
-      logBetMutation(db, {
-        userId,
-        betId: candidate.id,
-        action: operation,
-        prevResult: normalizeResult(before.result) || 'pending',
-        nextResult: normalizeResult(after?.result) || 'pending',
-        prevArchivedAt: before.archived_at || null,
-        nextArchivedAt: after?.archived_at || null,
+  let receipts = [];
+  try {
+    const apply = db.transaction(() =>
+      applyMutationPreviewInTransaction(db, userId, preview, {
         metadata: payload.metadata || null,
         at: ts,
-      });
+        strictCandidates: false,
+      })
+    );
+    receipts = apply();
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.code || 'mutation_apply_failed',
+      message: error instanceof Error ? error.message : String(error),
+      operation,
+    };
+  }
 
-      receipts.push({
-        action: operation,
-        betId: candidate.id,
-        eventName: after?.event_name || null,
-        fight: after?.fight || null,
-        pick: after?.pick || null,
-        previousResult: normalizeResult(before.result) || 'pending',
-        newResult: normalizeResult(after?.result) || 'pending',
-        previousArchivedAt: before.archived_at || null,
-        newArchivedAt: after?.archived_at || null,
-        updatedAt: after?.updated_at || ts,
-      });
-    }
-
-    return receipts;
-  });
-
-  const receipts = apply();
   const ledgerSummary = rebuildLedgerSummary(userId);
 
   return {
     ok: true,
     operation,
     affectedCount: receipts.length,
+    receipts,
+    ledgerSummary,
+  };
+}
+
+export function previewCompositeBetMutations(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+  const preview = buildCompositeMutationPreview(userId, payload);
+  if (!preview.ok) {
+    return preview;
+  }
+
+  return {
+    ok: true,
+    transactionPolicy: preview.transactionPolicy,
+    requiresConfirmation: preview.requiresConfirmation,
+    stepResults: preview.stepResults,
+  };
+}
+
+export function applyCompositeBetMutations(userId, payload = {}) {
+  if (!userId) return { ok: false, error: 'missing_user_id' };
+
+  const preview = buildCompositeMutationPreview(userId, payload);
+  if (!preview.ok) {
+    return preview;
+  }
+
+  if (preview.requiresConfirmation && !payload.confirm) {
+    return {
+      ok: false,
+      error: 'confirmation_required',
+      preview: {
+        transactionPolicy: preview.transactionPolicy,
+        requiresConfirmation: true,
+        stepResults: preview.stepResults,
+      },
+    };
+  }
+
+  const db = getDb();
+  const ts = nowIso();
+
+  let stepResults = [];
+  let receipts = [];
+  try {
+    const apply = db.transaction(() => {
+      const nextStepResults = [];
+      const allReceipts = [];
+      for (const step of preview.stepPreviews) {
+        const baseMetadata =
+          payload.metadata && typeof payload.metadata === 'object'
+            ? payload.metadata
+            : null;
+        const stepMetadata =
+          step.payload?.metadata && typeof step.payload.metadata === 'object'
+            ? step.payload.metadata
+            : null;
+        const metadata = {
+          ...(baseMetadata || {}),
+          ...(stepMetadata || {}),
+          transactionPolicy: preview.transactionPolicy,
+          compositeStepIndex: step.index,
+        };
+
+        const appliedStepReceipts = applyMutationPreviewInTransaction(
+          db,
+          userId,
+          step.preview,
+          {
+            metadata,
+            at: ts,
+            strictCandidates: true,
+          }
+        );
+
+        nextStepResults.push({
+          index: step.index,
+          operation: step.preview.operation,
+          result: step.preview.result || null,
+          affectedCount: appliedStepReceipts.length,
+          receipts: appliedStepReceipts,
+        });
+        allReceipts.push(...appliedStepReceipts);
+      }
+      return {
+        stepResults: nextStepResults,
+        receipts: allReceipts,
+      };
+    });
+
+    const applied = apply();
+    stepResults = applied.stepResults;
+    receipts = applied.receipts;
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.code || 'composite_apply_failed',
+      message: error instanceof Error ? error.message : String(error),
+      transactionPolicy: preview.transactionPolicy,
+    };
+  }
+
+  const ledgerSummary = rebuildLedgerSummary(userId);
+
+  return {
+    ok: true,
+    transactionPolicy: preview.transactionPolicy,
+    affectedCount: receipts.length,
+    stepResults,
     receipts,
     ledgerSummary,
   };

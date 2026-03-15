@@ -1082,6 +1082,257 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          transactionPolicy: 'all_or_nothing',
+          steps: [
+            { operation: 'settle', result: 'loss', betIds: [77] },
+            { operation: 'archive', betIds: [78] },
+          ],
+        },
+        'call-composite-apply-1'
+      ),
+      responseWithText('Listo, lote aplicado.'),
+    ]);
+
+    let previewCompositeCalls = 0;
+    let applyCompositeCalls = 0;
+    let capturedPreviewPayload = null;
+    let capturedApplyPayload = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewCompositeBetMutations(_userId, payload = {}) {
+          previewCompositeCalls += 1;
+          capturedPreviewPayload = payload;
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            requiresConfirmation: false,
+            stepResults: [
+              { index: 0, ok: true, operation: 'settle', candidateCount: 1 },
+              { index: 1, ok: true, operation: 'archive', candidateCount: 1 },
+            ],
+          };
+        },
+        applyCompositeBetMutations(_userId, payload = {}) {
+          applyCompositeCalls += 1;
+          capturedApplyPayload = payload;
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            affectedCount: 2,
+            stepResults: [
+              {
+                index: 0,
+                operation: 'settle',
+                affectedCount: 1,
+                receipts: [{ betId: 77, previousResult: 'pending', newResult: 'loss' }],
+              },
+              {
+                index: 1,
+                operation: 'archive',
+                affectedCount: 1,
+                receipts: [{ betId: 78, previousResult: 'pending', newResult: 'pending' }],
+              },
+            ],
+            receipts: [
+              { betId: 77, previousResult: 'pending', newResult: 'loss' },
+              { betId: 78, previousResult: 'pending', newResult: 'pending' },
+            ],
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cerra 77 como perdida y archiva 78', {
+      chatId: 'chat-composite-apply-1',
+      userId: 'u-composite-apply-1',
+      originalMessage: 'cerra 77 como perdida y archiva 78',
+      resolution: {
+        resolvedMessage: 'cerra 77 como perdida y archiva 78',
+      },
+    });
+
+    assert.match(result.reply, /lote aplicado|Listo/i);
+    assert.equal(previewCompositeCalls, 1);
+    assert.equal(applyCompositeCalls, 1);
+    assert.equal(capturedPreviewPayload?.transactionPolicy, 'all_or_nothing');
+    assert.equal(Array.isArray(capturedPreviewPayload?.steps), true);
+    assert.equal(capturedApplyPayload?.confirm, true);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          transactionPolicy: 'all_or_nothing',
+          steps: [
+            { operation: 'settle', result: 'loss', fight: 'A vs B' },
+            { operation: 'archive', fight: 'A vs B' },
+          ],
+        },
+        'call-composite-confirm-1'
+      ),
+      responseWithText('Necesito confirmacion para aplicar el lote.'),
+    ]);
+
+    let previewCompositeCalls = 0;
+    let applyCompositeCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewCompositeBetMutations() {
+          previewCompositeCalls += 1;
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            requiresConfirmation: true,
+            stepResults: [
+              {
+                index: 0,
+                ok: true,
+                operation: 'settle',
+                requiresConfirmation: true,
+                confirmationReason: 'bulk_state_change',
+                candidateCount: 2,
+                candidates: [{ id: 88 }, { id: 89 }],
+              },
+              {
+                index: 1,
+                ok: true,
+                operation: 'archive',
+                requiresConfirmation: true,
+                confirmationReason: 'bulk_archive',
+                candidateCount: 2,
+                candidates: [{ id: 88 }, { id: 89 }],
+              },
+            ],
+          };
+        },
+        applyCompositeBetMutations() {
+          applyCompositeCalls += 1;
+          return {
+            ok: true,
+            transactionPolicy: 'all_or_nothing',
+            affectedCount: 4,
+            stepResults: [
+              { index: 0, operation: 'settle', affectedCount: 2, receipts: [] },
+              { index: 1, operation: 'archive', affectedCount: 2, receipts: [] },
+            ],
+            receipts: [],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('previsualiza cierre y archivo en lote', {
+      chatId: 'chat-composite-confirm-1',
+      userId: 'u-composite-confirm-1',
+      originalMessage: 'previsualiza cierre y archivo en lote',
+      resolution: {
+        resolvedMessage: 'previsualiza cierre y archivo en lote',
+      },
+    });
+
+    const result = await wizard.handleMessage('confirmo', {
+      chatId: 'chat-composite-confirm-1',
+      userId: 'u-composite-confirm-1',
+      originalMessage: 'confirmo',
+      resolution: {
+        resolvedMessage: 'confirmo',
+      },
+    });
+
+    assert.match(result.reply, /Confirmación aplicada|Confirmacion aplicada/i);
+    assert.equal(previewCompositeCalls, 1);
+    assert.equal(applyCompositeCalls, 1);
+    assert.equal(fakeClient.calls.length, 2);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'mutate_user_bets',
+        {
+          transactionPolicy: 'all_or_nothing',
+          steps: [
+            { operation: 'settle', result: 'loss', betIds: [90] },
+            { operation: 'archive', betIds: [9999] },
+          ],
+        },
+        'call-composite-fail-1'
+      ),
+      responseWithText('No pude aplicar el lote.'),
+    ]);
+
+    let previewCompositeCalls = 0;
+    let applyCompositeCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewCompositeBetMutations() {
+          previewCompositeCalls += 1;
+          return {
+            ok: false,
+            error: 'composite_preview_failed',
+            failedStepIndex: 1,
+            transactionPolicy: 'all_or_nothing',
+            stepResults: [
+              { index: 0, ok: true, operation: 'settle', candidateCount: 1 },
+              { index: 1, ok: false, operation: 'archive', error: 'no_matching_bets' },
+            ],
+          };
+        },
+        applyCompositeBetMutations() {
+          applyCompositeCalls += 1;
+          return { ok: true };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('cerra 90 y archiva 9999 en lote', {
+      chatId: 'chat-composite-fail-1',
+      userId: 'u-composite-fail-1',
+      originalMessage: 'cerra 90 y archiva 9999 en lote',
+      resolution: {
+        resolvedMessage: 'cerra 90 y archiva 9999 en lote',
+      },
+    });
+
+    assert.match(result.reply, /No pude aplicar el lote/i);
+    assert.equal(previewCompositeCalls, 1);
+    assert.equal(applyCompositeCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no debería usarse')]);
 
     const wizard = createBettingWizard({
