@@ -121,7 +121,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Escenario "ultimos 4 combates" en distintos anos de corte.
      - Escenario usuario contradice dato y el bot cambia a verificacion.
    - **Prioridad:** critico.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (gates core implementados en `bettingWizard`; pendiente ampliar evidencia multimodal en workflows compuestos).
 
 7. **[PRIORIDAD ALTA] Orquestacion deterministica para evitar respuestas clunky**
    - **Objetivo:** mejorar consistencia conversacional y reducir dependencia de memoria textual del modelo.

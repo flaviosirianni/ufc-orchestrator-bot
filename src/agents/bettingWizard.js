@@ -68,6 +68,10 @@ const EVENT_INTEL_PROJECTION_NEWS_LIMIT = Number(
 );
 const EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT =
   process.env.EVENT_INTEL_NEWS_DEFAULT_MIN_IMPACT || 'medium';
+const FACT_FRESHNESS_MAX_AGE_DAYS = Math.max(
+  30,
+  Number(process.env.FACT_FRESHNESS_MAX_AGE_DAYS ?? '420')
+);
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 
@@ -607,6 +611,53 @@ function toIsoDateSafe(value = '') {
   const parsedMs = Date.parse(raw);
   if (!Number.isFinite(parsedMs)) return null;
   return new Date(parsedMs).toISOString().slice(0, 10);
+}
+
+function toIsoDateStrict(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const candidate = new Date(Date.UTC(y, m - 1, d));
+  if (
+    candidate.getUTCFullYear() !== y ||
+    candidate.getUTCMonth() + 1 !== m ||
+    candidate.getUTCDate() !== d
+  ) {
+    return null;
+  }
+  return candidate.toISOString().slice(0, 10);
+}
+
+function parseHistoryDateCellToIso(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    return toIsoDateStrict(isoMatch[1], isoMatch[2], isoMatch[3]);
+  }
+
+  const dayFirst = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if (dayFirst) {
+    const year = Number(dayFirst[3]) < 100 ? 2000 + Number(dayFirst[3]) : Number(dayFirst[3]);
+    return toIsoDateStrict(year, dayFirst[2], dayFirst[1]);
+  }
+
+  return toIsoDateSafe(raw);
+}
+
+function pickLatestIsoDate(...values) {
+  const candidates = values.flat().map((value) => toIsoDateSafe(value || '')).filter(Boolean);
+  if (!candidates.length) return null;
+  let latest = candidates[0];
+  for (const isoDate of candidates.slice(1)) {
+    if (dateDiffInDays(isoDate, latest) > 0) {
+      latest = isoDate;
+    }
+  }
+  return latest;
 }
 
 function dateDiffInDays(isoA = '', isoB = '') {
@@ -3445,6 +3496,192 @@ function enforceCalendarNoEventContext(reply = '', originalMessage = '', tempora
   return `${text}\n\nReferencia temporal usada: ${asOf} (${tz}). Tambien validé la ventana ${prev} -> ${asOf}.`;
 }
 
+function hasRecencyClaimContent(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(racha|viene de|venia de|ultim[oa]s?\s+\d+|gano\s+\d+\s+de\s+(sus\s+)?ultim[oa]s?|perdio\s+\d+\s+de\s+(sus\s+)?ultim[oa]s?)\b/.test(
+    normalized
+  );
+}
+
+function extractMaxRecentClaimCount(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return null;
+
+  let max = null;
+  const patterns = [
+    /\bultim[oa]s?\s+(\d{1,2})\b/g,
+    /\b(\d{1,2})\s+de\s+(?:sus\s+)?ultim[oa]s?\b/g,
+    /\bracha\s+de\s+(\d{1,2})\b/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      const value = Number(match[1]);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (max === null || value > max) {
+        max = value;
+      }
+    }
+  }
+
+  return max;
+}
+
+function hasUncertaintyDisclosure(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(no puedo|no tengo|no logre|sin evidencia|incertidumbre|por confirmar|falta verificar|no sostengo)\b/.test(
+    normalized
+  );
+}
+
+function stripRecencyClaimLines(text = '') {
+  const lines = String(text || '').split('\n');
+  const kept = lines.filter((line) => !hasRecencyClaimContent(line));
+  return {
+    text: kept.join('\n').trim(),
+    removedLines: Math.max(0, lines.length - kept.length),
+  };
+}
+
+function hasRelativeTemporalWords(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(hoy|manana|ayer|ahora|en vivo|proxim[oa])\b/.test(normalized);
+}
+
+function hasVerificationIntentLanguage(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(verific|cheque|revis|corrobor|confirm|rectific|corregir)\b/.test(normalized);
+}
+
+function hasFactContradictionSignals(message = '') {
+  const normalized = normalizeText(message);
+  if (!normalized) return false;
+  const correctionSignals =
+    /\b(eso no|no es asi|incorrect|equivoc|error|te confund|falso|en realidad|te corrijo|corrijo|correccion|no viene de|no fueron|no son)\b/.test(
+      normalized
+    );
+  if (!correctionSignals) return false;
+
+  const factualSignals =
+    /\b(racha|ultim|viene de|record|historial|fecha|evento|pelea|gano|perdio|victoria|derrota|forma)\b/.test(
+      normalized
+    );
+  return factualSignals;
+}
+
+function formatTemporalAnchorLine(temporalContext = null) {
+  const asOf = temporalContext?.nowLocal?.dateIso || new Date().toISOString().slice(0, 10);
+  const prev = shiftIsoDate(asOf, -1) || 'N/D';
+  const next = shiftIsoDate(asOf, 1) || 'N/D';
+  const tz = temporalContext?.timezone || DEFAULT_USER_TIMEZONE;
+  return `Referencia temporal: hoy=${asOf}, ayer=${prev}, manana=${next} (${tz}).`;
+}
+
+function enforceFactFreshnessGate(
+  reply = '',
+  { originalMessage = '', temporalContext = null, turnContext = null, citations = [] } = {}
+) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+
+  const userMessage = String(originalMessage || '');
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(userMessage) || hasOperationalLedgerToolUsage(turnContext);
+  if (isOperationalLedgerTurn) return text;
+  if (!hasRecencyClaimContent(text)) return text;
+  if (hasUncertaintyDisclosure(text)) return text;
+
+  const claimCount = extractMaxRecentClaimCount(text);
+  const historyRows = Number(turnContext?.historyRowCount) || 0;
+  const hasEnoughRows = !claimCount || historyRows >= claimCount;
+
+  const asOf = temporalContext?.nowLocal?.dateIso || new Date().toISOString().slice(0, 10);
+  const latestFightDate = toIsoDateSafe(turnContext?.historyLatestFightDate || '');
+  const ageDaysRaw = latestFightDate ? dateDiffInDays(asOf, latestFightDate) : null;
+  const ageDays = Number.isFinite(ageDaysRaw) ? Math.max(0, ageDaysRaw) : null;
+  const hasFreshHistoryEvidence =
+    Boolean(latestFightDate) && Number.isFinite(ageDays) && ageDays <= FACT_FRESHNESS_MAX_AGE_DAYS;
+  const hasFreshWebEvidence =
+    Boolean(turnContext?.usedWebSearch) &&
+    (Array.isArray(citations) ? citations.length > 0 : true);
+
+  if ((hasFreshHistoryEvidence || hasFreshWebEvidence) && hasEnoughRows) {
+    return text;
+  }
+
+  const stripped = stripRecencyClaimLines(text);
+  const lines = [];
+  if (stripped.text) {
+    lines.push(stripped.text, '');
+  }
+  lines.push(
+    '⚠️ Verificacion factual pendiente: no tengo evidencia temporal valida para sostener claims de racha/ultimos N en este turno.'
+  );
+  if (latestFightDate) {
+    lines.push(
+      Number.isFinite(ageDays)
+        ? `- Ultimo registro historico detectado: ${latestFightDate} (${ageDays} dia(s) de antiguedad).`
+        : `- Ultimo registro historico detectado: ${latestFightDate}.`
+    );
+  } else {
+    lines.push('- No tengo fecha de historial verificable en este turno.');
+  }
+  if (claimCount && !hasEnoughRows) {
+    lines.push(
+      `- El claim requiere al menos ${claimCount} pelea(s) recientes y solo hay ${historyRows} fila(s) verificables.`
+    );
+  }
+  lines.push(
+    '- Si queres, lo verifico ahora y te devuelvo la version corregida con fecha absoluta.'
+  );
+  return lines.join('\n').trim();
+}
+
+function enforceContradictionHandler(
+  reply = '',
+  { originalMessage = '', temporalContext = null, turnContext = null } = {}
+) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!hasFactContradictionSignals(originalMessage)) return text;
+  if (hasLedgerSignals(originalMessage)) return text;
+
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(originalMessage) || hasOperationalLedgerToolUsage(turnContext);
+  if (isOperationalLedgerTurn) return text;
+  if (hasVerificationIntentLanguage(text)) return text;
+
+  return [
+    '⚠️ Recibido: detecto una posible contradiccion factica en ese dato.',
+    'No voy a sostener el claim sin verificacion adicional.',
+    formatTemporalAnchorLine(temporalContext),
+    'Si queres, hago un chequeo puntual ahora y te paso la version corregida.',
+  ].join('\n');
+}
+
+function enforceResponseConsistencyValidator(
+  reply = '',
+  { originalMessage = '', temporalContext = null, turnContext = null } = {}
+) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+
+  const isOperationalLedgerTurn =
+    isLedgerOperationMessage(originalMessage) || hasOperationalLedgerToolUsage(turnContext);
+  if (isOperationalLedgerTurn) return text;
+  if (/referencia temporal/i.test(text)) return text;
+
+  const needsTemporalAnchor =
+    isCalendarQuestion(originalMessage) || hasRelativeTemporalWords(text);
+  if (!needsTemporalAnchor) return text;
+  if (containsAbsoluteDate(text)) return text;
+
+  return `${text}\n\n${formatTemporalAnchorLine(temporalContext)}`;
+}
+
 function chooseLikelyActiveFightFromPendingBets(pendingBets = []) {
   if (!Array.isArray(pendingBets) || !pendingBets.length) {
     return { type: 'none' };
@@ -3850,6 +4087,17 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   const fighters = Array.isArray(historyResult.fighters) ? historyResult.fighters : [];
   const rows = Array.isArray(historyResult.rows) ? historyResult.rows : [];
   const summaries = fighters.map((fighter) => summariseFighterRows(rows, fighter));
+  const latestRowFightDate = rows.reduce((latest, row) => {
+    const isoDate = parseHistoryDateCellToIso(Array.isArray(row) ? row[0] : '');
+    if (!isoDate) return latest;
+    if (!latest) return isoDate;
+    return dateDiffInDays(isoDate, latest) > 0 ? isoDate : latest;
+  }, null);
+  const cacheLatestFightDate = toIsoDateSafe(cacheStatus?.latestFightDate || '');
+  const latestFightDate = pickLatestIsoDate(latestRowFightDate, cacheLatestFightDate);
+  const sheetAgeDays = Number.isFinite(Number(cacheStatus?.sheetAgeDays))
+    ? Number(cacheStatus.sheetAgeDays)
+    : null;
 
   const previewRows = rows.slice(0, MAX_HISTORY_PREVIEW_ROWS).map((row) => ({
     date: row[0] || null,
@@ -3870,6 +4118,11 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
     summaries,
     previewRows,
     hasMoreRows: rows.length > previewRows.length,
+    latestFightDate,
+    latestFightDateFromRows: latestRowFightDate,
+    latestFightDateFromCache: cacheLatestFightDate,
+    sheetAgeDays,
+    potentialGap: cacheStatus?.potentialGap === true,
   };
 }
 
@@ -6378,6 +6631,10 @@ export function createBettingWizard({
       hasOperationalLedgerToolCall: false,
       hasLedgerCreateReceipt: false,
       hasLedgerMutationReceipt: false,
+      historyRowCount: 0,
+      historyLatestFightDate: null,
+      usedWebSearch: false,
+      citationsCount: 0,
     };
 
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
@@ -7000,8 +7257,12 @@ export function createBettingWizard({
           const cacheStatus = fightsScalper?.getFightHistoryCacheStatus
             ? fightsScalper.getFightHistoryCacheStatus()
             : null;
+          const historyToolResult = buildHistoryToolResult(result, cacheStatus);
+          turnToolEffects.historyRowCount = Number(historyToolResult.rowCount) || 0;
+          turnToolEffects.historyLatestFightDate =
+            historyToolResult.latestFightDate || null;
 
-          return buildHistoryToolResult(result, cacheStatus);
+          return historyToolResult;
         }
 
         case 'get_user_profile': {
@@ -7559,6 +7820,10 @@ export function createBettingWizard({
         executeTool,
         model: modelToUse,
       });
+      turnToolEffects.usedWebSearch = Boolean(result?.usedWebSearch);
+      turnToolEffects.citationsCount = Array.isArray(result?.citations)
+        ? result.citations.length
+        : 0;
 
       if (userStore?.recordUsage && userId) {
         try {
@@ -7752,9 +8017,25 @@ export function createBettingWizard({
         originalMessage,
         temporalContext
       );
+      const replyWithFactFreshness = enforceFactFreshnessGate(replyWithTemporalGuard, {
+        originalMessage,
+        temporalContext,
+        turnContext: turnToolEffects,
+        citations,
+      });
+      const replyWithContradiction = enforceContradictionHandler(replyWithFactFreshness, {
+        originalMessage,
+        temporalContext,
+        turnContext: turnToolEffects,
+      });
+      const finalReply = enforceResponseConsistencyValidator(replyWithContradiction, {
+        originalMessage,
+        temporalContext,
+        turnContext: turnToolEffects,
+      });
 
       return {
-        reply: `${replyWithTemporalGuard}${citationFooter}`,
+        reply: `${finalReply}${citationFooter}`,
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
           eventCard: runtimeState.eventCard,

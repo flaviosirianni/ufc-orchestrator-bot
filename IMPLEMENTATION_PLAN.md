@@ -26,6 +26,11 @@ Objetivo: atacar primero riesgo de integridad de datos y luego mejorar precision
   - Implementado: `preview/apply` compuesto en store con transaccion unica y `stepResults` por sub-accion.
   - Implementado: bloqueo explicito de fallback no atomico en wizard cuando falta `applyCompositeBetMutations`.
   - Implementado: pruebas nuevas en wizard + store (`sqliteStoreComposite`) para atomicidad, confirmacion y no-mutacion en fallo de preview.
+- 2026-03-15: avance de veracidad temporal/factual (PR2).
+  - Implementado: `FactFreshnessGate` en post-procesado para bloquear claims de racha/ultimos N sin evidencia vigente.
+  - Implementado: `ContradictionHandler` para pasar a modo verificacion ante correccion factica del usuario.
+  - Implementado: `ResponseConsistencyValidator` para anclar respuestas relativas (`hoy/manana/ayer`) a fecha absoluta.
+  - Implementado: nuevas pruebas de regresion en `__tests__/bettingWizard.test.js` para stale/fresh claims, contradiccion y consistencia temporal.
 
 ## PR 1 - Ledger Safety Core (Bloqueante)
 
@@ -111,9 +116,11 @@ Estado actual del alcance:
 - Hecho:
   - Resolucion de fecha de referencia local para reconciliacion de eventos live/intel.
   - Cobertura de regresion para escenario de borde nocturno (`hoy/manana`).
-- Pendiente:
   - `FactFreshnessGate` para claims de racha/ultimos N.
-  - `ContradictionHandler` y `ResponseConsistencyValidator` end-to-end.
+  - `ContradictionHandler` ante correccion factica del usuario.
+  - `ResponseConsistencyValidator` para anclaje temporal pre-envio.
+- Pendiente:
+  - Integrar parsing de adjuntos/screenshot en mutaciones compuestas (`steps[]`) para cerrar fase 2 del item 19.
 
 ## PR 3 - Turn UX + Operational Clarity
 

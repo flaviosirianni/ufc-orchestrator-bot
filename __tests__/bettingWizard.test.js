@@ -1651,6 +1651,170 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'get_fighter_history',
+        {
+          fighters: ['Michel Pereira'],
+          strict: true,
+        },
+        'call-history-stale'
+      ),
+      responseWithText('Michel Pereira viene de ganar sus ultimas 4 peleas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return {
+            fighters: ['Michel Pereira'],
+            rows: [
+              ['2023-11-11', 'UFC 295', 'Michel Pereira', 'Andre Petroski', '', 'Michel Pereira', 'KO'],
+              ['2023-07-08', 'UFC FN', 'Michel Pereira', 'Santiago Ponzinibbio', '', 'Michel Pereira', 'KO'],
+            ],
+          };
+        },
+        getFightHistoryCacheStatus() {
+          return {
+            latestFightDate: '2023-11-11',
+            sheetAgeDays: 860,
+            potentialGap: true,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('analiza la forma de Michel Pereira', {
+      chatId: 'chat-freshness-stale-1',
+      originalMessage: 'analiza la forma de Michel Pereira',
+      resolution: {
+        resolvedMessage: 'analiza la forma de Michel Pereira',
+      },
+    });
+
+    assert.match(result.reply, /Verificacion factual pendiente/i);
+    assert.match(result.reply, /Ultimo registro historico detectado:\s*2023-11-11/i);
+    assert.doesNotMatch(result.reply, /viene de ganar sus ultimas 4 peleas/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'get_fighter_history',
+        {
+          fighters: ['Michel Pereira'],
+          strict: true,
+        },
+        'call-history-fresh'
+      ),
+      responseWithText('Michel Pereira viene de ganar sus ultimas 4 peleas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return {
+            fighters: ['Michel Pereira'],
+            rows: [
+              ['2026-03-01', 'UFC 400', 'Michel Pereira', 'Rival A', '', 'Michel Pereira', 'DEC'],
+              ['2026-01-18', 'UFC 399', 'Michel Pereira', 'Rival B', '', 'Michel Pereira', 'SUB'],
+              ['2025-11-02', 'UFC 398', 'Michel Pereira', 'Rival C', '', 'Michel Pereira', 'KO'],
+              ['2025-09-06', 'UFC 397', 'Michel Pereira', 'Rival D', '', 'Michel Pereira', 'DEC'],
+            ],
+          };
+        },
+        getFightHistoryCacheStatus() {
+          return {
+            latestFightDate: '2026-03-01',
+            sheetAgeDays: 10,
+            potentialGap: false,
+          };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('analiza la forma de Michel Pereira', {
+      chatId: 'chat-freshness-fresh-1',
+      originalMessage: 'analiza la forma de Michel Pereira',
+      resolution: {
+        resolvedMessage: 'analiza la forma de Michel Pereira',
+      },
+    });
+
+    assert.match(result.reply, /viene de ganar sus ultimas 4 peleas/i);
+    assert.doesNotMatch(result.reply, /Verificacion factual pendiente/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('No, viene de ganar sus ultimas 4 peleas y eso esta confirmado.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'eso esta mal, Michel Pereira no viene de 4 victorias seguidas',
+      {
+        chatId: 'chat-contradiction-1',
+        originalMessage: 'eso esta mal, Michel Pereira no viene de 4 victorias seguidas',
+        resolution: {
+          resolvedMessage: 'eso esta mal, Michel Pereira no viene de 4 victorias seguidas',
+        },
+      }
+    );
+
+    assert.match(result.reply, /posible contradiccion factica/i);
+    assert.match(result.reply, /No voy a sostener el claim sin verificacion adicional/i);
+    assert.match(result.reply, /hoy=\d{4}-\d{2}-\d{2}/i);
+    assert.doesNotMatch(result.reply, /No, viene de ganar sus ultimas 4 peleas/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('La proxima cartelera es manana por la noche.', {
+        includeWebSearch: true,
+      }),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('que evento de ufc hay manana?', {
+      chatId: 'chat-consistency-temporal-1',
+      originalMessage: 'que evento de ufc hay manana?',
+      resolution: {
+        resolvedMessage: 'que evento de ufc hay manana?',
+      },
+    });
+
+    assert.match(result.reply, /Referencia temporal:\s*hoy=\d{4}-\d{2}-\d{2}/i);
+    assert.match(result.reply, /manana=\d{4}-\d{2}-\d{2}/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
     const nowMs = Date.now();
     const commenceIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
