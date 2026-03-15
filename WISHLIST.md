@@ -912,3 +912,63 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: definir prioridad final de matching (`event_id` vs `event_name` normalizado) cuando faltan IDs consistentes.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+31. **Preguntar presupuesto por evento al primer analisis y calcular unidad/stakes dinamicos**
+   - **Objetivo de negocio/UX:** alinear recomendaciones de stake con el presupuesto real que el usuario quiere jugar en esa cartelera, evitando stakes demasiado bajos para su operativa real.
+   - **Problema observado (ejemplo real):**
+     - El bot sigue sugiriendo stakes chicos (ej: `$400`) aunque el usuario suele jugar base de `$2000`.
+     - El usuario quiere declarar al inicio algo como "quiero poner `$10.000` en este evento" para que el sizing se distribuya en las peleas restantes.
+   - **Comportamiento deseado para el usuario final:**
+     - En el primer pedido de analisis/apuesta de un evento, el bot pregunta presupuesto objetivo del evento (monto total a invertir).
+     - Con ese dato, el bot calcula una unidad/stake operativo para ESA cartelera puntual (sin pisar permanentemente la configuracion global del perfil).
+     - Si quedan `N` peleas, reparte exposicion para consumir el presupuesto a lo largo del evento, salvo que la calidad de picks no justifique entrar (permitir no-bet).
+     - El usuario puede actualizar el presupuesto en cualquier momento del evento y el plan se recalcula.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `EventBudgetIntakeGate`:
+       - trigger: primer turno de decision de apuesta para `event_id` sin presupuesto activo.
+       - salida: pregunta corta y estructurada ("Cuanto queres invertir en este evento?").
+     - Persistencia dedicada `event_budget_sessions` (nueva tabla):
+       - `telegram_user_id`, `event_id`, `event_name`, `currency`, `budget_amount`, `base_stake_hint`, `created_at`, `updated_at`, `closed_at`.
+       - 1 sesion activa por usuario+evento (`closed_at IS NULL`).
+     - `EventStakingAllocator` deterministico:
+       - inputs: `budget_amount`, `pending_open_bets`, `fights_remaining_estimate`, `risk_profile`, `min_stake_amount`, `base_stake_hint`.
+       - salida: `unit_size_event`, `max_per_pick`, `target_utilization`, `recommended_stake_per_pick`.
+       - regla de reparto: priorizar picks de mayor edge/confianza y reservar parte del presupuesto para peleas restantes.
+     - Guardrails:
+       - no forzar uso 100% del presupuesto si no hay edge suficiente (`NO_BET` permitido).
+       - no exceder `max_exposure_per_pick` ni `max_event_exposure`.
+       - no mezclar presupuesto entre eventos distintos activos el mismo dia.
+     - Estados conversacionales sugeridos:
+       - `awaiting_event_budget_input`
+       - `event_budget_confirmed`
+       - `event_staking_plan_active`
+       - `event_staking_plan_rebalanced`
+       - `event_staking_plan_closed`
+   - **Plan de implementacion propuesto (fases):**
+     - **Fase 1 (intake + persistencia):**
+       - detectar primer turno del evento sin presupuesto;
+       - preguntar y guardar `budget_amount` por evento;
+       - exponer comando de override: "actualiza presupuesto evento a X".
+     - **Fase 2 (allocator deterministico):**
+       - calcular unidad y stake objetivo por pick con base en peleas restantes y riesgo;
+       - integrar el calculo al pipeline actual de `enforceStakeCalibration`.
+     - **Fase 3 (UX + reconciliacion):**
+       - incluir resumen en cada recomendacion (`presupuesto`, `comprometido`, `remanente`, `fights_remaining`);
+       - recalcular automaticamente cuando se registra/cierra una apuesta o cambia el presupuesto.
+   - **Criterios de aceptacion verificables:**
+     - En primer analisis de un evento sin presupuesto activo, el bot pregunta presupuesto antes de recomendar stake final.
+     - Con presupuesto declarado (ej: `$10.000`) y 5 peleas restantes, los stakes dejan de anclarse en el minimo global cuando no corresponde.
+     - La suma recomendada acumulada respeta limites de exposicion y se adapta al remanente real del evento.
+     - Si no hay edge suficiente, el bot puede recomendar no apostar aunque quede presupuesto.
+   - **Pruebas de regresion necesarias:**
+     - Primer analisis del evento sin presupuesto -> pregunta de intake obligatoria.
+     - Presupuesto `$10.000`, 5 peleas restantes -> stakes coherentes con plan del evento.
+     - Cambio de presupuesto en mitad de cartelera -> recalculo de unidad/stakes sin inconsistencias.
+     - Dos eventos cercanos (mismo usuario) -> no contaminar presupuesto entre eventos.
+     - Picks de baja calidad -> `NO_BET` sin forzar consumo total.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir formula canonica de `fights_remaining` (main card vs cartelera completa).
+     - Decision abierta: definir si `base_stake_hint` (ej: "mi base es 2000") se pide junto al presupuesto o se infiere del historial.
+     - Decision abierta: definir politica de expiracion/cierre automatico de sesion de presupuesto por evento.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
