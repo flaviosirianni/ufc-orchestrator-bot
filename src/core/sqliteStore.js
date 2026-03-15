@@ -628,6 +628,7 @@ export function getDb() {
   ensureDir(DB_PATH);
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
   initSchema(db);
   ensureBetSchema(db);
@@ -1534,16 +1535,24 @@ export function applyCompositeBetMutations(userId, payload = {}) {
           compositeStepIndex: step.index,
         };
 
-        const appliedStepReceipts = applyMutationPreviewInTransaction(
-          db,
-          userId,
-          step.preview,
-          {
-            metadata,
-            at: ts,
-            strictCandidates: true,
+        let appliedStepReceipts = [];
+        try {
+          appliedStepReceipts = applyMutationPreviewInTransaction(
+            db,
+            userId,
+            step.preview,
+            {
+              metadata,
+              at: ts,
+              strictCandidates: true,
+            }
+          );
+        } catch (error) {
+          if (error && typeof error === 'object') {
+            error.failedStepIndex = step.index;
           }
-        );
+          throw error;
+        }
 
         nextStepResults.push({
           index: step.index,
@@ -1569,6 +1578,12 @@ export function applyCompositeBetMutations(userId, payload = {}) {
       error: error?.code || 'composite_apply_failed',
       message: error instanceof Error ? error.message : String(error),
       transactionPolicy: preview.transactionPolicy,
+      failedStepIndex:
+        Number.isInteger(error?.failedStepIndex) && error.failedStepIndex >= 0
+          ? error.failedStepIndex
+          : null,
+      failedBetId:
+        Number.isInteger(error?.betId) && error.betId > 0 ? error.betId : null,
     };
   }
 

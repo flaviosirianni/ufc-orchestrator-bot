@@ -6604,6 +6604,14 @@ export function createBettingWizard({
       };
 
       if (rawSteps.length) {
+        if (typeof userStore?.applyCompositeBetMutations !== 'function') {
+          return {
+            ok: false,
+            error: 'composite_apply_requires_atomic_store_support',
+            message:
+              'El userStore actual no soporta applyCompositeBetMutations; se bloquea para no romper all_or_nothing.',
+          };
+        }
         if (transactionPolicy !== 'all_or_nothing') {
           return {
             ok: false,
