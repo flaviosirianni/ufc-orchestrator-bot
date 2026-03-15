@@ -435,7 +435,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir umbral de friccion aceptable (cuanta confirmacion pedir sin dañar UX).
    - **Prioridad:** critico.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (guardrails de selector explicito + bloqueo de ambiguedad ya implementados; faltan `CorrectionMode` completo y cruce deterministico con estado live `not_started/in_progress`).
 
 17. **Trazabilidad y reversibilidad de mutaciones de ledger (receipts + undo)**
    - **Objetivo:** asegurar auditabilidad y correccion rapida si un update conversacional fue incorrecto.
@@ -460,7 +460,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir politicas de undo (tiempo maximo, cantidad de pasos, restricciones por tipo de usuario).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (receipts, auditoria append-only y `undo_last_mutation` implementados; faltan politicas finales de ventana/alcance y endurecer escenarios de fallo parcial complejos).
 
 18. **[PRIORIDAD CRITICA] Operaciones destructivas del ledger con confirmacion en dos pasos**
    - **Objetivo:** evitar borrados/cierres masivos incorrectos por interpretacion ambigua de lenguaje natural.
@@ -492,7 +492,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir UX de confirmacion para no generar friccion excesiva.
    - **Prioridad:** critico.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (preview + confirm por token activo para casos ambiguos/masivos; falta cerrar politica final de atomicidad/rollback en batches mixtos).
 
 19. **Ejecucion multi-accion robusta en un mismo turno (close + delete + create)**
    - **Objetivo:** procesar instrucciones compuestas del usuario sin perder pasos ni inventar estado.
@@ -610,7 +610,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir timezone por defecto inicial para usuarios sin perfil completo.
      - Definir umbral exacto de "ventana nocturna" por tipo de evento.
    - **Prioridad:** critico.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (ventana temporal local y reconciliacion por fecha local implementadas con regresion; faltan `NoEventClaimGuard` estricto end-to-end y captura/persistencia de timezone faltante).
 
 23. **Auto-monitoreo de apuestas abiertas + cierre automatico con notificacion al usuario**
    - **Objetivo de negocio/UX:** reducir friccion post-apuesta y asegurar ledger actualizado sin depender de reporte manual del usuario.
@@ -911,7 +911,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: definir formula canonica de "peleas restantes" (main card vs total cartelera) para estandarizar el copy.
      - Decision abierta: definir prioridad final de matching (`event_id` vs `event_name` normalizado) cuando faltan IDs consistentes.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (gate post-registro para evitar contexto heredado falso ya implementado; falta matching de evento con score de confianza y template deterministico completo para todos los estados de exposicion).
 
 31. **Preguntar presupuesto por evento al primer analisis y calcular unidad/stakes dinamicos**
    - **Objetivo de negocio/UX:** alinear recomendaciones de stake con el presupuesto real que el usuario quiere jugar en esa cartelera, evitando stakes demasiado bajos para su operativa real.

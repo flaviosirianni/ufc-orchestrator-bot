@@ -16,11 +16,16 @@ Objetivo: atacar primero riesgo de integridad de datos y luego mejorar precision
   - Implementado: base de mutaciones seguras (`preview/apply`), auditoria append-only (`bet_mutations`), receipts de escritura y nuevas tools de ledger (`list_user_bets`, `mutate_user_bets`).
   - Implementado: confirmacion por token para mutaciones sensibles y guardrail inicial para no cerrar peleas marcadas como "no empezo".
   - Implementado: pruebas de regresion nuevas en `__tests__/bettingWizard.test.js` para confirmacion y settle legacy ambiguo.
+- 2026-03-15: avance adicional en seguridad de ledger + contexto temporal/local.
+  - Implementado: hardening de mutaciones para cierres (`settle/set_pending`) exigiendo selector explicito y bloqueando referencias ambiguas en lenguaje natural.
+  - Implementado: guardrail de contexto de exposicion post-registro para evitar claims falsos de "peleas restantes/comprometido/remanente" cuando no hay base en ledger.
+  - Implementado: reconciliacion de eventos "hoy/manana/ahora" usando fecha local del usuario (no solo UTC) en logica de seleccion de evento.
+  - Implementado: nuevas pruebas de regresion para los escenarios anteriores en `__tests__/bettingWizard.test.js`.
 
 ## PR 1 - Ledger Safety Core (Bloqueante)
 
 Prioridad: Critica  
-Estado: Pendiente
+Estado: En progreso (base operativa implementada; hardening pendiente)
 
 Items cubiertos de `WISHLIST.md`:
 
@@ -53,10 +58,21 @@ Definition of Done:
 - Operaciones destructivas requieren confirmacion explicita.
 - Tests de regresion del incidente "pelea anterior" y "borra las demas" en verde.
 
+Estado actual del alcance:
+
+- Hecho:
+  - Base `preview/apply` de mutaciones de ledger y auditoria `bet_mutations`.
+  - Receipts de escritura y soporte de `undo_last_mutation`.
+  - Confirmacion por token para mutaciones sensibles (especialmente bulk/ambiguas).
+  - Guardrails adicionales para evitar cierres sobre targets ambiguos.
+- Pendiente:
+  - `CompositeMutationPlanner` completo para instrucciones multi-accion en un solo turno.
+  - Politica final para lotes multi-ID (confirmacion/atomicidad) y rollback explicito por batch complejo.
+
 ## PR 2 - Temporal/Factual Reliability
 
 Prioridad: Alta (con dependencia de PR1 para seguridad)  
-Estado: Pendiente
+Estado: En progreso (ventana temporal local implementada; faltan gates de veracidad completos)
 
 Items cubiertos de `WISHLIST.md`:
 
@@ -83,10 +99,19 @@ Definition of Done:
 - No se emiten claims de recencia sin evidencia temporal valida.
 - Ante contradiccion del usuario, el bot verifica antes de insistir.
 
+Estado actual del alcance:
+
+- Hecho:
+  - Resolucion de fecha de referencia local para reconciliacion de eventos live/intel.
+  - Cobertura de regresion para escenario de borde nocturno (`hoy/manana`).
+- Pendiente:
+  - `FactFreshnessGate` para claims de racha/ultimos N.
+  - `ContradictionHandler` y `ResponseConsistencyValidator` end-to-end.
+
 ## PR 3 - Turn UX + Operational Clarity
 
 Prioridad: Alta  
-Estado: Pendiente
+Estado: En progreso (componentes parciales en produccion; falta cierre integral)
 
 Items cubiertos de `WISHLIST.md`:
 
@@ -118,6 +143,16 @@ Definition of Done:
 - Mensajes encadenados no rompen contexto ni causan writes inconsistentes.
 - No aparece markdown crudo en Telegram.
 - Flujo de quotes/odds queda explicitado y accionable.
+
+Estado actual del alcance:
+
+- Hecho:
+  - Submenus y navegacion base en Telegram (Apuestas/Config) con persistencia de scope.
+  - Entrypoint inicial de `Cargar creditos` en Home.
+  - Staking policy base con pisos/exposicion en pipeline de recomendaciones.
+- Pendiente:
+  - `InFlightTurnGuard` robusto y `ProgressNotifier` con lifecycle completo.
+  - Cierre de formateo Telegram y flujo guiado de cuotas end-to-end.
 
 ## Orden recomendado de ejecucion
 
