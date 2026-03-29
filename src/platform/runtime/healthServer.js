@@ -130,10 +130,12 @@ export function createHealthServer(
     botId = 'ufc',
     billingClient = null,
     onTopupApplied = null,
+    legacyTopup = null,
   } = {}
 ) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const externalBillingEnabled = Boolean(billingClient?.isEnabled?.());
 
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -142,21 +144,23 @@ export function createHealthServer(
     }
 
     if (req.method === 'GET' && url.pathname === '/topup/config') {
-      if (!billingClient?.isEnabled?.()) {
-        sendJson(res, 200, { ok: true, enabled: false, packs: [] });
+      if (externalBillingEnabled) {
+        const config = await billingClient.getTopupConfig();
+        sendJson(res, config.ok ? 200 : 502, config);
         return;
       }
-      const config = await billingClient.getTopupConfig();
-      sendJson(res, config.ok ? 200 : 502, config);
+
+      if (legacyTopup?.getConfig) {
+        const config = await legacyTopup.getConfig();
+        sendJson(res, config?.ok ? 200 : 502, config || { ok: false, error_code: 'legacy_config_failed' });
+        return;
+      }
+
+      sendJson(res, 200, { ok: true, enabled: false, packs: [] });
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/topup/checkout') {
-      if (!billingClient?.isEnabled?.()) {
-        sendJson(res, 503, { ok: false, error_code: 'billing_unavailable' });
-        return;
-      }
-
       const userId =
         url.searchParams.get('user_id') ||
         url.searchParams.get('telegram_user_id') ||
@@ -164,12 +168,56 @@ export function createHealthServer(
       const packId = Number(url.searchParams.get('pack_id') || url.searchParams.get('credits') || '0');
       const format = String(url.searchParams.get('format') || '').toLowerCase();
 
+      if (externalBillingEnabled) {
+        if (!packId && format !== 'json') {
+          if (!String(userId || '').trim()) {
+            sendJson(res, 400, { ok: false, error_code: 'missing_user_id' });
+            return;
+          }
+          const config = await billingClient.getTopupConfig();
+          const chooserHtml = buildTopupChooserHtml({
+            userId,
+            packs: config?.packs || [],
+            currencyId: config?.currency_id || 'ARS',
+            title: config?.title || 'Recargar creditos',
+          });
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(chooserHtml);
+          return;
+        }
+
+        const checkout = await billingClient.createCheckout({ userId, packId });
+        if (!checkout.ok) {
+          sendJson(res, 400, checkout);
+          return;
+        }
+
+        if (format === 'json') {
+          sendJson(res, 200, checkout);
+          return;
+        }
+
+        if (!checkout.redirect_url) {
+          sendJson(res, 500, { ok: false, error_code: 'missing_redirect_url' });
+          return;
+        }
+
+        res.writeHead(302, { Location: checkout.redirect_url });
+        res.end();
+        return;
+      }
+
+      if (!legacyTopup?.createCheckout) {
+        sendJson(res, 503, { ok: false, error_code: 'billing_unavailable' });
+        return;
+      }
+
       if (!packId && format !== 'json') {
         if (!String(userId || '').trim()) {
           sendJson(res, 400, { ok: false, error_code: 'missing_user_id' });
           return;
         }
-        const config = await billingClient.getTopupConfig();
+        const config = legacyTopup?.getConfig ? await legacyTopup.getConfig() : { ok: true };
         const chooserHtml = buildTopupChooserHtml({
           userId,
           packs: config?.packs || [],
@@ -181,9 +229,9 @@ export function createHealthServer(
         return;
       }
 
-      const checkout = await billingClient.createCheckout({ userId, packId });
-      if (!checkout.ok) {
-        sendJson(res, 400, checkout);
+      const checkout = await legacyTopup.createCheckout({ userId, packId });
+      if (!checkout?.ok) {
+        sendJson(res, Number(checkout?.status) || 400, checkout || { ok: false, error_code: 'legacy_checkout_failed' });
         return;
       }
 
@@ -213,55 +261,93 @@ export function createHealthServer(
     }
 
     if (req.method === 'POST' && url.pathname === '/webhooks/mercadopago') {
-      if (!billingClient?.isEnabled?.()) {
+      const payload = await readJsonBody(req);
+
+      if (externalBillingEnabled) {
+        const forwarded = await fetch(`${process.env.BILLING_BASE_URL || ''}/billing/topup/webhook/mercadopago?bot_id=${encodeURIComponent(botId)}&${url.searchParams.toString()}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-billing-token': process.env.BILLING_API_TOKEN || '',
+          },
+          body: JSON.stringify(payload || {}),
+        }).catch(() => null);
+
+        if (!forwarded) {
+          sendJson(res, 502, { ok: false, error_code: 'billing_forward_failed' });
+          return;
+        }
+
+        const text = await forwarded.text();
+        let responsePayload = {};
+        try {
+          responsePayload = text ? JSON.parse(text) : {};
+        } catch {
+          responsePayload = { ok: false, raw: text };
+        }
+
+        if (responsePayload?.ok && !responsePayload?.alreadyProcessed && typeof onTopupApplied === 'function') {
+          await onTopupApplied(responsePayload).catch(() => {});
+        }
+
+        sendJson(res, forwarded.status, responsePayload);
+        return;
+      }
+
+      if (!legacyTopup?.handleMercadoPagoWebhook) {
         sendJson(res, 503, { ok: false, error_code: 'billing_unavailable' });
         return;
       }
 
-      const payload = await readJsonBody(req);
-      const forwarded = await fetch(`${process.env.BILLING_BASE_URL || ''}/billing/topup/webhook/mercadopago?bot_id=${encodeURIComponent(botId)}&${url.searchParams.toString()}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-billing-token': process.env.BILLING_API_TOKEN || '',
-        },
-        body: JSON.stringify(payload || {}),
-      }).catch(() => null);
+      const legacyResponse = await legacyTopup.handleMercadoPagoWebhook({
+        payload,
+        queryParams: url.searchParams,
+      });
 
-      if (!forwarded) {
-        sendJson(res, 502, { ok: false, error_code: 'billing_forward_failed' });
-        return;
+      const status = Number(legacyResponse?.status) || 200;
+      const responsePayload = legacyResponse?.payload || { ok: false, error_code: 'legacy_webhook_failed' };
+      const event = legacyResponse?.event || null;
+      if (responsePayload?.ok && !responsePayload?.alreadyProcessed && event && typeof onTopupApplied === 'function') {
+        await onTopupApplied(event).catch(() => {});
       }
 
-      const text = await forwarded.text();
-      let responsePayload = {};
-      try {
-        responsePayload = text ? JSON.parse(text) : {};
-      } catch {
-        responsePayload = { ok: false, raw: text };
-      }
-
-      if (responsePayload?.ok && !responsePayload?.alreadyProcessed && typeof onTopupApplied === 'function') {
-        await onTopupApplied(responsePayload).catch(() => {});
-      }
-
-      sendJson(res, forwarded.status, responsePayload);
+      sendJson(res, status, responsePayload);
       return;
     }
 
     if (req.method === 'POST' && url.pathname === '/webhooks/credits') {
-      if (!billingClient?.isEnabled?.()) {
+      const payload = await readJsonBody(req);
+
+      if (externalBillingEnabled) {
+        const addResult = await billingClient.addCredits({
+          userId: payload?.telegram_user_id || payload?.user_id,
+          amount: payload?.credits,
+          reason: payload?.reason || 'webhook_topup',
+          metadata: payload?.metadata || null,
+        });
+        sendJson(res, addResult.ok ? 200 : 400, addResult);
+        return;
+      }
+
+      if (!legacyTopup?.addCredits) {
         sendJson(res, 503, { ok: false, error_code: 'billing_unavailable' });
         return;
       }
-      const payload = await readJsonBody(req);
-      const addResult = await billingClient.addCredits({
+
+      const addResult = await legacyTopup.addCredits({
         userId: payload?.telegram_user_id || payload?.user_id,
-        amount: payload?.credits,
+        credits: payload?.credits,
         reason: payload?.reason || 'webhook_topup',
         metadata: payload?.metadata || null,
       });
-      sendJson(res, addResult.ok ? 200 : 400, addResult);
+      if (addResult?.ok && typeof onTopupApplied === 'function') {
+        await onTopupApplied({
+          user_id: payload?.telegram_user_id || payload?.user_id,
+          credits: Number(payload?.credits) || 0,
+          payment_id: payload?.payment_id || payload?.paymentId || null,
+        }).catch(() => {});
+      }
+      sendJson(res, addResult?.ok ? 200 : 400, addResult || { ok: false, error_code: 'legacy_credit_failed' });
       return;
     }
 

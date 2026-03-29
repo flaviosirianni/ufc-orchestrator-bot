@@ -59,11 +59,18 @@ import {
   listLatestBetScoringForEvent,
   insertFightBetScoringSnapshots,
   getDbPath,
+  creditFromMercadoPagoPayment,
 } from '../../core/sqliteStore.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
 import { enforcePolicyPack } from '../../platform/policy/policyGuard.js';
+import {
+  getMercadoPagoConfig,
+  createTopupPreference,
+  getPaymentById,
+  extractTopupCreditFromPayment,
+} from '../../core/mercadoPago.js';
 
 export const manifestPath = 'src/bots/ufc/bot.manifest.json';
 
@@ -319,10 +326,184 @@ export async function bootstrapBot({ manifest } = {}) {
   });
 
   const port = Number(process.env.PORT || 3000);
+  const legacyTopup = {
+    async getConfig() {
+      const config = getMercadoPagoConfig();
+      return {
+        ok: true,
+        enabled: Boolean(config?.enabled),
+        packs: Array.isArray(config?.packs) ? config.packs : [],
+        currency_id: config?.currencyId || 'ARS',
+        title: process.env.MP_TOPUP_TITLE || 'Recargar creditos',
+      };
+    },
+    async createCheckout({ userId, packId } = {}) {
+      const preference = await createTopupPreference({
+        userId,
+        creditsRequested: packId || null,
+      });
+      if (!preference?.ok) {
+        return {
+          ok: false,
+          status: Number(preference?.status) || 400,
+          error_code: preference?.error || 'could_not_create_preference',
+          packs: preference?.packs || [],
+        };
+      }
+      return {
+        ok: true,
+        user_id: String(userId || '').trim(),
+        credits: Number(preference?.credits) || 0,
+        amount: Number(preference?.amount) || 0,
+        preference_id: preference?.preference?.id || null,
+        redirect_url: preference?.redirectUrl || null,
+      };
+    },
+    async addCredits({ userId, credits, reason = 'manual_topup', metadata = null } = {}) {
+      const result = addCredits(String(userId || '').trim(), Number(credits) || 0, {
+        reason,
+        metadata,
+      });
+      if (!result?.ok) {
+        return {
+          ok: false,
+          error_code: result?.error || 'could_not_add_credits',
+        };
+      }
+      return {
+        ok: true,
+        user_id: String(userId || '').trim(),
+        credits: Number(credits) || 0,
+      };
+    },
+    async handleMercadoPagoWebhook({ payload = {}, queryParams } = {}) {
+      const expectedToken = String(process.env.MP_WEBHOOK_TOKEN || '').trim();
+      const incomingToken = String(queryParams?.get('token') || '').trim();
+      if (expectedToken && incomingToken !== expectedToken) {
+        return {
+          status: 403,
+          payload: { ok: false, error_code: 'forbidden' },
+        };
+      }
+
+      const topic = String(
+        payload?.type ||
+          queryParams?.get('type') ||
+          queryParams?.get('topic') ||
+          ''
+      )
+        .toLowerCase()
+        .trim();
+      const paymentId = String(
+        payload?.data?.id ||
+          (topic === 'payment' ? payload?.id : '') ||
+          queryParams?.get('id') ||
+          ''
+      ).trim();
+
+      if (topic && topic !== 'payment') {
+        return {
+          status: 200,
+          payload: {
+            ok: true,
+            ignored: true,
+            reason: 'non_payment_topic',
+          },
+        };
+      }
+
+      if (!paymentId) {
+        return {
+          status: 200,
+          payload: {
+            ok: true,
+            ignored: true,
+            reason: 'missing_payment_id',
+          },
+        };
+      }
+
+      const paymentResponse = await getPaymentById(paymentId);
+      if (!paymentResponse?.ok) {
+        return {
+          status: 502,
+          payload: {
+            ok: false,
+            error_code: 'could_not_fetch_payment',
+            payment_id: paymentId,
+          },
+        };
+      }
+
+      const parsed = extractTopupCreditFromPayment(paymentResponse?.body || {});
+      if (!parsed?.ok) {
+        return {
+          status: 200,
+          payload: {
+            ok: true,
+            ignored: true,
+            reason: parsed?.error || 'missing_credit_metadata',
+            payment_id: paymentId,
+          },
+        };
+      }
+
+      if (parsed.status !== 'approved') {
+        return {
+          status: 200,
+          payload: {
+            ok: true,
+            processed: false,
+            payment_id: paymentId,
+            payment_status: parsed.status,
+          },
+        };
+      }
+
+      const creditResult = creditFromMercadoPagoPayment({
+        paymentId: parsed.paymentId,
+        userId: parsed.userId,
+        credits: parsed.credits,
+        amount: parsed.transactionAmount,
+        status: parsed.status,
+        rawPayload: paymentResponse?.body || null,
+      });
+
+      if (!creditResult?.ok) {
+        return {
+          status: 500,
+          payload: {
+            ok: false,
+            error_code: creditResult?.error || 'could_not_apply_credit',
+            payment_id: parsed.paymentId,
+          },
+        };
+      }
+
+      return {
+        status: 200,
+        payload: {
+          ok: true,
+          payment_id: parsed.paymentId,
+          user_id: parsed.userId,
+          credits: parsed.credits,
+          alreadyProcessed: Boolean(creditResult?.alreadyProcessed),
+        },
+        event: {
+          user_id: parsed.userId,
+          credits: parsed.credits,
+          payment_id: parsed.paymentId,
+          amount: parsed.transactionAmount,
+        },
+      };
+    },
+  };
+
   createHealthServer(port, {
     appName: manifest?.display_name || 'UFC Bot',
     botId: manifest?.bot_id || 'ufc',
     billingClient,
+    legacyTopup,
     onTopupApplied: async (event = {}) => {
       if (!telegram?.sendSystemMessage) return;
       const userId = String(event.user_id || '').trim();
