@@ -29,8 +29,13 @@ import {
   getFoodCatalogPreview,
   getLatestNutritionWeighin,
   listFoodCatalogEntries,
+  listNutritionUserProductDefaults,
   listNutritionIntakesByDate,
   listRecentNutritionIntakes,
+  findNutritionUserPreferredCatalogEntries,
+  setNutritionUserProductDefault,
+  removeNutritionUserProductDefault,
+  bumpNutritionUserProductDefaultUsage,
   getNutritionProfile,
   getNutritionSummary,
   setNutritionUserState,
@@ -439,6 +444,169 @@ function buildIntakeDetailsBlock({
   ];
 }
 
+function parseProfileProductPreferenceCommand(message = '') {
+  const raw = String(message || '').trim();
+  const normalized = normalizeText(raw);
+  if (!normalized) return null;
+
+  if (
+    /\b(listar|lista|ver|mostrar)\b.*\b(productos|preferencias|fijos|defaults)\b/.test(normalized) ||
+    /\b(mis productos|productos fijos)\b/.test(normalized)
+  ) {
+    return { action: 'list_defaults' };
+  }
+
+  const removeMatch = raw.match(
+    /\b(?:quitar|eliminar|borrar)\s+(?:producto|preferencia|default)\s+(.+)$/i
+  );
+  if (removeMatch) {
+    return {
+      action: 'remove_default',
+      alias: sanitizeUserAliasCandidate(removeMatch[1]),
+    };
+  }
+
+  const removeNaturalMatch = raw.match(/\b(?:quitar|eliminar|borrar)\s+mi\s+(.+)$/i);
+  if (removeNaturalMatch) {
+    const aliasCandidate = sanitizeUserAliasCandidate(removeNaturalMatch[1]);
+    if (looksLikePackagedAlias(aliasCandidate)) {
+      return {
+        action: 'remove_default',
+        alias: aliasCandidate,
+      };
+    }
+  }
+
+  const setMatch = raw.match(
+    /\b(?:producto|preferencia|default|alias)\s+(.+?)\s*(?:=|=>|->)\s*(.+)$/i
+  );
+  if (setMatch) {
+    return {
+      action: 'set_default',
+      alias: sanitizeUserAliasCandidate(setMatch[1]),
+      productQuery: String(setMatch[2] || '').trim(),
+    };
+  }
+
+  const naturalSetMatch = raw.match(/\b(?:mi|m[ií])\s+(.+?)\s+(?:es|=)\s+(.+)$/i);
+  if (naturalSetMatch) {
+    const aliasCandidate = sanitizeUserAliasCandidate(naturalSetMatch[1]);
+    if (looksLikePackagedAlias(aliasCandidate)) {
+      return {
+        action: 'set_default',
+        alias: aliasCandidate,
+        productQuery: String(naturalSetMatch[2] || '').trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function resolveCatalogEntryForProfilePreference(query = '') {
+  const text = String(query || '').trim();
+  if (!text) {
+    return { status: 'missing_query' };
+  }
+  const idMatch = text.match(/(?:^#|(?:\bid\b\s*[:=]?\s*))(\d+)/i);
+  const allRows = listFoodCatalogEntries();
+  if (idMatch) {
+    const id = Number(idMatch[1]);
+    const byId = allRows.find((row) => Number(row?.id) === id) || null;
+    return byId ? { status: 'matched', entry: byId } : { status: 'not_found' };
+  }
+
+  const merged = mergeCatalogRows(
+    findFoodCatalogCandidates(text, { limit: 50 }),
+    allRows.slice(0, 200)
+  );
+  const scored = merged
+    .map((row) => ({
+      row,
+      score: scoreCatalogCandidate(row, text),
+    }))
+    .sort((a, b) => b.score - a.score);
+  if (!scored.length || scored[0].score < 20) {
+    return { status: 'not_found' };
+  }
+
+  const best = scored[0];
+  const alternatives = scored
+    .slice(0, 5)
+    .filter((item) => item.score >= Math.max(20, best.score - 12))
+    .map((item) => item.row);
+  if (alternatives.length > 1) {
+    return {
+      status: 'ambiguous',
+      best: best.row,
+      alternatives,
+    };
+  }
+  return { status: 'matched', entry: best.row };
+}
+
+function formatCatalogAlternatives(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  return rows
+    .slice(0, 5)
+    .map((row) => {
+      const id = Number(row?.id);
+      const name = String(row?.productName || '').trim();
+      const brand = String(row?.brand || '').trim();
+      return `- #${Number.isFinite(id) ? id : '?'} ${name}${brand ? ` (${brand})` : ''}`;
+    })
+    .join('\n');
+}
+
+function formatUserProductDefaultsReply(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return [
+      '🧴 Productos fijos por usuario',
+      '- Aún no configuraste ninguno.',
+      'Ejemplo para guardar: `producto leche proteica = Leche Proteica La Serenisima`',
+    ].join('\n');
+  }
+
+  const lines = ['🧴 Productos fijos por usuario'];
+  for (const row of rows.slice(0, 12)) {
+    const id = Number(row?.catalogItemId || row?.id);
+    const alias = String(row?.aliasLabel || '').trim() || '(sin alias)';
+    const name = String(row?.productName || '').trim() || 'producto';
+    const brand = String(row?.brand || '').trim();
+    lines.push(
+      `- ${alias} => #${Number.isFinite(id) ? id : '?'} ${name}${brand ? ` (${brand})` : ''}`
+    );
+  }
+  lines.push('Para cambiar uno: `producto <alias> = <producto>`');
+  lines.push('Para quitar uno: `quitar producto <alias>`');
+  return lines.join('\n');
+}
+
+function mapDefaultRowsToPreferredCatalogRows(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const mapped = [];
+  for (const row of rows) {
+    const catalogId = Number(row?.catalogItemId);
+    if (!Number.isFinite(catalogId) || catalogId <= 0) continue;
+    mapped.push({
+      id: catalogId,
+      productName: String(row?.productName || '').trim(),
+      brand: String(row?.brand || '').trim(),
+      normalizedName: normalizeCatalogToken(row?.productName || row?.normalizedName || ''),
+      normalizedBrand: normalizeCatalogToken(row?.brand || row?.normalizedBrand || ''),
+      portionG: Number(row?.portionG),
+      caloriesKcal: Number(row?.caloriesKcal),
+      proteinG: Number(row?.proteinG),
+      carbsG: Number(row?.carbsG),
+      fatG: Number(row?.fatG),
+      source: String(row?.source || 'base_estandar').trim() || 'base_estandar',
+      preferenceAlias: String(row?.aliasLabel || '').trim(),
+      preferenceUsageCount: Number(row?.usageCount || 0),
+    });
+  }
+  return mapped;
+}
+
 function formatProfileReply(profile = {}) {
   const lines = ['✅ Perfil actualizado'];
   lines.push(`- Objetivo: ${profile?.mainGoal || 'sin definir'}`);
@@ -625,6 +793,19 @@ function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
     }
   }
 
+  const preferenceAlias = normalizeCatalogToken(entry?.preferenceAlias || entry?.aliasLabel || '');
+  if (preferenceAlias) {
+    if (preferenceAlias === normalizedNameHint) {
+      score += 45;
+    } else if (normalizedNameHint.includes(preferenceAlias) || preferenceAlias.includes(normalizedNameHint)) {
+      score += 25;
+    }
+    const usageCount = Number(entry?.preferenceUsageCount ?? entry?.usageCount);
+    if (Number.isFinite(usageCount) && usageCount > 0) {
+      score += Math.min(20, usageCount);
+    }
+  }
+
   return score;
 }
 
@@ -666,6 +847,47 @@ function formatCatalogRowsForStructuredParser(rows = []) {
       ].join(' | ');
     })
     .join('\n');
+}
+
+function formatUserDefaultsForStructuredParser(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return '(sin productos fijos por usuario)';
+  return rows
+    .slice(0, 80)
+    .map((row) => {
+      const alias = String(row?.aliasLabel || '').trim();
+      const id = Number(row?.catalogItemId || row?.id);
+      const name = String(row?.productName || '').trim();
+      const brand = String(row?.brand || '').trim();
+      const usageCount = Number(row?.usageCount || row?.preferenceUsageCount || 0);
+      return [
+        `alias=${alias || '-'}`,
+        `catalog_id=${Number.isFinite(id) ? id : '?'}`,
+        `name=${name || '-'}`,
+        `brand=${brand || '-'}`,
+        `usage=${Number.isFinite(usageCount) ? usageCount : 0}`,
+      ].join(' | ');
+    })
+    .join('\n');
+}
+
+function looksLikePackagedAlias(value = '') {
+  const text = normalizeCatalogToken(value);
+  if (!text) return false;
+  return /\b(granola|whey|prote|protein|proteico|leche|yogur|yogurt|ser pro|pro\+|barrita|barra|galleta|cookie|cereal|polvo|suplemento)\b/.test(
+    text
+  );
+}
+
+function sanitizeUserAliasCandidate(value = '') {
+  const cleaned = String(value || '')
+    .replace(/[`"'“”]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.,;:!?]+$/g, '');
+  if (!cleaned) return '';
+  if (cleaned.length > 80) return '';
+  if (cleaned.split(' ').length > 12) return '';
+  return cleaned;
 }
 
 function isValidIsoDate(value = '') {
@@ -754,19 +976,28 @@ function parseStructuredEstimatedTotals(item = {}) {
   };
 }
 
-function resolveCatalogEntryFromStructuredItem(item = {}, catalogRows = []) {
+function resolveCatalogEntryFromStructuredItem(
+  item = {},
+  catalogRows = [],
+  { userId = '', userDefaultRows = [] } = {}
+) {
   const numericId = Number(item?.catalogId);
   if (Number.isFinite(numericId) && numericId > 0) {
     const byId = catalogRows.find((row) => Number(row?.id) === numericId);
-    if (byId) return byId;
+    if (byId) {
+      return { entry: byId, matchedPreferenceAlias: null };
+    }
   }
 
   const hint = String(item?.foodName || '').trim();
-  if (!hint) return null;
+  if (!hint) return { entry: null, matchedPreferenceAlias: null };
 
+  const preferredRows = Array.isArray(userDefaultRows) && userDefaultRows.length
+    ? userDefaultRows
+    : findNutritionUserPreferredCatalogEntries(userId, hint, { limit: 40 });
   const candidates = mergeCatalogRows(
-    findFoodCatalogCandidates(hint, { limit: 60 }),
-    catalogRows
+    preferredRows,
+    mergeCatalogRows(findFoodCatalogCandidates(hint, { limit: 60 }), catalogRows)
   );
   let best = null;
   let bestScore = 0;
@@ -777,8 +1008,11 @@ function resolveCatalogEntryFromStructuredItem(item = {}, catalogRows = []) {
       best = candidate;
     }
   }
-  if (!best || bestScore < 20) return null;
-  return best;
+  if (!best || bestScore < 20) return { entry: null, matchedPreferenceAlias: null };
+  return {
+    entry: best,
+    matchedPreferenceAlias: String(best?.preferenceAlias || best?.aliasLabel || '').trim() || null,
+  };
 }
 
 function resolveTemporalFromStructured({
@@ -810,10 +1044,12 @@ function resolveTemporalFromStructured({
 }
 
 function buildParsedIntakeFromStructured({
+  userId = '',
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
   structured = {},
   catalogRows = [],
+  userDefaultRows = [],
 } = {}) {
   const temporal = resolveTemporalFromStructured({
     rawMessage,
@@ -834,7 +1070,12 @@ function buildParsedIntakeFromStructured({
   const items = [];
   const unresolvedItems = [];
   for (const structuredItem of normalizedItems) {
-    const entry = resolveCatalogEntryFromStructuredItem(structuredItem, catalogRows);
+    const resolved = resolveCatalogEntryFromStructuredItem(
+      structuredItem,
+      catalogRows,
+      { userId, userDefaultRows }
+    );
+    const entry = resolved?.entry || null;
     const estimatedTotals = parseStructuredEstimatedTotals(structuredItem);
     if (!entry) {
       if (estimatedTotals && String(structuredItem?.foodName || '').trim()) {
@@ -879,6 +1120,9 @@ function buildParsedIntakeFromStructured({
       confidence: 'media',
       source: entry.source || 'base_estandar',
       brandOrNotes: entry.brand || null,
+      catalogItemId: Number(entry.id) || null,
+      inputAlias: String(structuredItem?.foodName || '').trim() || null,
+      matchedPreferenceAlias: resolved?.matchedPreferenceAlias || null,
     });
   }
 
@@ -914,6 +1158,7 @@ async function parseStructuredIntakeWithModel({
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
   catalogRows = [],
+  userDefaultRows = [],
 } = {}) {
   const instructions = [
     'Sos un parser de ingestas de nutricion.',
@@ -928,6 +1173,7 @@ async function parseStructuredIntakeWithModel({
     'Reglas:',
     '- Si es una ingesta registrable: action=log_intake y al menos 1 item.',
     '- Usa catalog_id cuando encuentres producto en el catalogo recibido.',
+    '- Prioriza primero "productos fijos por usuario" (alias personales), luego catalogo general.',
     '- No inventes catalog_id; si no existe, deja null y completa food_name.',
     '- Si hay temporalidad explicita, mapea local_date/local_time; si no, usa null.',
     '- Si no hay match de catálogo pero se entiende el item, estimá macros del item en estimated_totals y confidence media/baja (no bloquear).',
@@ -948,6 +1194,9 @@ async function parseStructuredIntakeWithModel({
     '',
     'Mensaje usuario:',
     rawMessage,
+    '',
+    'Productos fijos por usuario (alias personales -> catalog_id):',
+    formatUserDefaultsForStructuredParser(userDefaultRows),
     '',
     'Catalogo nutricional (id y macros por porcion):',
     formatCatalogRowsForStructuredParser(catalogRows),
@@ -1100,6 +1349,12 @@ function looksLikeWeighinQuestion(text = '') {
   return /\b(ultimo pesaje|ultimo peso|peso actual|cuanto peso|balanza|peso)\b/.test(text);
 }
 
+function looksLikeUserDefaultsQuestion(text = '') {
+  return /\b(productos fijos|mis productos|mis defaults|preferencias de productos|alias de productos)\b/.test(
+    text
+  );
+}
+
 function formatRecentIntakesReply({
   title = '🧾 Ingestas recientes',
   rows = [],
@@ -1195,6 +1450,11 @@ function resolveDbFirstLearningReply({
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  if (looksLikeUserDefaultsQuestion(normalized)) {
+    const defaults = listNutritionUserProductDefaults(userId, { limit: 20 });
+    return formatUserProductDefaultsReply(defaults);
   }
 
   return null;
@@ -1368,6 +1628,99 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
+        const productPreferenceCommand = parseProfileProductPreferenceCommand(cleanMessage);
+        if (productPreferenceCommand?.action === 'list_defaults') {
+          const defaults = listNutritionUserProductDefaults(userId, { limit: 20 });
+          replyText = formatUserProductDefaultsReply(defaults);
+          shouldCharge = true;
+        } else if (productPreferenceCommand?.action === 'set_default') {
+          const alias = sanitizeUserAliasCandidate(productPreferenceCommand.alias);
+          if (!alias) {
+            return [
+              'No pude leer el alias del producto.',
+              'Formato: `producto leche proteica = Leche Proteica La Serenisima`',
+            ].join('\n');
+          }
+
+          const resolved = resolveCatalogEntryForProfilePreference(
+            productPreferenceCommand.productQuery
+          );
+          if (resolved.status === 'ambiguous') {
+            return [
+              `Encontré más de un producto para "${productPreferenceCommand.productQuery}".`,
+              'Elegí uno por ID:',
+              formatCatalogAlternatives(resolved.alternatives),
+              `Ejemplo: \`producto ${alias} = #${resolved.alternatives?.[0]?.id || ''}\``,
+            ]
+              .filter(Boolean)
+              .join('\n');
+          }
+          if (resolved.status !== 'matched' || !resolved.entry) {
+            return [
+              `No encontré "${productPreferenceCommand.productQuery}" en INFO_NUTRICIONAL.`,
+              'Podés mandar etiqueta nutricional para cargarlo y luego mapearlo como producto fijo.',
+            ].join('\n');
+          }
+
+          const mapped = setNutritionUserProductDefault(
+            userId,
+            {
+              alias,
+              catalogItemId: resolved.entry.id,
+              source: 'profile_command',
+            },
+            {
+              idempotency: {
+                sourceMessageId,
+                operationType: 'set_user_product_default',
+              },
+            }
+          );
+          if (!mapped?.ok) {
+            return formatWriteFailureReply('update_profile', mapped?.error || 'user_default_failed');
+          }
+
+          const defaults = listNutritionUserProductDefaults(userId, { limit: 20 });
+          replyText = [
+            '✅ Producto fijo guardado.',
+            `- Alias: ${alias}`,
+            `- Producto: ${resolved.entry.productName}${resolved.entry.brand ? ` (${resolved.entry.brand})` : ''}`,
+            '',
+            formatUserProductDefaultsReply(defaults),
+          ].join('\n');
+          shouldCharge = true;
+        } else if (productPreferenceCommand?.action === 'remove_default') {
+          const alias = sanitizeUserAliasCandidate(productPreferenceCommand.alias);
+          if (!alias) {
+            return 'No pude leer qué alias querés quitar. Ejemplo: `quitar producto leche proteica`';
+          }
+          const removed = removeNutritionUserProductDefault(
+            userId,
+            alias,
+            {
+              idempotency: {
+                sourceMessageId,
+                operationType: 'remove_user_product_default',
+              },
+            }
+          );
+          if (!removed?.ok) {
+            return formatWriteFailureReply(
+              'update_profile',
+              removed?.error || 'remove_user_default_failed'
+            );
+          }
+          const defaults = listNutritionUserProductDefaults(userId, { limit: 20 });
+          replyText = [
+            removed.deleted
+              ? `✅ Alias eliminado: ${alias}`
+              : `No encontré alias activo para: ${alias}`,
+            '',
+            formatUserProductDefaultsReply(defaults),
+          ].join('\n');
+          shouldCharge = true;
+        } else {
+
         const parsed = parseProfileUpdatePayload(cleanMessage);
         if (!parsed.ok) {
           return [
@@ -1390,6 +1743,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           .filter(Boolean)
           .join('\n');
         shouldCharge = true;
+        }
       } else if (guidedAction === 'view_summary') {
         const temporal = resolveTemporalContext({
           rawMessage: cleanMessage || 'hoy',
@@ -1615,8 +1969,17 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         const catalogCandidates = cleanMessage
           ? findFoodCatalogCandidates(cleanMessage, { limit: 60 })
           : [];
+        const defaultRowsRaw = listNutritionUserProductDefaults(userId, { limit: 30 });
+        const defaultRowsAsCatalog = mapDefaultRowsToPreferredCatalogRows(defaultRowsRaw);
+        const userDefaultMatches = cleanMessage
+          ? findNutritionUserPreferredCatalogEntries(userId, cleanMessage, { limit: 40 })
+          : [];
+        const userDefaultRows = mergeCatalogRows(userDefaultMatches, defaultRowsAsCatalog);
         const catalogFallbackRows = listFoodCatalogEntries().slice(0, 160);
-        const catalogRowsForParsing = mergeCatalogRows(catalogCandidates, catalogFallbackRows);
+        const catalogRowsForParsing = mergeCatalogRows(
+          userDefaultRows,
+          mergeCatalogRows(catalogCandidates, catalogFallbackRows)
+        );
         const catalogRowsForNormalization = catalogRowsForParsing.length
           ? catalogRowsForParsing
           : getFoodCatalogPreview({ limit: 60 });
@@ -1630,6 +1993,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               rawMessage: cleanMessage,
               userTimeZone,
               catalogRows: catalogRowsForParsing,
+              userDefaultRows,
             });
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, modelStructured.usage);
             if (modelStructured.usage) {
@@ -1651,10 +2015,12 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
 
         if (modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
           const parsedFromStructured = buildParsedIntakeFromStructured({
+            userId,
             rawMessage: cleanMessage,
             userTimeZone,
             structured: modelStructured,
             catalogRows: catalogRowsForParsing,
+            userDefaultRows,
           });
           if (parsedFromStructured.ok || !parsed.ok) {
             parsed = parsedFromStructured;
@@ -1759,6 +2125,40 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         );
         if (!intakeWrite?.ok) {
           return formatWriteFailureReply('log_intake', intakeWrite?.error || 'db_write_failed');
+        }
+
+        for (const parsedItem of Array.isArray(parsed.items) ? parsed.items : []) {
+          const catalogItemId = Number(parsedItem?.catalogItemId);
+          if (!Number.isFinite(catalogItemId) || catalogItemId <= 0) continue;
+          const aliasCandidate = sanitizeUserAliasCandidate(
+            parsedItem?.inputAlias || parsedItem?.foodItem
+          );
+          if (!aliasCandidate) continue;
+          if (!looksLikePackagedAlias(aliasCandidate) && !looksLikePackagedAlias(parsedItem?.foodItem)) {
+            continue;
+          }
+          const mapped = setNutritionUserProductDefault(
+            userId,
+            {
+              alias: aliasCandidate,
+              catalogItemId,
+              source: 'auto_from_intake',
+            },
+            {
+              idempotency: {
+                sourceMessageId: sourceMessageId ? `${sourceMessageId}:${aliasCandidate}` : '',
+                operationType: 'set_user_product_default',
+              },
+            }
+          );
+          if (mapped?.ok) {
+            const aliasToBump = sanitizeUserAliasCandidate(
+              parsedItem?.matchedPreferenceAlias || aliasCandidate
+            );
+            if (aliasToBump) {
+              bumpNutritionUserProductDefaultUsage(userId, aliasToBump);
+            }
+          }
         }
 
         const summary = getNutritionSummary(userId, parsed.temporal.localDate);

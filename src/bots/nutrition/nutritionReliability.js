@@ -12,6 +12,7 @@ const REQUIRED_NUTRITION_TABLES = [
   'nutrition_user_state',
   'nutrition_operation_receipts',
   'nutrition_usage_records',
+  'nutrition_user_product_defaults',
 ];
 
 function ensureDir(dirPath = '') {
@@ -214,4 +215,3 @@ export function startNutritionDbReliabilityLoop({
     },
   };
 }
-

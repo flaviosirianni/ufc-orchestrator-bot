@@ -463,6 +463,22 @@ export function ensureNutritionSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_nutrition_usage_user_time
       ON nutrition_usage_records (telegram_user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS nutrition_user_product_defaults (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      alias_label TEXT NOT NULL,
+      normalized_alias TEXT NOT NULL,
+      catalog_item_id INTEGER NOT NULL,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (telegram_user_id, normalized_alias),
+      FOREIGN KEY (catalog_item_id) REFERENCES nutrition_food_catalog(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nutrition_user_defaults_user
+      ON nutrition_user_product_defaults (telegram_user_id, updated_at DESC);
   `);
 
   const seedStmt = db.prepare(`
@@ -749,6 +765,291 @@ export function listFoodCatalogEntries() {
   `
     )
     .all();
+}
+
+function getCatalogEntryById(catalogItemId = null) {
+  const id = Number(catalogItemId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return (
+    getDb()
+      .prepare(
+        `
+      SELECT
+        id,
+        product_name AS productName,
+        brand,
+        normalized_name AS normalizedName,
+        normalized_brand AS normalizedBrand,
+        portion_g AS portionG,
+        calories_kcal AS caloriesKcal,
+        protein_g AS proteinG,
+        carbs_g AS carbsG,
+        fat_g AS fatG,
+        source
+      FROM nutrition_food_catalog
+      WHERE id = ?
+      LIMIT 1
+    `
+      )
+      .get(id) || null
+  );
+}
+
+export function setNutritionUserProductDefault(userId = '', payload = {}, options = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) {
+    return { ok: false, error: 'missing_user_id' };
+  }
+  const aliasLabel = String(payload.alias || payload.aliasLabel || '').trim();
+  const normalizedAlias = normalizeToken(aliasLabel);
+  if (!normalizedAlias) {
+    return { ok: false, error: 'missing_alias' };
+  }
+
+  const catalogItemId = Number(payload.catalogItemId);
+  const catalogEntry = getCatalogEntryById(catalogItemId);
+  if (!catalogEntry) {
+    return { ok: false, error: 'catalog_item_not_found' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const payloadForHash = {
+    userId: normalizedUserId,
+    aliasLabel,
+    normalizedAlias,
+    catalogItemId: Number(catalogEntry.id),
+    source: String(payload.source || 'manual').trim(),
+  };
+
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'set_user_product_default'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash,
+    applyMutation: () => {
+      getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_user_product_defaults (
+          telegram_user_id, alias_label, normalized_alias, catalog_item_id, usage_count, created_at, updated_at
+        ) VALUES (
+          @userId, @aliasLabel, @normalizedAlias, @catalogItemId, 0, @createdAt, @updatedAt
+        )
+        ON CONFLICT(telegram_user_id, normalized_alias) DO UPDATE SET
+          alias_label = excluded.alias_label,
+          catalog_item_id = excluded.catalog_item_id,
+          updated_at = excluded.updated_at
+      `
+        )
+        .run({
+          userId: normalizedUserId,
+          aliasLabel,
+          normalizedAlias,
+          catalogItemId: Number(catalogEntry.id),
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+      const row = getDb()
+        .prepare(
+          `
+        SELECT
+          d.id,
+          d.telegram_user_id AS userId,
+          d.alias_label AS aliasLabel,
+          d.normalized_alias AS normalizedAlias,
+          d.catalog_item_id AS catalogItemId,
+          d.usage_count AS usageCount,
+          d.updated_at AS updatedAt,
+          c.product_name AS productName,
+          c.brand,
+          c.calories_kcal AS caloriesKcal,
+          c.protein_g AS proteinG,
+          c.carbs_g AS carbsG,
+          c.fat_g AS fatG
+        FROM nutrition_user_product_defaults d
+        JOIN nutrition_food_catalog c ON c.id = d.catalog_item_id
+        WHERE d.telegram_user_id = ? AND d.normalized_alias = ?
+        LIMIT 1
+      `
+        )
+        .get(normalizedUserId, normalizedAlias);
+      return { mapping: row || null };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    mapping: mutationResult.mapping || null,
+  };
+}
+
+export function removeNutritionUserProductDefault(userId = '', alias = '', options = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedAlias = normalizeToken(alias);
+  if (!normalizedUserId) {
+    return { ok: false, error: 'missing_user_id' };
+  }
+  if (!normalizedAlias) {
+    return { ok: false, error: 'missing_alias' };
+  }
+
+  const payloadForHash = {
+    userId: normalizedUserId,
+    normalizedAlias,
+  };
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'remove_user_product_default'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash,
+    applyMutation: () => {
+      const before = getDb()
+        .prepare(
+          `
+        SELECT
+          id,
+          alias_label AS aliasLabel,
+          catalog_item_id AS catalogItemId
+        FROM nutrition_user_product_defaults
+        WHERE telegram_user_id = ? AND normalized_alias = ?
+        LIMIT 1
+      `
+        )
+        .get(normalizedUserId, normalizedAlias);
+      const result = getDb()
+        .prepare(
+          `
+        DELETE FROM nutrition_user_product_defaults
+        WHERE telegram_user_id = ? AND normalized_alias = ?
+      `
+        )
+        .run(normalizedUserId, normalizedAlias);
+      return {
+        deleted: Number(result?.changes || 0) > 0,
+        previous: before || null,
+      };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    deleted: Boolean(mutationResult.deleted),
+    previous: mutationResult.previous || null,
+  };
+}
+
+export function listNutritionUserProductDefaults(userId = '', { limit = 50 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      d.id,
+      d.telegram_user_id AS userId,
+      d.alias_label AS aliasLabel,
+      d.normalized_alias AS normalizedAlias,
+      d.catalog_item_id AS catalogItemId,
+      d.usage_count AS usageCount,
+      d.updated_at AS updatedAt,
+      c.product_name AS productName,
+      c.brand,
+      c.portion_g AS portionG,
+      c.calories_kcal AS caloriesKcal,
+      c.protein_g AS proteinG,
+      c.carbs_g AS carbsG,
+      c.fat_g AS fatG,
+      c.source
+    FROM nutrition_user_product_defaults d
+    JOIN nutrition_food_catalog c ON c.id = d.catalog_item_id
+    WHERE d.telegram_user_id = ?
+    ORDER BY d.usage_count DESC, d.updated_at DESC, d.id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, Math.max(1, Number(limit) || 50));
+}
+
+export function findNutritionUserPreferredCatalogEntries(userId = '', query = '', { limit = 25 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedQuery = normalizeToken(query);
+  if (!normalizedUserId || !normalizedQuery) return [];
+
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      c.id,
+      c.product_name AS productName,
+      c.brand,
+      c.normalized_name AS normalizedName,
+      c.normalized_brand AS normalizedBrand,
+      c.portion_g AS portionG,
+      c.calories_kcal AS caloriesKcal,
+      c.protein_g AS proteinG,
+      c.carbs_g AS carbsG,
+      c.fat_g AS fatG,
+      c.source,
+      d.alias_label AS preferenceAlias,
+      d.usage_count AS preferenceUsageCount
+    FROM nutrition_user_product_defaults d
+    JOIN nutrition_food_catalog c ON c.id = d.catalog_item_id
+    WHERE d.telegram_user_id = ?
+      AND (
+        d.normalized_alias LIKE ?
+        OR c.normalized_name LIKE ?
+        OR c.normalized_brand LIKE ?
+      )
+    ORDER BY d.usage_count DESC, d.updated_at DESC, d.id DESC
+    LIMIT ?
+  `
+    )
+    .all(
+      normalizedUserId,
+      `%${normalizedQuery}%`,
+      `%${normalizedQuery}%`,
+      `%${normalizedQuery}%`,
+      Math.max(1, Number(limit) || 25)
+    );
+}
+
+export function bumpNutritionUserProductDefaultUsage(userId = '', alias = '') {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedAlias = normalizeToken(alias);
+  if (!normalizedUserId || !normalizedAlias) {
+    return { ok: false, error: 'missing_payload' };
+  }
+
+  const result = getDb()
+    .prepare(
+      `
+    UPDATE nutrition_user_product_defaults
+    SET usage_count = usage_count + 1, updated_at = ?
+    WHERE telegram_user_id = ? AND normalized_alias = ?
+  `
+    )
+    .run(new Date().toISOString(), normalizedUserId, normalizedAlias);
+  return {
+    ok: true,
+    updated: Number(result?.changes || 0) > 0,
+  };
 }
 
 export function addNutritionIntakes(userId = '', payload = {}, options = {}) {

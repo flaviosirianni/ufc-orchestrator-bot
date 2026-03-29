@@ -3,9 +3,13 @@ import { getDb } from '../src/core/sqliteStore.js';
 import {
   addNutritionIntakes,
   addNutritionWeighin,
+  findNutritionUserPreferredCatalogEntries,
   ensureNutritionSchema,
   findFoodCatalogCandidates,
   getNutritionSummary,
+  listNutritionUserProductDefaults,
+  removeNutritionUserProductDefault,
+  setNutritionUserProductDefault,
   upsertFoodCatalogEntry,
 } from '../src/bots/nutrition/nutritionStore.js';
 import {
@@ -287,6 +291,25 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(catalogRows.length, 1);
   assert.equal(catalogRows[0].caloriesKcal, 260);
+
+  const preferredAlias = 'mi leche proteica';
+  const mappedDefault = setNutritionUserProductDefault(userId, {
+    alias: preferredAlias,
+    catalogItemId: catalogRows[0].id,
+    source: 'test',
+  });
+  assert.equal(mappedDefault.ok, true);
+  const defaultRows = listNutritionUserProductDefaults(userId, { limit: 10 });
+  assert.equal(defaultRows.length >= 1, true);
+  assert.equal(defaultRows[0].aliasLabel, preferredAlias);
+  const preferredCandidates = findNutritionUserPreferredCatalogEntries(userId, 'leche proteica', {
+    limit: 10,
+  });
+  assert.equal(preferredCandidates.length >= 1, true);
+  assert.equal(Number(preferredCandidates[0].id), Number(catalogRows[0].id));
+  const removedDefault = removeNutritionUserProductDefault(userId, preferredAlias);
+  assert.equal(removedDefault.ok, true);
+  assert.equal(removedDefault.deleted, true);
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',

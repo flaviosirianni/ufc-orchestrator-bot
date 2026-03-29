@@ -340,7 +340,7 @@ const QUICK_ACTION_HINTS = {
     'Modulos:',
     '- `Registrar ingesta`: texto simple `hora + lo ingerido` (si no ponés hora, uso ahora local).',
     '- `Registrar pesaje`: `peso_kg` obligatorio; el resto es opcional.',
-    '- `Perfil/objetivos`: objetivo, kcal target, proteina target, timezone, notas.',
+    '- `Perfil/objetivos`: objetivo, kcal target, proteina target, timezone, notas y productos fijos por alias.',
     '- `Resumen`: hoy + rolling 7d/14d + estado vs objetivo.',
     '- `Aprendizaje`: unico modulo con chat libre nutricional.',
     '- `Creditos`: saldo y recarga.',
@@ -378,6 +378,8 @@ const QUICK_ACTION_HINTS = {
     '- `target 2200 kcal y 170g proteina`',
     '- `timezone America/Argentina/Buenos_Aires`',
     '- `restricciones: sin lactosa`',
+    '- `producto leche proteica = Leche Proteica La Serenisima`',
+    '- `listar productos fijos`',
   ].join('\n'),
   nutrition_view_summary: [
     '📊 Resumen',
@@ -405,6 +407,7 @@ const QUICK_ACTION_HINTS = {
   nutrition_reencauce_profile: [
     '📌 Modo guiado - Perfil/objetivos.',
     'Pasame campos a actualizar (objetivo, kcal, proteina, timezone, notas/restricciones).',
+    'Tambien podés setear productos fijos: `producto leche proteica = Leche Proteica La Serenisima`.',
   ].join('\n'),
 };
 
