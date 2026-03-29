@@ -28,11 +28,13 @@ import {
   findFoodCatalogCandidates,
   getFoodCatalogPreview,
   getLatestNutritionWeighin,
+  listFoodCatalogEntries,
   listNutritionIntakesByDate,
   listRecentNutritionIntakes,
   getNutritionProfile,
   getNutritionSummary,
   setNutritionUserState,
+  upsertFoodCatalogEntry,
   upsertNutritionProfile,
 } from './nutritionStore.js';
 import { startNutritionDbReliabilityLoop } from './nutritionReliability.js';
@@ -526,6 +528,331 @@ async function normalizeIntakeWithModel({
       productName: String(json?.packaged_product?.product_name || '').trim(),
       brand: String(json?.packaged_product?.brand || '').trim(),
     },
+  };
+}
+
+function normalizeCatalogToken(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
+  const normalizedNameHint = normalizeCatalogToken(nameHint);
+  if (!normalizedNameHint) return 0;
+
+  const entryName = normalizeCatalogToken(entry?.productName || entry?.normalizedName || '');
+  if (!entryName) return 0;
+
+  let score = 0;
+  if (entryName === normalizedNameHint) {
+    score += 100;
+  } else if (normalizedNameHint.includes(entryName)) {
+    score += 80;
+  } else if (entryName.includes(normalizedNameHint)) {
+    score += 60;
+  }
+
+  const hintTokens = normalizedNameHint.split(' ').filter(Boolean);
+  const entryTokens = new Set(entryName.split(' ').filter(Boolean));
+  const overlap = hintTokens.filter((token) => entryTokens.has(token)).length;
+  score += overlap * 10;
+
+  const normalizedBrandHint = normalizeCatalogToken(brandHint);
+  const entryBrand = normalizeCatalogToken(entry?.brand || entry?.normalizedBrand || '');
+  if (normalizedBrandHint && entryBrand) {
+    if (entryBrand === normalizedBrandHint) {
+      score += 20;
+    } else if (entryBrand.includes(normalizedBrandHint) || normalizedBrandHint.includes(entryBrand)) {
+      score += 10;
+    }
+  }
+
+  return score;
+}
+
+function mergeCatalogRows(primary = [], fallback = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const row of [...primary, ...fallback]) {
+    if (!row || !Number.isFinite(Number(row.id))) continue;
+    const id = Number(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(row);
+  }
+  return merged;
+}
+
+function formatCatalogRowsForStructuredParser(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return '(sin filas de catalogo)';
+  return rows
+    .slice(0, 180)
+    .map((row) => {
+      const id = Number(row?.id);
+      const name = String(row?.productName || '').trim();
+      const brand = String(row?.brand || '').trim();
+      const portionG = Number(row?.portionG);
+      const caloriesKcal = Number(row?.caloriesKcal);
+      const proteinG = Number(row?.proteinG);
+      const carbsG = Number(row?.carbsG);
+      const fatG = Number(row?.fatG);
+      return [
+        `id=${Number.isFinite(id) ? id : '?'}`,
+        `name=${name || '-'}`,
+        `brand=${brand || '-'}`,
+        `portion_g=${Number.isFinite(portionG) ? portionG : '-'}`,
+        `kcal=${Number.isFinite(caloriesKcal) ? caloriesKcal : '-'}`,
+        `p=${Number.isFinite(proteinG) ? proteinG : '-'}`,
+        `c=${Number.isFinite(carbsG) ? carbsG : '-'}`,
+        `g=${Number.isFinite(fatG) ? fatG : '-'}`,
+      ].join(' | ');
+    })
+    .join('\n');
+}
+
+function isValidIsoDate(value = '') {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
+}
+
+function isValidHourMinute(value = '') {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || '').trim());
+}
+
+function toPositiveFiniteOrNull(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function roundMacro(value = 0) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function computeQuantityFactor(quantityValue = null, quantityUnit = '', portionG = 100) {
+  const q = Number(quantityValue);
+  if (!Number.isFinite(q) || q <= 0) return 1;
+
+  const unit = normalizeCatalogToken(quantityUnit);
+  const p = Number(portionG) || 100;
+
+  if (unit === 'kg' || unit === 'kilo' || unit === 'kilos') return (q * 1000) / p;
+  if (unit === 'g' || unit === 'gr' || unit === 'gramo' || unit === 'gramos') return q / p;
+  if (unit === 'l' || unit === 'litro' || unit === 'litros') return (q * 1000) / p;
+  if (unit === 'ml' || unit === 'cc') return q / p;
+  return q;
+}
+
+function resolveCatalogEntryFromStructuredItem(item = {}, catalogRows = []) {
+  const numericId = Number(item?.catalogId);
+  if (Number.isFinite(numericId) && numericId > 0) {
+    const byId = catalogRows.find((row) => Number(row?.id) === numericId);
+    if (byId) return byId;
+  }
+
+  const hint = String(item?.foodName || '').trim();
+  if (!hint) return null;
+
+  const candidates = mergeCatalogRows(
+    findFoodCatalogCandidates(hint, { limit: 60 }),
+    catalogRows
+  );
+  let best = null;
+  let bestScore = 0;
+  for (const candidate of candidates) {
+    const score = scoreCatalogCandidate(candidate, hint, item?.brand || '');
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  if (!best || bestScore < 20) return null;
+  return best;
+}
+
+function resolveTemporalFromStructured({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  temporal = {},
+} = {}) {
+  const baseline = resolveTemporalContext({
+    rawMessage,
+    userTimeZone,
+  });
+  const localDate = isValidIsoDate(temporal?.localDate)
+    ? String(temporal.localDate).trim()
+    : baseline.localDate;
+  const localTime = isValidHourMinute(temporal?.localTime)
+    ? String(temporal.localTime).trim()
+    : baseline.localTime;
+
+  const explicitTemporal = resolveTemporalContext({
+    rawMessage: `${localDate} ${localTime}`,
+    userTimeZone,
+  });
+  return {
+    ...explicitTemporal,
+    localDate,
+    localTime,
+    timeZone: explicitTemporal.timeZone || baseline.timeZone,
+  };
+}
+
+function buildParsedIntakeFromStructured({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  structured = {},
+  catalogRows = [],
+} = {}) {
+  const temporal = resolveTemporalFromStructured({
+    rawMessage,
+    userTimeZone,
+    temporal: structured.temporal || {},
+  });
+  const normalizedItems = Array.isArray(structured?.items) ? structured.items : [];
+  if (!normalizedItems.length) {
+    return {
+      ok: false,
+      error: 'missing_intake_items',
+      temporal,
+      items: [],
+      unresolvedItems: [],
+    };
+  }
+
+  const items = [];
+  const unresolvedItems = [];
+  for (const structuredItem of normalizedItems) {
+    const entry = resolveCatalogEntryFromStructuredItem(structuredItem, catalogRows);
+    if (!entry) {
+      unresolvedItems.push(
+        String(structuredItem?.foodName || structuredItem?.catalogId || 'item').trim() || 'item'
+      );
+      continue;
+    }
+
+    const quantityValue =
+      toPositiveFiniteOrNull(structuredItem?.quantityValue) ??
+      toPositiveFiniteOrNull(structuredItem?.quantity) ??
+      1;
+    const quantityUnit = String(structuredItem?.quantityUnit || 'porcion').trim() || 'porcion';
+    const factor = computeQuantityFactor(quantityValue, quantityUnit, entry.portionG);
+
+    items.push({
+      foodItem: entry.productName,
+      quantityValue,
+      quantityUnit,
+      caloriesKcal: roundMacro((Number(entry.caloriesKcal) || 0) * factor),
+      proteinG: roundMacro((Number(entry.proteinG) || 0) * factor),
+      carbsG: roundMacro((Number(entry.carbsG) || 0) * factor),
+      fatG: roundMacro((Number(entry.fatG) || 0) * factor),
+      confidence: 'media',
+      source: entry.source || 'base_estandar',
+      brandOrNotes: entry.brand || null,
+    });
+  }
+
+  if (!items.length) {
+    return {
+      ok: false,
+      error: 'no_resolved_items',
+      temporal,
+      items,
+      unresolvedItems,
+    };
+  }
+  if (unresolvedItems.length) {
+    return {
+      ok: false,
+      error: 'partial_resolution',
+      temporal,
+      items,
+      unresolvedItems,
+    };
+  }
+  return {
+    ok: true,
+    temporal,
+    items,
+    unresolvedItems: [],
+  };
+}
+
+async function parseStructuredIntakeWithModel({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  catalogRows = [],
+} = {}) {
+  const instructions = [
+    'Sos un parser de ingestas de nutricion.',
+    'Tu salida debe ser JSON puro (sin markdown) usando este schema:',
+    '{',
+    '  "action":"log_intake|ask_label_photo|ask_clarification|reject",',
+    '  "temporal":{"local_date":"YYYY-MM-DD|null","local_time":"HH:MM|null"},',
+    '  "items":[{"catalog_id":number|null,"food_name":"string","brand":"string","quantity_value":number|null,"quantity_unit":"string"}],',
+    '  "clarification_question":"string",',
+    '  "should_request_label_photo":true|false',
+    '}',
+    'Reglas:',
+    '- Si es una ingesta registrable: action=log_intake y al menos 1 item.',
+    '- Usa catalog_id cuando encuentres producto en el catalogo recibido.',
+    '- No inventes catalog_id; si no existe, deja null y completa food_name.',
+    '- Si hay temporalidad explicita, mapea local_date/local_time; si no, usa null.',
+    '- Si falta dato critico, action=ask_clarification con una sola pregunta concreta.',
+    '- Si detectas producto de paquete ambiguo para macros exactos, should_request_label_photo=true.',
+    '- Si el mensaje no es ingesta, action=reject.',
+  ].join('\n');
+
+  const inputText = [
+    `Timezone usuario: ${userTimeZone}`,
+    '',
+    'Mensaje usuario:',
+    rawMessage,
+    '',
+    'Catalogo nutricional (id y macros por porcion):',
+    formatCatalogRowsForStructuredParser(catalogRows),
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [{ type: 'input_text', text: inputText }],
+      },
+    ],
+  });
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  const rawItems = Array.isArray(json.items) ? json.items : [];
+
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || '').trim() || 'reject',
+    clarificationQuestion: String(json.clarification_question || '').trim(),
+    shouldRequestLabelPhoto: Boolean(json.should_request_label_photo),
+    temporal: {
+      localDate: String(json?.temporal?.local_date || '').trim(),
+      localTime: String(json?.temporal?.local_time || '').trim(),
+    },
+    items: rawItems
+      .map((item) => ({
+        catalogId: Number(item?.catalog_id),
+        foodName: String(item?.food_name || '').trim(),
+        brand: String(item?.brand || '').trim(),
+        quantityValue: Number(item?.quantity_value),
+        quantityUnit: String(item?.quantity_unit || '').trim(),
+      }))
+      .filter((item) => item.foodName || Number.isFinite(item.catalogId)),
   };
 }
 
@@ -1135,10 +1462,57 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           rawMessage: cleanMessage,
           userTimeZone,
         });
+        const lexicalParsed = parsed;
 
         const catalogCandidates = cleanMessage
-          ? findFoodCatalogCandidates(cleanMessage, { limit: 40 })
-          : getFoodCatalogPreview({ limit: 30 });
+          ? findFoodCatalogCandidates(cleanMessage, { limit: 60 })
+          : [];
+        const catalogFallbackRows = listFoodCatalogEntries().slice(0, 160);
+        const catalogRowsForParsing = mergeCatalogRows(catalogCandidates, catalogFallbackRows);
+        const catalogRowsForNormalization = catalogRowsForParsing.length
+          ? catalogRowsForParsing
+          : getFoodCatalogPreview({ limit: 60 });
+
+        let modelStructured = null;
+        if (cleanMessage) {
+          try {
+            modelStructured = await parseStructuredIntakeWithModel({
+              openai,
+              modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage,
+              userTimeZone,
+              catalogRows: catalogRowsForParsing,
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, modelStructured.usage);
+            if (modelStructured.usage) {
+              addNutritionUsageRecord(userId, {
+                guidedAction: 'log_intake_structured_parser',
+                model: modelStructured.model,
+                inputTokens: modelStructured.usage.inputTokens,
+                outputTokens: modelStructured.usage.outputTokens,
+                totalTokens: modelStructured.usage.totalTokens,
+                reasoningTokens: modelStructured.usage.reasoningTokens,
+                cachedTokens: modelStructured.usage.cachedTokens,
+                rawUsage: modelStructured.usage.rawUsage,
+              });
+            }
+          } catch (structuredError) {
+            console.error('[nutrition-runtime] structured intake parser failed', structuredError);
+          }
+        }
+
+        if (modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
+          const parsedFromStructured = buildParsedIntakeFromStructured({
+            rawMessage: cleanMessage,
+            userTimeZone,
+            structured: modelStructured,
+            catalogRows: catalogRowsForParsing,
+          });
+          if (parsedFromStructured.ok || !parsed.ok) {
+            parsed = parsedFromStructured;
+          }
+        }
+
         let modelNormalization = null;
         if (cleanMessage) {
           try {
@@ -1147,7 +1521,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               modelCandidates: smartModelCandidates,
               rawMessage: cleanMessage,
               userTimeZone,
-              catalogCandidates,
+              catalogCandidates: catalogRowsForNormalization,
             });
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, modelNormalization.usage);
             if (modelNormalization.usage) {
@@ -1167,7 +1541,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           }
         }
 
-        if (modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
+        if (!parsed.ok && modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
           const parsedFromModel = parseIntakePayload({
             rawMessage: modelNormalization.normalizedText,
             userTimeZone,
@@ -1178,6 +1552,19 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         }
 
         if (!parsed.ok) {
+          if (
+            modelStructured?.action === 'ask_label_photo' ||
+            (modelStructured?.shouldRequestLabelPhoto && !lexicalParsed.ok)
+          ) {
+            return [
+              'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
+              'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
+              'Con eso lo agrego a INFO_NUTRICIONAL y te queda para siempre.',
+            ].join('\n');
+          }
+          if (modelStructured?.action === 'ask_clarification' && modelStructured.clarificationQuestion) {
+            return modelStructured.clarificationQuestion;
+          }
           if (modelNormalization?.action === 'ask_label_photo') {
             return [
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
@@ -1242,7 +1629,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
           `🎯 Estado: ${status}`,
-          modelNormalization?.shouldRequestLabelPhoto
+          modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto
             ? '📦 Si es un producto de paquete, mandame foto de la etiqueta nutricional y lo agrego a INFO_NUTRICIONAL.'
             : null,
           formatIdempotencyNotice(intakeWrite.idempotencyStatus),

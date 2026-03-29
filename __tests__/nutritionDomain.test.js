@@ -61,6 +61,32 @@ export async function runNutritionDomainTests() {
   assert.equal(brandedPhrase.ok, true);
   assert.equal(brandedPhrase.items.length >= 1, true);
 
+  const brandedWithPlus = `yogur ser pro+ test ${Date.now()}`;
+  upsertFoodCatalogEntry({
+    productName: brandedWithPlus,
+    brand: 'Ser',
+    portionG: 170,
+    caloriesKcal: 120,
+    proteinG: 18,
+    carbsG: 8,
+    fatG: 2,
+    source: 'manual',
+  });
+  const plusTokenMessage = parseIntakePayload({
+    rawMessage: `1 ${brandedWithPlus} a las 16hs`,
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(plusTokenMessage.ok, true);
+  assert.equal(plusTokenMessage.temporal.localTime, '16:00');
+  assert.equal(plusTokenMessage.items.length >= 1, true);
+
+  const twoItemsWithPlusSeparator = parseIntakePayload({
+    rawMessage: '13:30 100g arroz cocido + 100g pechuga de pollo cocida',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(twoItemsWithPlusSeparator.ok, true);
+  assert.equal(twoItemsWithPlusSeparator.items.length, 2);
+
   const parsedRelative = parseIntakePayload({
     rawMessage: 'ayer 20:15 100g pechuga de pollo cocida',
     userTimeZone: 'America/Argentina/Buenos_Aires',

@@ -183,6 +183,22 @@ function detectTimeHint(message = '', fallbackTime = '') {
       matchedToken: hhmm[0],
     };
   }
+  const hsWithPrefix = text.match(/\b(?:a\s+las?\s*)([01]?\d|2[0-3])\s*(?:hs?|h)\b/i);
+  if (hsWithPrefix) {
+    const hour = Number(hsWithPrefix[1]);
+    return {
+      localTime: `${hour.toString().padStart(2, '0')}:00`,
+      matchedToken: hsWithPrefix[0],
+    };
+  }
+  const hsOnly = text.match(/\b([01]?\d|2[0-3])\s*(?:hs|h)\b/i);
+  if (hsOnly) {
+    const hour = Number(hsOnly[1]);
+    return {
+      localTime: `${hour.toString().padStart(2, '0')}:00`,
+      matchedToken: hsOnly[0],
+    };
+  }
   const hOnly = text.match(/\b([01]?\d|2[0-3])\s*h\b/i);
   if (hOnly) {
     const hour = Number(hOnly[1]);
@@ -209,8 +225,9 @@ function stripTemporalTokens(message = '', tokens = []) {
 function splitIntakeCandidates(cleanText = '') {
   const raw = String(cleanText || '').trim();
   if (!raw) return [];
-  return raw
-    .split(/\n|,|;|\+/g)
+  const canonical = raw.replace(/\s+\+\s+/g, '\n');
+  return canonical
+    .split(/\n|,|;/g)
     .map((part) => part.trim())
     .filter(Boolean);
 }
