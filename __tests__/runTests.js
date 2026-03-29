@@ -10,6 +10,9 @@ import { runOddsApiToolTests } from './oddsApiTool.test.js';
 import { runBetScoringEngineTests } from './betScoringEngine.test.js';
 import { runSqliteStoreCompositeTests } from './sqliteStoreComposite.test.js';
 import { runTelegramBotTests } from './telegramBot.test.js';
+import { runManifestTests } from './manifest.test.js';
+import { runPolicyGuardTests } from './policyGuard.test.js';
+import { runBillingStoreTests } from './billingStore.test.js';
 
 async function main() {
   await runRouterChainTests();
@@ -24,6 +27,9 @@ async function main() {
   await runBettingWizardTests();
   await runTelegramBotTests();
   await runMessageFormatterTests();
+  await runManifestTests();
+  await runPolicyGuardTests();
+  await runBillingStoreTests();
   console.log('All test suites passed.');
 }
 

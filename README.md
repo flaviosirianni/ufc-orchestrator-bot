@@ -2,6 +2,78 @@
 
 UFC Orchestrator Bot is a Telegram automation system that combines OpenAI tool-calling, Google Sheets data, and web signals to streamline UFC betting research. The assistant preserves chat context per user so follow-up questions like "pelea 1" stay coherent.
 
+## Bot Factory (Core + Bots)
+
+Este repo ahora soporta un modelo **multi-bot** con separacion de plataforma y dominio:
+
+- `src/platform/*`: runtime reusable (launcher, policy packs, billing client/bridge, health runtime).
+- `src/services/billing/*`: `billing-service` compartido (wallet global + transacciones + webhook MP).
+- `src/bots/<bot_id>/*`: cada bot con su propio `bot.manifest.json`, prompt y bootstrap.
+- `src/bots/ufc`: UFC migrado al contrato de Bot Factory (bot v1).
+- `src/bots/nutrition` y `src/bots/medical_reader`: bots scaffolded de ejemplo.
+- Los bots scaffolded nacen con menu guiado minimo (sin ledger) y policy pack activo.
+
+### Contrato de Bot (`bot.manifest.json`)
+
+Campos estandar:
+
+- `bot_id` (string unico).
+- `display_name`.
+- `telegram_token_env`.
+- `interaction_mode` (`guided_strict|hybrid`).
+- `domain_pack` (prompt/tools/menu).
+- `credit_policy` (costos por tipo de uso).
+- `risk_policy` (pack de guardrails transversal).
+- `storage.db_path` (SQLite dominio por bot).
+
+### Startup en local
+
+Bot runtime (default `BOT_ID=ufc`):
+
+```bash
+npm run start:bot
+```
+
+Billing compartido:
+
+```bash
+npm run start:billing
+```
+
+Elegir bot:
+
+```bash
+BOT_ID=nutrition npm run start:bot
+BOT_ID=medical_reader npm run start:bot
+```
+
+### Scaffold de nuevos bots
+
+Generador:
+
+```bash
+npm run scaffold:bot -- --id <bot_id> --template expert_advisor
+npm run scaffold:bot -- --id <bot_id> --template document_reader
+```
+
+Salida:
+
+- `src/bots/<bot_id>/bot.manifest.json`
+- `src/bots/<bot_id>/index.js`
+- `src/bots/<bot_id>/prompt.md`
+- `.env.<bot_id>.example`
+
+### Operacion OCI
+
+Plantillas incluidas:
+
+- `ops/systemd/billing-service.service`
+- `ops/systemd/bot-factory@.service`
+- `ops/nginx/bot-factory-subdomains.conf`
+- `ops/nginx/bot-factory-paths.conf`
+- `ops/README.md` (runbook rapido)
+- `BOT_FACTORY.md` (blueprint de contratos + fases)
+
 ## Architecture Overview
 
 ```
@@ -21,12 +93,25 @@ User → Telegram Bot → Router (intent + context) → Betting Wizard Agent →
 
 ```
 /src
+  /platform
+    launcher.js          # Entrypoint multi-bot por BOT_ID
+    manifest.js          # Validacion del contrato bot.manifest.json
+    /billing             # Cliente y bridge de billing compartido
+    /policy              # Guardrails transversales por dominio
+    /runtime             # Health/topup runtime reusable
+  /services
+    /billing             # Billing service (wallet global + MP webhook)
+  /bots
+    /ufc                 # Bot UFC migrado al contrato factory
+    /nutrition           # Bot scaffolded (template expert_advisor)
+    /medical_reader      # Bot scaffolded (template document_reader)
+    /templates           # Templates para scaffold de nuevos bots
   /core
-    index.js             # Entry point that wires everything together
+    index.js             # Shim de compatibilidad que delega a platform/launcher
     routerChain.js       # Message intent detection and orchestration
     conversationStore.js # Per-chat memory and fight reference resolver
     telegramBot.js       # Telegram bot configuration and polling loop
-    sqliteStore.js       # SQLite persistence (ledger, credits, event intel)
+    sqliteStore.js       # SQLite domain persistence (ledger/event intel/local fallback credits)
     eventIntel.js        # Next-event discovery + fighter news monitor
     env.js               # Tiny .env loader (no third-party dependency)
   /agents
@@ -58,10 +143,23 @@ README.md
 Create a `.env` file based on `.env.example`:
 
 ```
+BOT_ID=ufc
+INTERACTION_MODE=guided_strict
+BOT_POLICY_PACK=general_safe_advice
+BOT_ENV_FILE=
 OPENAI_API_KEY=sk-...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_INTERACTION_MODE=guided_strict
 GUIDED_QUOTES_TEXT_FALLBACK=true
+NUTRITION_TELEGRAM_BOT_TOKEN=
+MEDICAL_READER_TELEGRAM_BOT_TOKEN=
+BILLING_BASE_URL=
+BILLING_API_TOKEN=
+BILLING_TIMEOUT_MS=8000
+BILLING_PORT=3200
+BILLING_DB_PATH=/home/ubuntu/bot-data/billing/billing.db
+BILLING_PUBLIC_URL=
+BILLING_EVENT_WEBHOOK_URLS=
 SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
@@ -163,10 +261,12 @@ The lightweight loader in `src/core/env.js` populates `process.env` without rely
 
 ```bash
 npm install
-npm run start
+npm run start:billing
+BOT_ID=ufc npm run start:bot
 ```
 
-The `start` script launches the Telegram bot with polling enabled. Keep the process running and send messages to your bot from Telegram to interact with the orchestrator.
+`start:billing` levanta la billetera global compartida. `start:bot` levanta una instancia de bot por `BOT_ID`.
+Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 
 ### Local Fight History Cache
 

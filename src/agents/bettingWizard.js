@@ -6536,7 +6536,7 @@ export function createBettingWizard({
     }
 
     if (wantsCredits && userId && userStore?.getCreditState) {
-      const creditState = userStore.getCreditState(userId, CREDIT_FREE_WEEKLY) || {
+      const creditState = (await userStore.getCreditState(userId, CREDIT_FREE_WEEKLY)) || {
         availableCredits: 0,
         freeCredits: 0,
         paidCredits: 0,
@@ -6546,7 +6546,7 @@ export function createBettingWizard({
       const dayIso = getUtcDayIso();
       const { weekStartIso, weekEndIso } = getWeekBoundsUtc();
       const usageCounters = userStore.getUsageCounters
-        ? userStore.getUsageCounters({
+        ? await userStore.getUsageCounters({
             userId,
             dayIso,
             weekStartIso,
@@ -6555,7 +6555,7 @@ export function createBettingWizard({
         : { imagesToday: 0, audioSecondsWeek: 0 };
 
       const recentTx = userStore.listCreditTransactions
-        ? userStore.listCreditTransactions(userId, { limit: 6 })
+        ? await userStore.listCreditTransactions(userId, { limit: 6 })
         : [];
 
       const topupUrl = resolveTopupUrl(userId);
@@ -8376,11 +8376,11 @@ export function createBettingWizard({
       let costBreakdown = null;
 
       if (CREDIT_ENFORCE && userId && userStore?.getCreditState) {
-        creditState = userStore.getCreditState(userId, CREDIT_FREE_WEEKLY);
+        creditState = await userStore.getCreditState(userId, CREDIT_FREE_WEEKLY);
         const dayIso = getUtcDayIso();
         const { weekStartIso, weekEndIso } = getWeekBoundsUtc();
         const usageCounters = userStore.getUsageCounters
-          ? userStore.getUsageCounters({
+          ? await userStore.getUsageCounters({
               userId,
               dayIso,
               weekStartIso,
@@ -8642,7 +8642,7 @@ export function createBettingWizard({
 
       if (CREDIT_ENFORCE && userId && userStore?.spendCredits && estimatedCost > 0) {
         try {
-          userStore.spendCredits(userId, estimatedCost, {
+          await userStore.spendCredits(userId, estimatedCost, {
             reason: 'analysis',
             metadata: {
               model: modelToUse || MODEL,

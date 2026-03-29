@@ -343,6 +343,30 @@ export async function runTelegramBotTests() {
     assert.match(out.text, /modo guiado - cerrar apuesta/i);
   });
 
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'menu:ledger',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /no esta disponible/i);
+    assert.equal(router.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }

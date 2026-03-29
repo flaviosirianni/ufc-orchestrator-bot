@@ -3,10 +3,15 @@
   "version": "1.0.0",
   "description": "Telegram-based UFC betting orchestrator using OpenAI tool-calling, web intel, and Google Sheets",
   "type": "module",
-  "main": "src/core/index.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node src/core/index.js",
-    "dev": "NODE_OPTIONS=--enable-source-maps node src/core/index.js",
+    "start": "npm run start:bot",
+    "start:bot": "node src/platform/launcher.js",
+    "start:ufc": "BOT_ID=ufc node src/platform/launcher.js",
+    "start:billing": "node src/services/billing/index.js",
+    "dev": "NODE_OPTIONS=--enable-source-maps node src/platform/launcher.js",
+    "dev:billing": "NODE_OPTIONS=--enable-source-maps node src/services/billing/index.js",
+    "scaffold:bot": "node src/scripts/scaffoldBot.js",
     "test": "node __tests__/runTests.js",
     "history:sync": "node src/scripts/runHistoryScraper.js",
     "credits:add": "node src/scripts/addCredits.js"

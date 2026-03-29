@@ -1,0 +1,27 @@
+{
+  "bot_id": "ufc",
+  "display_name": "UFC Betting Wizard",
+  "telegram_token_env": "TELEGRAM_BOT_TOKEN",
+  "interaction_mode": "guided_strict",
+  "domain_pack": {
+    "prompt_file": "Knowledge/ufc_bets_playbook.md",
+    "enabled_tools": [
+      "sheet_ops",
+      "fights_scalper",
+      "web_intel",
+      "odds_api"
+    ],
+    "guided_menu": "ufc_default"
+  },
+  "credit_policy": {
+    "costs": {
+      "decision": 1,
+      "image_overage": 0.5,
+      "audio_minute_overage": 0.2
+    }
+  },
+  "risk_policy": "general_safe_advice",
+  "storage": {
+    "db_path": "/home/ubuntu/bot-data/ufc/bot.db"
+  }
+}

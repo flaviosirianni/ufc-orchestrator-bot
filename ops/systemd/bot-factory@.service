@@ -1,0 +1,23 @@
+[Unit]
+Description=Bot Factory Runtime (%i)
+After=network-online.target billing-service.service
+Wants=network-online.target
+Requires=billing-service.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/apps/bot-factory
+EnvironmentFile=/etc/bot-factory/%i.env
+Environment=NODE_ENV=production
+Environment=BOT_ID=%i
+ExecStart=/usr/bin/npm run start:bot
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

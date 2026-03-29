@@ -1,0 +1,22 @@
+{
+  "bot_id": "__BOT_ID__",
+  "display_name": "__DISPLAY_NAME__",
+  "telegram_token_env": "__TELEGRAM_TOKEN_ENV__",
+  "interaction_mode": "guided_strict",
+  "domain_pack": {
+    "prompt_file": "src/bots/__BOT_ID__/prompt.md",
+    "enabled_tools": [],
+    "guided_menu": "default"
+  },
+  "credit_policy": {
+    "costs": {
+      "analysis": 1.0,
+      "image": 0.5,
+      "audio_minute": 0.2
+    }
+  },
+  "risk_policy": "nutrition_guidance_non_clinical",
+  "storage": {
+    "db_path": "/home/ubuntu/bot-data/__BOT_ID__/bot.db"
+  }
+}

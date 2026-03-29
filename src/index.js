@@ -1,5 +1,5 @@
-import '../core/env.js';
-import { launchBotRuntime } from '../platform/launcher.js';
+import './core/env.js';
+import { launchBotRuntime } from './platform/launcher.js';
 
 launchBotRuntime().catch((error) => {
   console.error(error);

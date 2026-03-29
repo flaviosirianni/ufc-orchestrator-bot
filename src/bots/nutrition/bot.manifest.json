@@ -1,0 +1,22 @@
+{
+  "bot_id": "nutrition",
+  "display_name": "Nutrition",
+  "telegram_token_env": "NUTRITION_TELEGRAM_BOT_TOKEN",
+  "interaction_mode": "guided_strict",
+  "domain_pack": {
+    "prompt_file": "src/bots/nutrition/prompt.md",
+    "enabled_tools": [],
+    "guided_menu": "default"
+  },
+  "credit_policy": {
+    "costs": {
+      "analysis": 1.0,
+      "image": 0.5,
+      "audio_minute": 0.2
+    }
+  },
+  "risk_policy": "nutrition_guidance_non_clinical",
+  "storage": {
+    "db_path": "/home/ubuntu/bot-data/nutrition/bot.db"
+  }
+}

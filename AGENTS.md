@@ -29,11 +29,14 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
 ### Identidad del servidor (fuente de verdad)
 
 - SSH alias esperado: `ufc-oci` (definido en `~/.ssh/config`).
-- Servicio `systemd`: `ufc-orchestrator`.
+- Servicios `systemd` esperados (modelo Bot Factory):
+  - `billing-service`
+  - `bot-factory@<bot_id>` (ej: `bot-factory@ufc`)
 - `WorkingDirectory` real del servicio: leer siempre con:
-  - `ssh ufc-oci 'sudo cat /etc/systemd/system/ufc-orchestrator.service'`
-- Actualmente el `WorkingDirectory` productivo es:
-  - `/home/ubuntu/apps/ufc-orchestrator-bot`
+  - `ssh ufc-oci 'sudo cat /etc/systemd/system/bot-factory@.service'`
+  - `ssh ufc-oci 'sudo cat /etc/systemd/system/billing-service.service'`
+- `WorkingDirectory` objetivo:
+  - `/home/ubuntu/apps/bot-factory`
 
 ### Flujo estandar de deploy (si el usuario no indica otra cosa)
 
@@ -47,11 +50,12 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
    - `git commit -m "<mensaje claro>"`
    - `git push origin main`
 4. Refrescar servidor:
-   - `ssh ufc-oci 'cd /home/ubuntu/apps/ufc-orchestrator-bot && git pull --ff-only && sudo systemctl restart ufc-orchestrator && sudo systemctl status ufc-orchestrator --no-pager -l | sed -n "1,25p"'`
+   - `ssh ufc-oci 'cd /home/ubuntu/apps/bot-factory && git pull --ff-only && sudo systemctl restart billing-service && sudo systemctl restart bot-factory@ufc && sudo systemctl status bot-factory@ufc --no-pager -l | sed -n "1,25p"'`
 5. Verificacion post-restart:
    - Logs recientes:
-     - `ssh ufc-oci 'sudo journalctl -u ufc-orchestrator -n 40 --no-pager'`
-   - Confirmar que arranco sin crash y que sigue `active (running)`.
+     - `ssh ufc-oci 'sudo journalctl -u billing-service -n 40 --no-pager'`
+     - `ssh ufc-oci 'sudo journalctl -u bot-factory@ufc -n 40 --no-pager'`
+   - Confirmar que ambos servicios siguen `active (running)`.
 
 ### Variables de modo de interaccion (Telegram)
 

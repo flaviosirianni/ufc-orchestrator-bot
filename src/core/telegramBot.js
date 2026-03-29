@@ -51,6 +51,12 @@ const GUIDED_MAIN_MENU_ROWS = [
   ],
 ];
 
+const GUIDED_MAIN_MENU_ROWS_MINIMAL = [
+  [{ text: 'Analizar', callback_data: 'qa:analyze_quotes' }],
+  [{ text: 'Creditos', callback_data: 'qa:view_credits' }],
+  [{ text: 'Ayuda', callback_data: 'qa:help' }],
+];
+
 const GUIDED_LEDGER_MENU_ROWS = [
   [
     { text: 'Registrar', callback_data: 'qa:record_bet' },
@@ -278,6 +284,13 @@ const QUICK_ACTION_HINTS = {
     '- `Ledger` para registrar/cerrar y consultar apuestas.',
     '- `Creditos` para saldo y recarga.',
   ].join('\n'),
+  guided_welcome_minimal: [
+    '📌 Menu principal (modo guiado)',
+    'Elegí una accion:',
+    '- `Analizar` para la tarea principal de este bot.',
+    '- `Creditos` para saldo y recarga.',
+    '- `Ayuda` para ver formato recomendado de input.',
+  ].join('\n'),
   guided_reencauce: [
     '📌 Modo guiado activo (quotes = cuotas/odds de tu bookie).',
     'Para una recomendacion accionable, mandame screenshot completo de la pagina de apuestas de esa pelea.',
@@ -310,6 +323,14 @@ const GUIDED_ALLOWED_CALLBACKS = new Set([
   'qa:topup_credits',
 ]);
 
+const GUIDED_ALLOWED_CALLBACKS_MINIMAL = new Set([
+  'menu:main',
+  'qa:analyze_quotes',
+  'qa:help',
+  'qa:view_credits',
+  'qa:topup_credits',
+]);
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -332,9 +353,10 @@ export function normalizeGuidedAction(action = '') {
   return GUIDED_INPUT_ACTIONS.has(normalized) ? normalized : 'analyze_quotes';
 }
 
-export function isGuidedCallbackAllowed(callbackData = '') {
+export function isGuidedCallbackAllowed(callbackData = '', { ledgerEnabled = true } = {}) {
   const value = String(callbackData || '').trim();
-  if (GUIDED_ALLOWED_CALLBACKS.has(value)) {
+  const allowed = ledgerEnabled ? GUIDED_ALLOWED_CALLBACKS : GUIDED_ALLOWED_CALLBACKS_MINIMAL;
+  if (allowed.has(value)) {
     return true;
   }
   return /^qa:topup_pack:\d+$/i.test(value);
@@ -731,6 +753,7 @@ export function startTelegramBot(router, options = {}) {
   const interactionMode = normalizeInteractionMode(
     options.interactionMode || TELEGRAM_INTERACTION_MODE
   );
+  const guidedLedgerEnabled = options.guidedLedgerEnabled !== false;
   const guidedQuotesTextFallback =
     typeof options.guidedQuotesTextFallback === 'boolean'
       ? options.guidedQuotesTextFallback
@@ -760,26 +783,41 @@ export function startTelegramBot(router, options = {}) {
   function getGuidedAction(chatId) {
     const key = String(chatId || '').trim();
     if (!key) return 'analyze_quotes';
-    return normalizeGuidedAction(guidedActionByChat.get(key) || 'analyze_quotes');
+    const current = normalizeGuidedAction(guidedActionByChat.get(key) || 'analyze_quotes');
+    if (
+      !guidedLedgerEnabled &&
+      (current === 'record_bet' || current === 'settle_bet')
+    ) {
+      return 'analyze_quotes';
+    }
+    return current;
   }
 
   function setGuidedAction(chatId, action = 'analyze_quotes') {
     const key = String(chatId || '').trim();
     if (!key) return 'analyze_quotes';
-    const normalized = normalizeGuidedAction(action);
+    let normalized = normalizeGuidedAction(action);
+    if (
+      !guidedLedgerEnabled &&
+      (normalized === 'record_bet' || normalized === 'settle_bet')
+    ) {
+      normalized = 'analyze_quotes';
+    }
     guidedActionByChat.set(key, normalized);
     return normalized;
   }
 
   function buildQuickActionsMarkup(scope = 'main') {
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      if (scope === 'ledger') {
+      if (scope === 'ledger' && guidedLedgerEnabled) {
         return {
           inline_keyboard: GUIDED_LEDGER_MENU_ROWS,
         };
       }
       return {
-        inline_keyboard: GUIDED_MAIN_MENU_ROWS,
+        inline_keyboard: guidedLedgerEnabled
+          ? GUIDED_MAIN_MENU_ROWS
+          : GUIDED_MAIN_MENU_ROWS_MINIMAL,
       };
     }
 
@@ -866,12 +904,18 @@ export function startTelegramBot(router, options = {}) {
 
   async function sendMenu(chatId, scope = 'main') {
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      if (scope === 'ledger') {
+      if (scope === 'ledger' && guidedLedgerEnabled) {
         return sendBotMessage(chatId, '🧾 Menu Ledger (modo guiado)', {
           menuScope: 'ledger',
         });
       }
-      return sendBotMessage(chatId, QUICK_ACTION_HINTS.guided_welcome, { menuScope: 'main' });
+      return sendBotMessage(
+        chatId,
+        guidedLedgerEnabled
+          ? QUICK_ACTION_HINTS.guided_welcome
+          : QUICK_ACTION_HINTS.guided_welcome_minimal,
+        { menuScope: 'main' }
+      );
     }
 
     if (scope === 'bets') {
@@ -1189,7 +1233,7 @@ export function startTelegramBot(router, options = {}) {
     }
 
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      if (!isGuidedCallbackAllowed(data)) {
+      if (!isGuidedCallbackAllowed(data, { ledgerEnabled: guidedLedgerEnabled })) {
         await sendBotMessage(chatId, 'Esa accion no esta disponible en modo guiado.', {
           menuScope: 'main',
         });
@@ -1205,6 +1249,10 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'menu:ledger') {
+        if (!guidedLedgerEnabled) {
+          await sendMenu(chatId, 'main');
+          return;
+        }
         setGuidedAction(chatId, 'record_bet');
         await sendMenu(chatId, 'ledger');
         return;
@@ -1217,18 +1265,36 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'qa:record_bet') {
+        if (!guidedLedgerEnabled) {
+          await sendBotMessage(chatId, 'Este bot no tiene ledger habilitado en modo guiado.', {
+            menuScope: 'main',
+          });
+          return;
+        }
         setGuidedAction(chatId, 'record_bet');
         await sendBotMessage(chatId, QUICK_ACTION_HINTS.record_bet, { menuScope: 'ledger' });
         return;
       }
 
       if (data === 'qa:settle_bet') {
+        if (!guidedLedgerEnabled) {
+          await sendBotMessage(chatId, 'Este bot no tiene ledger habilitado en modo guiado.', {
+            menuScope: 'main',
+          });
+          return;
+        }
         setGuidedAction(chatId, 'settle_bet');
         await sendBotMessage(chatId, QUICK_ACTION_HINTS.settle_bet, { menuScope: 'ledger' });
         return;
       }
 
       if (data === 'qa:list_pending') {
+        if (!guidedLedgerEnabled) {
+          await sendBotMessage(chatId, 'Este bot no tiene ledger habilitado en modo guiado.', {
+            menuScope: 'main',
+          });
+          return;
+        }
         setGuidedAction(chatId, 'settle_bet');
         const routed = await routeSyntheticAction(
           query,
@@ -1242,6 +1308,12 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'qa:list_history') {
+        if (!guidedLedgerEnabled) {
+          await sendBotMessage(chatId, 'Este bot no tiene ledger habilitado en modo guiado.', {
+            menuScope: 'main',
+          });
+          return;
+        }
         const routed = await routeSyntheticAction(
           query,
           'mostrame mi historial de apuestas del ledger',
@@ -1281,10 +1353,12 @@ export function startTelegramBot(router, options = {}) {
             inline_keyboard: [
               ...buildTopupPackButtons(),
               [{ text: '💳 Cargar creditos', callback_data: 'qa:topup_credits' }],
-              [
-                { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-                { text: '🧾 Ledger', callback_data: 'menu:ledger' },
-              ],
+              guidedLedgerEnabled
+                ? [
+                    { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+                    { text: '🧾 Ledger', callback_data: 'menu:ledger' },
+                  ]
+                : [{ text: '📸 Analizar', callback_data: 'qa:analyze_quotes' }],
             ],
           },
         });
