@@ -89,6 +89,74 @@ function readJsonBody(req) {
   });
 }
 
+function escapeHtml(value = '') {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function formatMoneyByCurrency(amount = 0, currencyId = 'ARS') {
+  const value = Number(amount) || 0;
+  const currency = String(currencyId || 'ARS').toUpperCase();
+  try {
+    return new Intl.NumberFormat('es-AR', {
+      style: 'currency',
+      currency,
+      maximumFractionDigits: 0,
+    }).format(value);
+  } catch {
+    return `$${Math.round(value).toLocaleString('es-AR')}`;
+  }
+}
+
+function buildTopupChooserHtml({ userId = '', packs = [], currencyId = 'ARS' } = {}) {
+  const encodedUserId = encodeURIComponent(String(userId || '').trim());
+  const packItems = (Array.isArray(packs) ? packs : [])
+    .map((pack) => {
+      const credits = Number(pack?.credits) || 0;
+      const amount = Number(pack?.amount) || 0;
+      if (!credits || !amount) return '';
+      const href = `/topup/checkout?user_id=${encodedUserId}&credits=${credits}`;
+      return `<li><a href="${escapeHtml(href)}">${credits} creditos - ${escapeHtml(
+        formatMoneyByCurrency(amount, currencyId)
+      )}</a></li>`;
+    })
+    .filter(Boolean)
+    .join('');
+
+  return [
+    '<!doctype html>',
+    '<html lang="es">',
+    '<head>',
+    '<meta charset="utf-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    '<title>Recargar creditos UFC</title>',
+    '<style>',
+    'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111827; }',
+    'main { max-width: 560px; margin: 0 auto; }',
+    'h1 { font-size: 1.4rem; margin-bottom: 0.5rem; }',
+    'p { color: #4b5563; }',
+    'ul { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: 10px; }',
+    'a { display: block; padding: 12px 14px; border: 1px solid #d1d5db; border-radius: 10px; text-decoration: none; color: #111827; font-weight: 600; }',
+    'a:hover { border-color: #2563eb; background: #eff6ff; }',
+    '.muted { margin-top: 1rem; font-size: 0.92rem; color: #6b7280; }',
+    '</style>',
+    '</head>',
+    '<body>',
+    '<main>',
+    '<h1>Elegi un pack de recarga</h1>',
+    '<p>Selecciona cuantos creditos queres cargar. Luego se abre Mercado Pago para completar el pago.</p>',
+    `<ul>${packItems || '<li>No hay packs configurados.</li>'}</ul>`,
+    '<p class="muted">Al confirmar el pago aprobado, los creditos se acreditan automaticamente en tu usuario de Telegram.</p>',
+    '</main>',
+    '</body>',
+    '</html>',
+  ].join('');
+}
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -166,6 +234,23 @@ function createHealthServer(
         '';
       const creditsRequested = url.searchParams.get('credits');
       const format = String(url.searchParams.get('format') || '').toLowerCase();
+      const wantsJson = format === 'json';
+
+      if (!String(creditsRequested || '').trim() && !wantsJson) {
+        if (!String(userId || '').trim()) {
+          sendJson(res, 400, { ok: false, error: 'missing_user_id' });
+          return;
+        }
+        const mpConfig = getMercadoPagoConfig();
+        const chooserHtml = buildTopupChooserHtml({
+          userId,
+          packs: mpConfig?.packs || [],
+          currencyId: mpConfig?.currencyId || 'ARS',
+        });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(chooserHtml);
+        return;
+      }
 
       const preference = await createTopupPreference({
         userId,
@@ -181,7 +266,7 @@ function createHealthServer(
         return;
       }
 
-      if (format === 'json') {
+      if (wantsJson) {
         sendJson(res, 200, {
           ok: true,
           userId,

@@ -183,12 +183,17 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - Default mode is `guided_strict` (`TELEGRAM_INTERACTION_MODE=guided_strict`).
 - In `guided_strict`, the visible menu is minimal:
   - `Analizar cuotas`
+  - `Ledger`
   - `Creditos`
   - `Ayuda`
 - Free-form text is blocked by default and re-routed to the guided flow, except when it looks like structured odds input.
 - Structured text fallback is controlled with `GUIDED_QUOTES_TEXT_FALLBACK=true|false`.
 - In this bot, "quotes" means sportsbook odds/cuotas for a specific fight.
 - For actionable quote analysis, the recommended input is a full screenshot of the betting page for that fight (no crop). Text fallback format: `evento, pelea, mercado, cuota`.
+- In guided ledger:
+  - `Registrar`: screenshot ticket first, text fallback `evento, pelea, pick, cuota, stake`.
+  - `Cerrar`: screenshot resultado first, text fallback `bet_id + WON/LOST/PUSH`.
+  - `Pendientes` and `Historial`: consultas de lectura del ledger.
 - Rollback to previous behavior is immediate by setting `TELEGRAM_INTERACTION_MODE=hybrid` and restarting the process.
 
 ### Web Enrichment Before Analysis
@@ -249,6 +254,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - Variables clave: `CREDIT_FREE_WEEKLY`, `CREDIT_IMAGE_DAILY_FREE`, `CREDIT_AUDIO_WEEKLY_FREE_MINUTES`.
 - Si faltan créditos, responde con un mensaje de recarga (usa `CREDIT_TOPUP_URL`).
 - `CREDIT_TOPUP_URL` acepta placeholders `{user_id}` o `{telegram_user_id}` para generar links dinámicos por usuario.
+- En `Creditos`, el bot muestra equivalencias de packs `ARS -> créditos` usando `MP_TOPUP_PACKS`.
 - Recarga manual (admin):
   ```bash
   npm run credits:add -- --user <telegram_user_id> --credits 20
@@ -265,6 +271,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 
 - Endpoints expuestos por el bot:
   - `GET /topup/checkout?user_id=<telegram_user_id>&credits=<pack>`
+  - `GET /topup/checkout?user_id=<telegram_user_id>` (selector web de pack)
   - `POST /webhooks/mercadopago` (webhook de Mercado Pago)
   - `GET /topup/config` (estado de configuración)
 - Configuración mínima en `.env`:
@@ -272,12 +279,12 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - `MP_TOPUP_PACKS` en formato `creditos:monto` (ej: `10:1000,20:1800`)
   - `APP_PUBLIC_URL` (URL pública donde corre tu bot)
   - `CREDIT_TOPUP_URL` recomendado:
-    - `https://tu-dominio.com/topup/checkout?user_id={user_id}&credits=10`
+    - `https://tu-dominio.com/topup/checkout?user_id={user_id}`
 - Seguridad opcional:
   - `MP_WEBHOOK_TOKEN`: si lo seteás, Mercado Pago debe llamar al webhook con `?token=...`.
   - `MP_NOTIFICATION_URL`: fuerza la URL de notificación enviada en la preferencia. Si no se setea, se usa `APP_PUBLIC_URL/webhooks/mercadopago`.
 - Flujo:
-  - El usuario abre el link de `/topup/checkout`.
+  - El usuario abre el link de `/topup/checkout` (sin `credits`) y elige pack.
   - El backend crea una preferencia en Checkout Pro (`/checkout/preferences`).
   - Mercado Pago notifica a `/webhooks/mercadopago`.
   - El backend consulta `/v1/payments/{id}` y acredita créditos solo si `status=approved`.

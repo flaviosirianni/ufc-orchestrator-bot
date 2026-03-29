@@ -33,6 +33,8 @@ const CREDIT_AUDIO_WEEKLY_FREE_MINUTES = Number(
 );
 const CREDIT_AUDIO_OVERAGE_COST = Number(process.env.CREDIT_AUDIO_OVERAGE_COST ?? '0.2');
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
+const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
+const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
 const STAKE_MIN_AMOUNT_DEFAULT = Number(process.env.STAKE_MIN_AMOUNT_DEFAULT ?? '2000');
 const STAKE_MIN_UNITS_DEFAULT = Number(process.env.STAKE_MIN_UNITS_DEFAULT ?? '2.5');
 const STAKE_EVENT_UTILIZATION_CONSERVADOR = Number(
@@ -337,22 +339,50 @@ const FUNCTION_TOOLS = [
   },
 ];
 
-const GUIDED_STRICT_ALLOWED_TOOLS = new Set([
-  'get_fighter_history',
-  'get_user_profile',
-  'get_user_odds',
-  'store_user_odds',
-  'set_event_card',
+const GUIDED_DEFAULT_ACTION = 'analyze_quotes';
+const GUIDED_ACTIONS = new Set([
+  GUIDED_DEFAULT_ACTION,
+  'record_bet',
+  'settle_bet',
+  'ledger_list_pending',
+  'ledger_list_history',
+  'view_credits',
 ]);
+const GUIDED_STRICT_TOOL_ALLOWLIST_BY_ACTION = Object.freeze({
+  analyze_quotes: new Set([
+    'get_fighter_history',
+    'get_user_profile',
+    'get_user_odds',
+    'store_user_odds',
+    'set_event_card',
+  ]),
+  record_bet: new Set(['get_user_profile', 'record_user_bet', 'list_user_bets']),
+  settle_bet: new Set(['get_user_profile', 'list_user_bets', 'mutate_user_bets']),
+  ledger_list_pending: new Set(['get_user_profile', 'list_user_bets']),
+  ledger_list_history: new Set(['get_user_profile', 'list_user_bets']),
+  view_credits: new Set(['get_user_profile']),
+});
 
 function normalizeInteractionMode(mode = '') {
   const normalized = String(mode || '').trim().toLowerCase();
   return INTERACTION_MODES.has(normalized) ? normalized : 'hybrid';
 }
 
-function resolveAllowedFunctionToolNames(interactionMode = 'guided_strict') {
+function normalizeGuidedAction(action = '') {
+  const normalized = String(action || '').trim().toLowerCase();
+  return GUIDED_ACTIONS.has(normalized) ? normalized : GUIDED_DEFAULT_ACTION;
+}
+
+function resolveAllowedFunctionToolNames(
+  interactionMode = 'guided_strict',
+  guidedAction = GUIDED_DEFAULT_ACTION
+) {
   if (normalizeInteractionMode(interactionMode) === 'guided_strict') {
-    return new Set(GUIDED_STRICT_ALLOWED_TOOLS);
+    const normalizedAction = normalizeGuidedAction(guidedAction);
+    const allowlist =
+      GUIDED_STRICT_TOOL_ALLOWLIST_BY_ACTION[normalizedAction] ||
+      GUIDED_STRICT_TOOL_ALLOWLIST_BY_ACTION[GUIDED_DEFAULT_ACTION];
+    return new Set(allowlist);
   }
   return null;
 }
@@ -2142,19 +2172,116 @@ function getWeekBoundsUtc(date = new Date()) {
   };
 }
 
-function resolveTopupUrl(userId) {
+function toPositiveNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function normalizeBaseUrl(url = '') {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+}
+
+function parseTopupPacks(raw = '') {
+  const map = new Map();
+  const entries = String(raw || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  for (const entry of entries) {
+    const [creditsRaw, amountRaw] = entry.split(':').map((part) => String(part || '').trim());
+    const credits = toPositiveNumber(creditsRaw);
+    const amount = toPositiveNumber(amountRaw);
+    if (!credits || !amount) continue;
+    map.set(credits, amount);
+  }
+  return [...map.entries()]
+    .map(([credits, amount]) => ({ credits, amount }))
+    .sort((a, b) => a.credits - b.credits);
+}
+
+const TOPUP_PACKS_LIST = parseTopupPacks(MP_TOPUP_PACKS);
+
+function stripFixedTopupPack(url = '') {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    parsed.searchParams.delete('credits');
+    parsed.searchParams.delete('pack');
+    return parsed.toString();
+  } catch {
+    return value
+      .replace(/([?&])(credits|pack)=[^&]*(&)?/gi, (_, sep, __, tail) => {
+        if (sep === '?' && tail) return '?';
+        if (sep === '&' && tail) return '&';
+        return '';
+      })
+      .replace(/[?&]$/, '');
+  }
+}
+
+function withQueryParam(rawUrl = '', key = '', value = '') {
+  const base = String(rawUrl || '').trim();
+  if (!base) return '';
+  try {
+    const parsed = new URL(base);
+    parsed.searchParams.set(String(key), String(value));
+    return parsed.toString();
+  } catch {
+    const delimiter = base.includes('?') ? '&' : '?';
+    return `${base}${delimiter}${encodeURIComponent(String(key))}=${encodeURIComponent(
+      String(value)
+    )}`;
+  }
+}
+
+function resolveTopupUrl(userId, { credits = null } = {}) {
+  const safeUserId = encodeURIComponent(String(userId || '').trim());
+  const creditsNumber = toPositiveNumber(credits);
+
+  const appBase = normalizeBaseUrl(APP_PUBLIC_URL);
+  if (appBase) {
+    let url = safeUserId
+      ? `${appBase}/topup/checkout?user_id=${safeUserId}`
+      : `${appBase}/topup/checkout`;
+    if (creditsNumber) {
+      url = withQueryParam(url, 'credits', creditsNumber);
+    }
+    return url;
+  }
+
   if (!CREDIT_TOPUP_URL) {
     return '';
   }
-  const value = String(CREDIT_TOPUP_URL);
+  const value = stripFixedTopupPack(CREDIT_TOPUP_URL);
   const hasPlaceholder =
     value.includes('{user_id}') || value.includes('{telegram_user_id}');
   if (!userId && hasPlaceholder) {
     return '';
   }
-  return value
-    .replaceAll('{user_id}', encodeURIComponent(String(userId || '')))
-    .replaceAll('{telegram_user_id}', encodeURIComponent(String(userId || '')));
+  let resolved = value
+    .replaceAll('{user_id}', safeUserId)
+    .replaceAll('{telegram_user_id}', safeUserId);
+
+  if (resolved === value && safeUserId) {
+    resolved = withQueryParam(resolved, 'user_id', safeUserId);
+  }
+  if (creditsNumber) {
+    resolved = withQueryParam(resolved, 'credits', creditsNumber);
+  }
+  return resolved;
+}
+
+function buildTopupPackLines() {
+  if (!TOPUP_PACKS_LIST.length) return [];
+  return TOPUP_PACKS_LIST.map(
+    (pack) => `- ${pack.credits} creditos = ${formatArsAmount(pack.amount)}`
+  );
 }
 
 function buildPaywallMessage({ availableCredits, neededCredits, userId = '' }) {
@@ -2163,8 +2290,12 @@ function buildPaywallMessage({ availableCredits, neededCredits, userId = '' }) {
   lines.push(`Créditos disponibles: ${availableCredits.toFixed(2)}`);
   lines.push(`Créditos necesarios: ${neededCredits.toFixed(2)}`);
   const topupUrl = resolveTopupUrl(userId);
+  const packLines = buildTopupPackLines();
+  if (packLines.length) {
+    lines.push('', 'Packs disponibles:', ...packLines);
+  }
   if (topupUrl) {
-    lines.push('', `Recargá créditos acá: ${topupUrl}`);
+    lines.push('', `Recargá créditos acá (elegís pack): ${topupUrl}`);
   } else {
     lines.push('', 'Pedime un link de recarga y te lo paso.');
   }
@@ -3963,9 +4094,13 @@ function formatSessionMemory(session = null) {
   return lines.join('\n');
 }
 
-function buildSystemPrompt(knowledgeSnippet = '', { interactionMode = 'hybrid' } = {}) {
+function buildSystemPrompt(
+  knowledgeSnippet = '',
+  { interactionMode = 'hybrid', guidedAction = GUIDED_DEFAULT_ACTION } = {}
+) {
   const today = new Date().toISOString().slice(0, 10);
   const normalizedInteractionMode = normalizeInteractionMode(interactionMode);
+  const normalizedGuidedAction = normalizeGuidedAction(guidedAction);
   const rules = [
     'Sos un analista UFC conversacional en espanol, natural y concreto.',
     `Fecha de referencia actual: ${today}.`,
@@ -4011,11 +4146,29 @@ function buildSystemPrompt(knowledgeSnippet = '', { interactionMode = 'hybrid' }
     normalizedInteractionMode === 'guided_strict'
       ? [
           'Modo activo: guided_strict.',
-          'Objetivo de este turno: analisis de cuotas (screenshot o texto estructurado).',
-          'No ejecutes ni sugieras mutaciones operativas de ledger en este modo.',
-          'Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.',
-          'No redirijas al usuario a chat libre ni a acciones fuera de analisis/creditos/ayuda.',
-        ].join(' ')
+          `GuidedAction del turno: ${normalizedGuidedAction}.`,
+          normalizedGuidedAction === 'analyze_quotes'
+            ? 'Objetivo: analisis de cuotas (screenshot o texto estructurado). Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.'
+            : '',
+          normalizedGuidedAction === 'record_bet'
+            ? 'Objetivo: registrar una apuesta NUEVA al ledger. Pedi/usa screenshot del ticket o texto estructurado (evento, pelea, pick, cuota, stake). No cierres ni archives apuestas en este flujo.'
+            : '',
+          normalizedGuidedAction === 'settle_bet'
+            ? 'Objetivo: cerrar apuestas existentes (WON/LOST/PUSH). Priorizá bet_id; si no hay bet_id, lista candidatas y pedi precision.'
+            : '',
+          normalizedGuidedAction === 'ledger_list_pending'
+            ? 'Objetivo: mostrar apuestas pendientes del ledger con bet_id, sin mutar estado.'
+            : '',
+          normalizedGuidedAction === 'ledger_list_history'
+            ? 'Objetivo: mostrar historial reciente del ledger, sin mutar estado.'
+            : '',
+          normalizedGuidedAction === 'view_credits'
+            ? 'Objetivo: responder solo estado de creditos/consumo/recargas.'
+            : '',
+          'No redirijas al usuario a chat libre ni a acciones fuera de este flujo guiado.',
+        ]
+          .filter(Boolean)
+          .join(' ')
       : 'Modo activo: hybrid.';
 
   const combinedRules = `${rules} ${interactionRules}`.trim();
@@ -5201,12 +5354,16 @@ export function createBettingWizard({
     const interactionMode = normalizeInteractionMode(
       context.interactionMode || context?.metadata?.interactionMode || 'hybrid'
     );
-    const allowedFunctionToolNames = resolveAllowedFunctionToolNames(interactionMode);
-    const guidedAction = String(
+    const guidedActionRaw = String(
       context.guidedAction || context?.metadata?.guidedAction || ''
     )
       .trim()
       .toLowerCase();
+    const guidedAction = normalizeGuidedAction(guidedActionRaw);
+    const allowedFunctionToolNames = resolveAllowedFunctionToolNames(
+      interactionMode,
+      guidedAction
+    );
     const inputType = String(context.inputType || context?.metadata?.inputType || '')
       .trim()
       .toLowerCase();
@@ -5219,6 +5376,12 @@ export function createBettingWizard({
           context.inputItems.some(
             (item) => item?.type === 'input_image' || item?.type === 'input_file'
           )));
+    const isGuidedLedgerTurn =
+      interactionMode === 'guided_strict' &&
+      (guidedAction === 'record_bet' ||
+        guidedAction === 'settle_bet' ||
+        guidedAction === 'ledger_list_pending' ||
+        guidedAction === 'ledger_list_history');
     const resolution =
       context.resolution ||
       conversationStore?.resolveMessage?.(chatId, originalMessage) || {
@@ -5233,7 +5396,7 @@ export function createBettingWizard({
       eventCard: null,
     };
 
-    const wantsLedger = hasLedgerSignals(originalMessage);
+    const wantsLedger = hasLedgerSignals(originalMessage) || isGuidedLedgerTurn;
     const wantsCredits = hasCreditSignals(originalMessage);
     const wantsOdds = hasOddsRequestSignals(originalMessage) || isGuidedAnalyzeTurn;
     const wantsBetDecision = hasBetDecisionSignals(originalMessage) || isGuidedAnalyzeTurn;
@@ -6111,6 +6274,7 @@ export function createBettingWizard({
         : [];
 
       const topupUrl = resolveTopupUrl(userId);
+      const topupPackLines = buildTopupPackLines();
       const tz = temporalContext?.timezone || userProfile?.timezone || DEFAULT_USER_TIMEZONE;
 
       const lines = [
@@ -6143,8 +6307,13 @@ export function createBettingWizard({
         }
       }
 
+      if (topupPackLines.length) {
+        lines.push('', 'Packs de recarga:');
+        lines.push(...topupPackLines);
+      }
+
       if (topupUrl) {
-        lines.push('', `Recarga: ${topupUrl}`);
+        lines.push('', `Recarga (elegis pack): ${topupUrl}`);
       }
 
       return {
@@ -7543,7 +7712,7 @@ export function createBettingWizard({
           interactionMode,
           blocked: true,
           message:
-            'Esa accion no esta habilitada en este modo. Solo puedo analizar cuotas y usar contexto de lectura.',
+            'Esa accion no esta habilitada para este flujo guiado. Elegi la accion correcta desde el menu y reintentá.',
         };
       }
 
@@ -7905,7 +8074,10 @@ export function createBettingWizard({
         : null;
       const sessionMemory = formatSessionMemory(session);
 
-      const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet(), { interactionMode });
+      const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet(), {
+        interactionMode,
+        guidedAction,
+      });
       const mediaItems = Array.isArray(context.inputItems) ? context.inputItems : [];
       const hasMedia = mediaItems.length > 0;
       const useDecisionModel = shouldUseDecisionModel({
@@ -8057,6 +8229,19 @@ export function createBettingWizard({
       }
 
       const extraSections = [];
+      if (interactionMode === 'guided_strict') {
+        extraSections.push(
+          '[GUIDED_CONTEXT]',
+          JSON.stringify(
+            {
+              guidedAction,
+              inputType,
+            },
+            null,
+            2
+          )
+        );
+      }
       if (wantsLedger && ledgerSummary) {
         extraSections.push(
           '[LEDGER_SUMMARY]',

@@ -181,9 +181,9 @@ export async function runTelegramBotTests() {
       })
     );
 
-    assert.equal(router.calls.length, 0);
-    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
-    assert.match(out.text, /no esta disponible en modo guiado/i);
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'ledger_list_pending');
+    assert.equal(router.calls[0].inputType, 'synthetic');
   });
 
   tests.push(async () => {
@@ -220,6 +220,66 @@ export async function runTelegramBotTests() {
       .map((item) => item.callback_data)
       .filter(Boolean);
     assert.ok(flatCallbacks.includes('qa:topup_credits'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:record_bet',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'UFC 326, Holloway vs Oliveira, Holloway ML @2.10, stake $5000',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'record_bet');
+    assert.equal(router.calls[0].inputType, 'text_bet_record');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:settle_bet',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'hola',
+      })
+    );
+
+    assert.equal(router.calls.length, 0);
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /modo guiado - cerrar apuesta/i);
   });
 
   for (const test of tests) {
