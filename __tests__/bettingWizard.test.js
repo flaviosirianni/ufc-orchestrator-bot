@@ -3937,6 +3937,69 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    let addBetCalls = 0;
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall(
+        'record_user_bet',
+        {
+          eventName: 'UFC 325',
+          fight: 'Max Holloway vs Charles Oliveira',
+          pick: 'Holloway ML',
+          odds: 2.1,
+          stake: 2000,
+        },
+        'call_blocked_record'
+      ),
+      responseWithText('Analisis completo sin mutaciones operativas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord() {
+          addBetCalls += 1;
+          return { id: 1 };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage(
+      'UFC 325, Holloway vs Oliveira, ML Holloway @2.10',
+      {
+        chatId: 'chat-guided-allowlist-1',
+        userId: 'u-guided-allowlist-1',
+        interactionMode: 'guided_strict',
+        guidedAction: 'analyze_quotes',
+        inputType: 'text_odds',
+        originalMessage: 'UFC 325, Holloway vs Oliveira, ML Holloway @2.10',
+        resolution: {
+          resolvedMessage: 'UFC 325, Holloway vs Oliveira, ML Holloway @2.10',
+        },
+      }
+    );
+
+    assert.match(result.reply, /Analisis completo/i);
+    assert.equal(addBetCalls, 0);
+    const toolDefs = fakeClient.calls[0].tools
+      .filter((item) => item?.type === 'function')
+      .map((item) => item.name);
+    assert.equal(toolDefs.includes('record_user_bet'), false);
+    assert.equal(toolDefs.includes('mutate_user_bets'), false);
+    assert.equal(toolDefs.includes('undo_last_mutation'), false);
+
+    const outputs = fakeClient.calls[1]?.input || [];
+    const blockedPayload = JSON.stringify(outputs);
+    assert.match(blockedPayload, /tool_not_allowed_in_interaction_mode/);
+  });
+
   for (const test of tests) {
     await test();
   }

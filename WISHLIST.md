@@ -972,3 +972,85 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: definir politica de expiracion/cierre automatico de sesion de presupuesto por evento.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+32. **Modo guiado estricto de analisis por quotes/screenshot**
+   - **Objetivo de negocio/UX:** eliminar friccion e interpretaciones erroneas en conversaciones de analisis, forzando un flujo claro y repetible para recomendaciones con odds.
+   - **Problema observado (ejemplo real):**
+     - El bot responde bien al analizar screenshots de cuotas, pero el texto libre genera interacciones poco intuitivas y ambiguedades.
+     - En mensajes abiertos, el bot puede interpretar intenciones operativas no deseadas o pedir/usar contexto incorrecto.
+   - **Comportamiento deseado para el usuario final:**
+     - El usuario ve un menu minimo y claro: `Analizar cuotas`, `Creditos`, `Ayuda`.
+     - Para analizar, el camino principal es screenshot completo de cuotas; opcionalmente se acepta texto estructurado.
+     - Si el mensaje no corresponde a ese flujo, el bot reencauza sin intentar interpretar libremente.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `InteractionModeGate` en transporte Telegram con `guided_strict` por defecto.
+     - `GuidedInputGate`:
+       - `has_image -> route analyze_quotes (inputType=image)`
+       - `text_structured_odds && GUIDED_QUOTES_TEXT_FALLBACK=true -> route analyze_quotes (inputType=text_odds)`
+       - `else -> block + reencauce`.
+     - `ToolAllowlistGuard` en `bettingWizard` para `guided_strict`:
+       - permitir: `web_search`, `get_fighter_history`, `get_user_profile`, `get_user_odds`, `store_user_odds`, `set_event_card`.
+       - bloquear: `record_user_bet`, `mutate_user_bets`, `undo_last_mutation`, `list_user_bets`, `update_user_profile`.
+     - Estados conversacionales sugeridos:
+       - `idle`
+       - `awaiting_quotes`
+       - `analyzing_quotes`
+       - `needs_more_data`.
+   - **Criterios de aceptacion verificables:**
+     - En `guided_strict`, callbacks fuera de menu minimo no ejecutan acciones operativas.
+     - Ninguna mutacion de ledger se ejecuta desde turnos de analisis guiado.
+     - Mensajes no estructurados se bloquean con reencauce consistente.
+     - Analisis con screenshot y fallback texto estructurado siguen funcionando end-to-end.
+   - **Pruebas de regresion necesarias:**
+     - Mensaje ambiguo sin odds -> bloqueado + reencauce.
+     - Mensaje con odds estructuradas -> enruta analisis (`inputType=text_odds`).
+     - Imagen/screenshot -> enruta analisis (`inputType=image`).
+     - Callback fuera de allowlist -> no ejecuta router operativo.
+     - Intento de `record_user_bet`/`mutate_user_bets` desde modelo en `guided_strict` -> bloqueado por guardrail.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: ajustar el umbral de deteccion de "texto estructurado suficiente" para evitar falsos positivos/falsos bloqueos.
+     - Decision abierta: definir si `update_user_profile` debe habilitarse en una fase 2 de guiado.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+33. **Entorno dev Telegram aislado de prod (doble bot + DB separada)**
+   - **Objetivo de negocio/UX:** permitir pruebas reales por Telegram sin riesgo sobre produccion ni contaminacion de datos operativos.
+   - **Problema observado (ejemplo real):**
+     - Con un solo token/polling activo, no hay separacion limpia entre pruebas locales y uso real.
+     - Ejecutar pruebas manuales puede impactar la misma DB y el mismo bot de produccion.
+   - **Comportamiento deseado para el usuario final:**
+     - Existe una instancia dev independiente accesible desde Telegram.
+     - Cambios nuevos se validan primero en dev sin afectar prod.
+     - El flujo de QA manual es repetible y documentado.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `EnvProfile` por ambiente:
+       - prod: `.env` (token prod + `DB_PATH` prod).
+       - dev: `.env.dev` (token dev + `DB_PATH` dev).
+     - `BotIsolation`:
+       - bot dev creado en BotFather con token propio.
+       - polling exclusivo por instancia (cada proceso usa su token).
+     - `DataIsolation`:
+       - `DB_PATH` separado para dev (`./data/dev/bot.dev.db` o equivalente).
+       - si se usan webhooks de credito/pago en dev, claves y endpoints separados.
+     - Scripts sugeridos:
+       - `npm run dev:telegram` con carga de perfil dev.
+       - `npm run start` reservado a prod/local prod-like.
+     - Checklist de QA manual:
+       - `/start` en bot dev,
+       - flujo `Analizar cuotas`,
+       - flujo `Creditos`,
+       - verificacion de que no hay writes en DB prod.
+   - **Criterios de aceptacion verificables:**
+     - Se pueden levantar prod y dev en paralelo sin conflicto de token/polling.
+     - Mensajes enviados al bot dev solo impactan DB dev.
+     - Smoke test guiado completo en bot dev sin side effects sobre prod.
+   - **Pruebas de regresion necesarias:**
+     - Arranque de instancia dev con token dev y DB dev.
+     - Validacion de aislamiento de DB (escrituras dev no aparecen en prod).
+     - Callback flows minimos en dev (`Analizar cuotas`, `Creditos`, `Ayuda`).
+     - Rollback operativo: cambio a `hybrid` via env y restart en dev.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir si dev comparte `SHEET_ID` productivo o usa sandbox.
+     - Decision abierta: definir politica de seeds/mocks para creditos y pagos en dev.
+   - **Prioridad:** media.
+   - **Estado:** pendiente.

@@ -9,6 +9,7 @@ import { runAutoSettlementTests } from './autoSettlement.test.js';
 import { runOddsApiToolTests } from './oddsApiTool.test.js';
 import { runBetScoringEngineTests } from './betScoringEngine.test.js';
 import { runSqliteStoreCompositeTests } from './sqliteStoreComposite.test.js';
+import { runTelegramBotTests } from './telegramBot.test.js';
 
 async function main() {
   await runRouterChainTests();
@@ -21,6 +22,7 @@ async function main() {
   await runAutoSettlementTests();
   await runSqliteStoreCompositeTests();
   await runBettingWizardTests();
+  await runTelegramBotTests();
   await runMessageFormatterTests();
   console.log('All test suites passed.');
 }

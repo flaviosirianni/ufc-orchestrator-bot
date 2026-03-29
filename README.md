@@ -60,6 +60,8 @@ Create a `.env` file based on `.env.example`:
 ```
 OPENAI_API_KEY=sk-...
 TELEGRAM_BOT_TOKEN=...
+TELEGRAM_INTERACTION_MODE=guided_strict
+GUIDED_QUOTES_TEXT_FALLBACK=true
 SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
@@ -175,6 +177,18 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
 - The bot keeps per-chat memory (recent turns, detected event card, and selected fight references).
 - Follow-up inputs like `que opinas de la pelea 1` are auto-resolved to fighter names from the last card in context.
 - Memory expiration is configurable with `CONVERSATION_TTL_MS`.
+
+### Guided Interaction Mode (Telegram)
+
+- Default mode is `guided_strict` (`TELEGRAM_INTERACTION_MODE=guided_strict`).
+- In `guided_strict`, the visible menu is minimal:
+  - `Analizar cuotas`
+  - `Creditos`
+  - `Ayuda`
+- Free-form text is blocked by default and re-routed to the guided flow, except when it looks like structured odds input.
+- Structured text fallback is controlled with `GUIDED_QUOTES_TEXT_FALLBACK=true|false`.
+- For quote analysis, the recommended input is a full screenshot of the betting page. Text fallback format: `evento, pelea, mercado, cuota`.
+- Rollback to previous behavior is immediate by setting `TELEGRAM_INTERACTION_MODE=hybrid` and restarting the process.
 
 ### Web Enrichment Before Analysis
 

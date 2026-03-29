@@ -20,6 +20,12 @@ const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
 const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?? '4500');
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
+const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
+const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
+  process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict'
+);
+const GUIDED_QUOTES_TEXT_FALLBACK =
+  String(process.env.GUIDED_QUOTES_TEXT_FALLBACK ?? 'true').toLowerCase() !== 'false';
 
 const MAIN_MENU_ROWS = [
   [
@@ -28,6 +34,14 @@ const MAIN_MENU_ROWS = [
   ],
   [
     { text: 'Config', callback_data: 'menu:config' },
+    { text: 'Ayuda', callback_data: 'qa:help' },
+  ],
+];
+
+const GUIDED_MAIN_MENU_ROWS = [
+  [{ text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
+  [
+    { text: 'Creditos', callback_data: 'qa:view_credits' },
     { text: 'Ayuda', callback_data: 'qa:help' },
   ],
 ];
@@ -90,7 +104,7 @@ const QUICK_ACTION_HINTS = {
   analyze_quotes: [
     '📸 Analizar cuotas',
     'Mandame screenshot completo de la pelea/evento (ML + O/U + metodo si aparece).',
-    'Si preferis texto: evento, pelea, mercado, cuota.',
+    'Fallback texto aceptado: evento + pelea + mercado + cuota.',
     'Con eso te devuelvo lectura + EV + stake sugerido.',
   ].join('\n'),
   event_projections: [
@@ -216,9 +230,113 @@ const QUICK_ACTION_HINTS = {
     '',
     'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
+  help_guided: [
+    '🆘 Ayuda (modo guiado estricto)',
+    '',
+    'Acciones disponibles:',
+    '- `Analizar cuotas`: analiza screenshot completo o texto estructurado de odds.',
+    '- `Creditos`: saldo + movimientos recientes.',
+    '- `Ayuda`: recordatorio rapido del flujo.',
+    '',
+    'Formato recomendado para analisis:',
+    '- Screenshot completo de la pelea/evento.',
+    '- O texto: `evento, pelea, mercado, cuota`.',
+    '',
+    'En este modo no uso chat libre para interpretar otras tareas.',
+  ].join('\n'),
+  guided_reencauce: [
+    '📌 Modo guiado activo.',
+    'Para analizar, mandame screenshot completo de cuotas.',
+    'Si no tenes imagen, usa texto estructurado: `evento, pelea, mercado, cuota`.',
+    'Tambien podes usar los botones `Analizar cuotas`, `Creditos` o `Ayuda`.',
+  ].join('\n'),
 };
 
 const MENU_SCOPES = new Set(['main', 'bets', 'event', 'config']);
+const GUIDED_ALLOWED_CALLBACKS = new Set([
+  'menu:main',
+  'qa:analyze_quotes',
+  'qa:help',
+  'qa:view_credits',
+  'qa:topup_credits',
+]);
+
+function normalizeText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+export function normalizeInteractionMode(mode = '') {
+  const normalized = String(mode || '').trim().toLowerCase();
+  return INTERACTION_MODES.has(normalized) ? normalized : 'guided_strict';
+}
+
+export function isGuidedStrictInteractionMode(mode = '') {
+  return normalizeInteractionMode(mode) === 'guided_strict';
+}
+
+export function isGuidedCallbackAllowed(callbackData = '') {
+  const value = String(callbackData || '').trim();
+  return GUIDED_ALLOWED_CALLBACKS.has(value);
+}
+
+export function looksLikeStructuredOddsText(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+
+  if (/@\s*\d+([.,]\d+)?/.test(text)) {
+    return true;
+  }
+
+  const hasMarketKeyword =
+    /\b(cuota|cuotas|odds?|quote|quotes|moneyline|ml|over|under|totales?|props?|linea|lineas)\b/.test(
+      text
+    );
+  const hasNumericSignal =
+    /\b\d+([.,]\d+)?\b/.test(text) || /\b(o|u)\s*\d+([.,]\d+)?\b/.test(text);
+
+  if (hasMarketKeyword && hasNumericSignal) {
+    return true;
+  }
+
+  const hasFightContext = /\b(vs|versus|evento|pelea|fight)\b/.test(text);
+  if (hasFightContext && hasNumericSignal && /\b(stake|u|units?|bookie)\b/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function resolveGuidedMessageDecision({
+  cleanMessage = '',
+  hasMedia = false,
+  allowTextFallback = GUIDED_QUOTES_TEXT_FALLBACK,
+} = {}) {
+  if (hasMedia) {
+    return {
+      action: 'route',
+      guidedAction: 'analyze_quotes',
+      inputType: 'image',
+    };
+  }
+
+  if (allowTextFallback && looksLikeStructuredOddsText(cleanMessage)) {
+    return {
+      action: 'route',
+      guidedAction: 'analyze_quotes',
+      inputType: 'text_odds',
+    };
+  }
+
+  return {
+    action: 'block',
+    guidedAction: null,
+    inputType: null,
+  };
+}
 
 function normalizeMenuScope(scope = 'main') {
   const normalized = String(scope || '').trim().toLowerCase();
@@ -364,9 +482,19 @@ async function transcribeAudio(buffer, filename = 'audio.mp3') {
   return text.slice(0, MAX_AUDIO_TRANSCRIPT_CHARS);
 }
 
-export function startTelegramBot(router) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const bot = new TelegramBot(token, { polling: true });
+export function startTelegramBot(router, options = {}) {
+  const token = options.token || process.env.TELEGRAM_BOT_TOKEN;
+  const bot = options.botInstance || new TelegramBot(token, { polling: true });
+  const interactionMode = normalizeInteractionMode(
+    options.interactionMode || TELEGRAM_INTERACTION_MODE
+  );
+  const guidedQuotesTextFallback =
+    typeof options.guidedQuotesTextFallback === 'boolean'
+      ? options.guidedQuotesTextFallback
+      : GUIDED_QUOTES_TEXT_FALLBACK;
+  const downloadFile = options.downloadFileImpl || downloadTelegramFile;
+  const transcribeAudioImpl = options.transcribeAudioImpl || transcribeAudio;
+  const convertAudioToMp3Impl = options.convertAudioToMp3Impl || convertAudioToMp3;
   const pendingMediaGroups = new Map();
   const inFlightByChat = new Set();
   const menuScopeByChat = new Map();
@@ -386,6 +514,12 @@ export function startTelegramBot(router) {
   }
 
   function buildQuickActionsMarkup(scope = 'main') {
+    if (isGuidedStrictInteractionMode(interactionMode)) {
+      return {
+        inline_keyboard: GUIDED_MAIN_MENU_ROWS,
+      };
+    }
+
     if (scope === 'bets') {
       return {
         inline_keyboard: BETS_MENU_ROWS,
@@ -406,7 +540,11 @@ export function startTelegramBot(router) {
     };
   }
 
-  async function sendBotMessage(chatId, text, { menuScope = null } = {}) {
+  async function sendBotMessage(
+    chatId,
+    text,
+    { menuScope = null, replyMarkupOverride = null } = {}
+  ) {
     const rawText = String(text || '');
     const htmlText = toTelegramHtml(rawText);
     const plainText = toTelegramPlainText(rawText);
@@ -414,7 +552,7 @@ export function startTelegramBot(router) {
       menuScope === null || menuScope === undefined
         ? getMenuScope(chatId)
         : setMenuScope(chatId, menuScope);
-    const replyMarkup = buildQuickActionsMarkup(resolvedScope);
+    const replyMarkup = replyMarkupOverride || buildQuickActionsMarkup(resolvedScope);
 
     try {
       return await bot.sendMessage(chatId, htmlText || plainText || ' ', {
@@ -431,7 +569,7 @@ export function startTelegramBot(router) {
     }
   }
 
-  async function routeSyntheticAction(query, syntheticMessage = '') {
+  async function routeSyntheticAction(query, syntheticMessage = '', metadata = {}) {
     const sourceMsg = query?.message;
     if (!sourceMsg) {
       return null;
@@ -445,6 +583,9 @@ export function startTelegramBot(router) {
     return router.routeMessage({
       chatId: String(chatId),
       message: syntheticMessage,
+      interactionMode,
+      guidedAction: metadata.guidedAction || null,
+      inputType: metadata.inputType || null,
       user: {
         id: query?.from?.id ? String(query.from.id) : null,
         username: query?.from?.username || null,
@@ -461,6 +602,12 @@ export function startTelegramBot(router) {
   }
 
   async function sendMenu(chatId, scope = 'main') {
+    if (isGuidedStrictInteractionMode(interactionMode)) {
+      return sendBotMessage(chatId, '📌 Menu principal (modo guiado)', {
+        menuScope: 'main',
+      });
+    }
+
     if (scope === 'bets') {
       return sendBotMessage(chatId, '📚 Menu Apuestas', { menuScope: 'bets' });
     }
@@ -479,6 +626,8 @@ export function startTelegramBot(router) {
     inputItems,
     mediaStats,
     isAlbum = false,
+    guidedAction = null,
+    guidedInputType = null,
   } = {}) {
     const chatId = msg.chat.id;
     const from = msg.from || {};
@@ -521,6 +670,10 @@ export function startTelegramBot(router) {
         telegramMessageId: msg.message_id,
         inputItems,
         mediaStats,
+        interactionMode,
+        guidedAction,
+        inputType: guidedInputType,
+        guidedInputType,
         user: {
           id: from.id ? String(from.id) : null,
           username: from.username || null,
@@ -554,11 +707,7 @@ export function startTelegramBot(router) {
       if (Array.isArray(msg.photo) && msg.photo.length) {
         const bestPhoto = pickLargestPhoto(msg.photo);
         if (bestPhoto?.file_id) {
-          const { buffer, filePath } = await downloadTelegramFile(
-            bot,
-            token,
-            bestPhoto.file_id
-          );
+          const { buffer, filePath } = await downloadFile(bot, token, bestPhoto.file_id);
           const ext = fileExtension(filePath) || 'jpg';
           const mimeType = guessImageMime(ext);
           inputItems.push(buildImageInput(buffer, mimeType));
@@ -568,18 +717,14 @@ export function startTelegramBot(router) {
 
       const audioFile = msg.voice || msg.audio;
       if (audioFile?.file_id) {
-        const { buffer, filePath } = await downloadTelegramFile(
-          bot,
-          token,
-          audioFile.file_id
-        );
+        const { buffer, filePath } = await downloadFile(bot, token, audioFile.file_id);
         const ext = fileExtension(filePath);
         const audioBuffer =
           ext === 'mp3' || ext === 'wav'
             ? buffer
-            : await convertAudioToMp3(buffer, ext || 'ogg');
+            : await convertAudioToMp3Impl(buffer, ext || 'ogg');
 
-        const transcript = await transcribeAudio(
+        const transcript = await transcribeAudioImpl(
           audioBuffer,
           `audio.${ext === 'wav' ? 'wav' : 'mp3'}`
         );
@@ -599,6 +744,46 @@ export function startTelegramBot(router) {
         chatId,
         'No pude procesar el archivo multimedia. Si es audio, asegurate de que pueda convertirlo a mp3/wav (requiere ffmpeg).'
       );
+      return;
+    }
+
+    const cleanMessage = String(userMessage || '').trim();
+    if (/^\/start\b/i.test(cleanMessage)) {
+      await sendMenu(chatId, 'main');
+      if (isGuidedStrictInteractionMode(interactionMode)) {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
+      }
+      return;
+    }
+
+    if (/^\/help\b/i.test(cleanMessage)) {
+      const helpText = isGuidedStrictInteractionMode(interactionMode)
+        ? QUICK_ACTION_HINTS.help_guided
+        : QUICK_ACTION_HINTS.help;
+      await sendBotMessage(chatId, helpText, { menuScope: 'main' });
+      return;
+    }
+
+    if (isGuidedStrictInteractionMode(interactionMode)) {
+      const decision = resolveGuidedMessageDecision({
+        cleanMessage,
+        hasMedia: inputItems.length > 0,
+        allowTextFallback: guidedQuotesTextFallback,
+      });
+
+      if (decision.action !== 'route') {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.guided_reencauce, { menuScope: 'main' });
+        return;
+      }
+
+      await deliverToRouter({
+        msg,
+        userMessage,
+        inputItems,
+        mediaStats,
+        guidedAction: decision.guidedAction,
+        guidedInputType: decision.inputType,
+      });
       return;
     }
 
@@ -656,11 +841,7 @@ export function startTelegramBot(router) {
         }
         const bestPhoto = pickLargestPhoto(msg.photo);
         if (!bestPhoto?.file_id) continue;
-        const { buffer, filePath } = await downloadTelegramFile(
-          bot,
-          token,
-          bestPhoto.file_id
-        );
+        const { buffer, filePath } = await downloadFile(bot, token, bestPhoto.file_id);
         const ext = fileExtension(filePath) || 'jpg';
         const mimeType = guessImageMime(ext);
         inputItems.push(buildImageInput(buffer, mimeType));
@@ -672,6 +853,30 @@ export function startTelegramBot(router) {
         chatId,
         'No pude procesar todas las fotos del album. Probá reenviarlas o mandar menos imágenes.'
       );
+      return;
+    }
+
+    if (isGuidedStrictInteractionMode(interactionMode)) {
+      const decision = resolveGuidedMessageDecision({
+        cleanMessage: userMessage,
+        hasMedia: inputItems.length > 0,
+        allowTextFallback: guidedQuotesTextFallback,
+      });
+
+      if (decision.action !== 'route') {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.guided_reencauce, { menuScope: 'main' });
+        return;
+      }
+
+      await deliverToRouter({
+        msg: first,
+        userMessage,
+        inputItems,
+        mediaStats,
+        isAlbum: true,
+        guidedAction: decision.guidedAction,
+        guidedInputType: decision.inputType,
+      });
       return;
     }
 
@@ -704,6 +909,76 @@ export function startTelegramBot(router) {
       await bot.answerCallbackQuery(query.id);
     } catch (error) {
       console.error('⚠️ Error respondiendo callback_query:', error);
+    }
+
+    if (isGuidedStrictInteractionMode(interactionMode)) {
+      if (!isGuidedCallbackAllowed(data)) {
+        await sendBotMessage(chatId, 'Esa accion no esta disponible en modo guiado.', {
+          menuScope: 'main',
+        });
+        return;
+      }
+
+      if (data === 'menu:main') {
+        await sendMenu(chatId, 'main');
+        return;
+      }
+
+      if (data === 'qa:analyze_quotes') {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
+        return;
+      }
+
+      if (data === 'qa:help') {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.help_guided, { menuScope: 'main' });
+        return;
+      }
+
+      if (data === 'qa:view_credits') {
+        const routed = await routeSyntheticAction(
+          query,
+          'decime cuantos creditos tengo y mis ultimos movimientos',
+          { guidedAction: 'view_credits', inputType: 'synthetic' }
+        );
+        await sendBotMessage(chatId, routed || 'No pude consultar créditos ahora mismo.', {
+          menuScope: 'main',
+          replyMarkupOverride: {
+            inline_keyboard: [
+              [{ text: '💳 Cargar creditos', callback_data: 'qa:topup_credits' }],
+              [{ text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
+            ],
+          },
+        });
+        return;
+      }
+
+      if (data === 'qa:topup_credits') {
+        const topupUrl = resolveTopupUrlForUser(query?.from?.id ? String(query.from.id) : '');
+        if (topupUrl) {
+          await sendBotMessage(
+            chatId,
+            [
+              '💳 Cargar créditos',
+              'Abrí este link para ver packs y pagar por Mercado Pago:',
+              topupUrl,
+              '',
+              'Luego podés volver al botón `Creditos` para confirmar el saldo.',
+            ].join('\n'),
+            { menuScope: 'main' }
+          );
+        } else {
+          await sendBotMessage(
+            chatId,
+            [
+              '💳 Cargar créditos',
+              'Todavía no tengo configurado el link de checkout en este entorno.',
+              'Podés revisar tu saldo actual con `Creditos`.',
+            ].join('\n'),
+            { menuScope: 'main' }
+          );
+        }
+        return;
+      }
     }
 
     if (data === 'menu:main') {
@@ -863,6 +1138,7 @@ export function startTelegramBot(router) {
 
   return {
     bot,
+    interactionMode,
     async sendSystemMessage({ chatId, text } = {}) {
       if (!chatId || !text) return null;
       return sendBotMessage(chatId, text);

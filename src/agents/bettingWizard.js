@@ -75,6 +75,7 @@ const FACT_FRESHNESS_MAX_AGE_DAYS = Math.max(
 );
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
+const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
 
 const FUNCTION_TOOLS = [
   {
@@ -335,6 +336,26 @@ const FUNCTION_TOOLS = [
     strict: false,
   },
 ];
+
+const GUIDED_STRICT_ALLOWED_TOOLS = new Set([
+  'get_fighter_history',
+  'get_user_profile',
+  'get_user_odds',
+  'store_user_odds',
+  'set_event_card',
+]);
+
+function normalizeInteractionMode(mode = '') {
+  const normalized = String(mode || '').trim().toLowerCase();
+  return INTERACTION_MODES.has(normalized) ? normalized : 'hybrid';
+}
+
+function resolveAllowedFunctionToolNames(interactionMode = 'guided_strict') {
+  if (normalizeInteractionMode(interactionMode) === 'guided_strict') {
+    return new Set(GUIDED_STRICT_ALLOWED_TOOLS);
+  }
+  return null;
+}
 
 const knowledgeCache = {
   path: null,
@@ -3942,8 +3963,9 @@ function formatSessionMemory(session = null) {
   return lines.join('\n');
 }
 
-function buildSystemPrompt(knowledgeSnippet = '') {
+function buildSystemPrompt(knowledgeSnippet = '', { interactionMode = 'hybrid' } = {}) {
   const today = new Date().toISOString().slice(0, 10);
+  const normalizedInteractionMode = normalizeInteractionMode(interactionMode);
   const rules = [
     'Sos un analista UFC conversacional en espanol, natural y concreto.',
     `Fecha de referencia actual: ${today}.`,
@@ -3985,11 +4007,24 @@ function buildSystemPrompt(knowledgeSnippet = '') {
     'Mantene el formato limpio y util para apostar; no repitas las cuotas mas de una vez.',
   ].join(' ');
 
+  const interactionRules =
+    normalizedInteractionMode === 'guided_strict'
+      ? [
+          'Modo activo: guided_strict.',
+          'Objetivo de este turno: analisis de cuotas (screenshot o texto estructurado).',
+          'No ejecutes ni sugieras mutaciones operativas de ledger en este modo.',
+          'Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.',
+          'No redirijas al usuario a chat libre ni a acciones fuera de analisis/creditos/ayuda.',
+        ].join(' ')
+      : 'Modo activo: hybrid.';
+
+  const combinedRules = `${rules} ${interactionRules}`.trim();
+
   if (!knowledgeSnippet) {
-    return rules;
+    return combinedRules;
   }
 
-  return `${rules}\n\n[PLAYBOOK_SNIPPET]\n${knowledgeSnippet}`;
+  return `${combinedRules}\n\n[PLAYBOOK_SNIPPET]\n${knowledgeSnippet}`;
 }
 
 function buildRecentTurnsText(turns = []) {
@@ -4169,8 +4204,17 @@ function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   };
 }
 
-function buildResponsesTools({ timezone = WEB_SEARCH_TIMEZONE } = {}) {
+function buildResponsesTools({
+  timezone = WEB_SEARCH_TIMEZONE,
+  allowedFunctionToolNames = null,
+} = {}) {
   const normalizedTz = normalizeTimeZone(timezone || WEB_SEARCH_TIMEZONE);
+  const functionTools = Array.isArray(FUNCTION_TOOLS)
+    ? FUNCTION_TOOLS.filter((tool) => {
+        if (!allowedFunctionToolNames) return true;
+        return allowedFunctionToolNames.has(String(tool?.name || '').trim());
+      })
+    : [];
   const tools = [
     {
       type: 'web_search',
@@ -4183,7 +4227,7 @@ function buildResponsesTools({ timezone = WEB_SEARCH_TIMEZONE } = {}) {
         ...(normalizedTz ? { timezone: normalizedTz } : {}),
       },
     },
-    ...FUNCTION_TOOLS,
+    ...functionTools,
   ];
 
   return tools;
@@ -5154,6 +5198,27 @@ export function createBettingWizard({
     const chatId = String(context.chatId ?? 'default');
     const userId = context.userId ? String(context.userId) : null;
     const originalMessage = context.originalMessage || String(message || '');
+    const interactionMode = normalizeInteractionMode(
+      context.interactionMode || context?.metadata?.interactionMode || 'hybrid'
+    );
+    const allowedFunctionToolNames = resolveAllowedFunctionToolNames(interactionMode);
+    const guidedAction = String(
+      context.guidedAction || context?.metadata?.guidedAction || ''
+    )
+      .trim()
+      .toLowerCase();
+    const inputType = String(context.inputType || context?.metadata?.inputType || '')
+      .trim()
+      .toLowerCase();
+    const isGuidedAnalyzeTurn =
+      interactionMode === 'guided_strict' &&
+      (guidedAction === 'analyze_quotes' ||
+        inputType === 'image' ||
+        inputType === 'text_odds' ||
+        (Array.isArray(context.inputItems) &&
+          context.inputItems.some(
+            (item) => item?.type === 'input_image' || item?.type === 'input_file'
+          )));
     const resolution =
       context.resolution ||
       conversationStore?.resolveMessage?.(chatId, originalMessage) || {
@@ -5170,8 +5235,8 @@ export function createBettingWizard({
 
     const wantsLedger = hasLedgerSignals(originalMessage);
     const wantsCredits = hasCreditSignals(originalMessage);
-    const wantsOdds = hasOddsRequestSignals(originalMessage);
-    const wantsBetDecision = hasBetDecisionSignals(originalMessage);
+    const wantsOdds = hasOddsRequestSignals(originalMessage) || isGuidedAnalyzeTurn;
+    const wantsBetDecision = hasBetDecisionSignals(originalMessage) || isGuidedAnalyzeTurn;
     const wantsLatestNews = hasLatestNewsSignals(originalMessage);
     const wantsEventProjections = hasEventProjectionSignals(originalMessage);
     const wantsLiveEventStatus = hasLiveEventStatusSignals(originalMessage);
@@ -7470,6 +7535,18 @@ export function createBettingWizard({
       const name = call.name || '';
       const args = parseToolArgs(call.arguments || '{}');
 
+      if (allowedFunctionToolNames && !allowedFunctionToolNames.has(name)) {
+        return {
+          ok: false,
+          error: 'tool_not_allowed_in_interaction_mode',
+          toolName: name,
+          interactionMode,
+          blocked: true,
+          message:
+            'Esa accion no esta habilitada en este modo. Solo puedo analizar cuotas y usar contexto de lectura.',
+        };
+      }
+
       switch (name) {
         case 'get_fighter_history': {
           if (!fightsScalper?.getFighterHistory) {
@@ -7828,7 +7905,7 @@ export function createBettingWizard({
         : null;
       const sessionMemory = formatSessionMemory(session);
 
-      const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet());
+      const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet(), { interactionMode });
       const mediaItems = Array.isArray(context.inputItems) ? context.inputItems : [];
       const hasMedia = mediaItems.length > 0;
       const useDecisionModel = shouldUseDecisionModel({
@@ -8040,7 +8117,10 @@ export function createBettingWizard({
         extraSections,
       });
 
-      const tools = buildResponsesTools({ timezone: temporalContext.timezone });
+      const tools = buildResponsesTools({
+        timezone: temporalContext.timezone,
+        allowedFunctionToolNames,
+      });
 
       const messageContent = [{ type: 'input_text', text: userPayload }];
       const extraItems = [];
