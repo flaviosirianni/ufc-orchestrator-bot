@@ -583,6 +583,18 @@ function buildTopupPacksHintLines() {
   return lines;
 }
 
+function hasTopupCopy(text = '') {
+  const value = String(text || '').toLowerCase();
+  if (!value.trim()) return false;
+  return (
+    value.includes('packs de recarga') ||
+    value.includes('equivalencias de recarga') ||
+    value.includes('link para elegir pack') ||
+    value.includes('recarga (elegis pack)') ||
+    value.includes('/topup/checkout')
+  );
+}
+
 function buildTopupPackButtons() {
   if (!TOPUP_PACKS_LIST.length) {
     return [];
@@ -1261,14 +1273,16 @@ export function startTelegramBot(router, options = {}) {
           'decime cuantos creditos tengo y mis ultimos movimientos',
           { guidedAction: 'view_credits', inputType: 'synthetic' }
         );
-        const chooserUrl = resolveTopupUrlForUser(safeUserId);
-        const topupHintLines = buildTopupPacksHintLines();
         const textParts = [routed || 'No pude consultar créditos ahora mismo.'];
-        if (topupHintLines.length) {
-          textParts.push('', ...topupHintLines);
-        }
-        if (chooserUrl) {
-          textParts.push('', `Link para elegir pack: ${chooserUrl}`);
+        if (!hasTopupCopy(routed)) {
+          const chooserUrl = resolveTopupUrlForUser(safeUserId);
+          const topupHintLines = buildTopupPacksHintLines();
+          if (topupHintLines.length) {
+            textParts.push('', ...topupHintLines);
+          }
+          if (chooserUrl) {
+            textParts.push('', `Link para elegir pack: ${chooserUrl}`);
+          }
         }
         await sendBotMessage(chatId, textParts.join('\n'), {
           menuScope: 'main',

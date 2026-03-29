@@ -57,6 +57,28 @@ export async function runSqliteStoreCompositeTests() {
         result: 'pending',
       });
 
+      db = getDb();
+      const createMutations = db
+        .prepare(
+          `SELECT count(*) AS c
+           FROM bet_mutations
+           WHERE telegram_user_id = ?
+             AND action = 'create'`
+        )
+        .get(userId);
+      assert.equal(Number(createMutations?.c || 0), 2);
+
+      const summaryAfterCreate = db
+        .prepare(
+          `SELECT total_bets, total_staked, total_units
+           FROM ledger_summary
+           WHERE telegram_user_id = ?`
+        )
+        .get(userId);
+      assert.equal(Number(summaryAfterCreate?.total_bets || 0), 2);
+      assert.equal(Number(summaryAfterCreate?.total_staked || 0), 2200);
+      assert.equal(Number(summaryAfterCreate?.total_units || 0), 5.5);
+
       const payload = {
         transactionPolicy: 'all_or_nothing',
         steps: [

@@ -79,7 +79,7 @@ STAKE_MAX_PICK_EXPOSURE_MODERADO=22
 STAKE_MAX_PICK_EXPOSURE_AGRESIVO=30
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
 KNOWLEDGE_MAX_CHARS=9000
-DB_PATH=./data/bot.db
+DB_PATH=/var/lib/ufc-orchestrator/bot.db
 CONVERSATION_TTL_MS=86400000
 CONVERSATION_MAX_TURNS=20
 CONVERSATION_MAX_TURN_CHARS=1600
@@ -156,6 +156,8 @@ PORT=3000
 ```
 
 The lightweight loader in `src/core/env.js` populates `process.env` without relying on `dotenv`.
+
+`DB_PATH` should point outside the git repo in hosted environments (for example `/var/lib/ufc-orchestrator/bot.db`) to avoid shipping runtime data in version control.
 
 ## Installation & Local Development
 

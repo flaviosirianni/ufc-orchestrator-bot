@@ -4,5 +4,5 @@ service-account.json
 coverage/
 .DS_Store
 npm-debug.log*
-data/*.json
+data/*
 !data/.gitkeep

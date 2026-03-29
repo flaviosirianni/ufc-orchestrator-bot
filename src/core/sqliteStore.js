@@ -1,11 +1,12 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import '../core/env.js';
 
 const DB_PATH =
-  process.env.DB_PATH || path.resolve(process.cwd(), 'data', 'bot.db');
+  process.env.DB_PATH || path.resolve(os.homedir(), '.ufc-orchestrator-bot', 'bot.db');
 const LEDGER_UNDO_WINDOW_MINUTES = Number(process.env.LEDGER_UNDO_WINDOW_MINUTES ?? '30');
 const DB_STARTUP_QUICK_CHECK =
   String(process.env.DB_STARTUP_QUICK_CHECK ?? 'true').toLowerCase() !== 'false';
@@ -1045,11 +1046,8 @@ function parseJsonSafe(value, fallback = null) {
   }
 }
 
-export function rebuildLedgerSummary(userId) {
-  if (!userId) return null;
-  const db = getDb();
-  const ts = nowIso();
-  const rows = listBetRowsForUser(db, userId, { includeArchived: false, limit: 2000 });
+function rebuildLedgerSummaryWithDb(db, userId, { at = nowIso(), limit = 2000 } = {}) {
+  const rows = listBetRowsForUser(db, userId, { includeArchived: false, limit });
 
   let totalStaked = 0;
   let totalUnits = 0;
@@ -1080,7 +1078,7 @@ export function rebuildLedgerSummary(userId) {
        losses = excluded.losses,
        pushes = excluded.pushes,
        last_updated_at = excluded.last_updated_at`
-  ).run(userId, totalStaked, totalUnits, totalBets, wins, losses, pushes, ts);
+  ).run(userId, totalStaked, totalUnits, totalBets, wins, losses, pushes, at);
 
   return {
     totalStaked,
@@ -1089,8 +1087,14 @@ export function rebuildLedgerSummary(userId) {
     wins,
     losses,
     pushes,
-    lastUpdatedAt: ts,
+    lastUpdatedAt: at,
   };
+}
+
+export function rebuildLedgerSummary(userId) {
+  if (!userId) return null;
+  const db = getDb();
+  return rebuildLedgerSummaryWithDb(db, userId, { at: nowIso() });
 }
 
 export function listUserBets(userId, options = {}) {
@@ -1446,15 +1450,23 @@ export function applyBetMutation(userId, payload = {}) {
   const operation = preview.operation;
 
   let receipts = [];
+  let ledgerSummary = null;
   try {
-    const apply = db.transaction(() =>
-      applyMutationPreviewInTransaction(db, userId, preview, {
+    const apply = db.transaction(() => {
+      const txReceipts = applyMutationPreviewInTransaction(db, userId, preview, {
         metadata: payload.metadata || null,
         at: ts,
         strictCandidates: false,
-      })
-    );
-    receipts = apply();
+      });
+      const txSummary = rebuildLedgerSummaryWithDb(db, userId, { at: ts });
+      return {
+        receipts: txReceipts,
+        ledgerSummary: txSummary,
+      };
+    });
+    const applied = apply();
+    receipts = applied.receipts;
+    ledgerSummary = applied.ledgerSummary;
   } catch (error) {
     return {
       ok: false,
@@ -1463,8 +1475,6 @@ export function applyBetMutation(userId, payload = {}) {
       operation,
     };
   }
-
-  const ledgerSummary = rebuildLedgerSummary(userId);
 
   return {
     ok: true,
@@ -1515,6 +1525,7 @@ export function applyCompositeBetMutations(userId, payload = {}) {
 
   let stepResults = [];
   let receipts = [];
+  let ledgerSummary = null;
   try {
     const apply = db.transaction(() => {
       const nextStepResults = [];
@@ -1563,15 +1574,18 @@ export function applyCompositeBetMutations(userId, payload = {}) {
         });
         allReceipts.push(...appliedStepReceipts);
       }
+      const txSummary = rebuildLedgerSummaryWithDb(db, userId, { at: ts });
       return {
         stepResults: nextStepResults,
         receipts: allReceipts,
+        ledgerSummary: txSummary,
       };
     });
 
     const applied = apply();
     stepResults = applied.stepResults;
     receipts = applied.receipts;
+    ledgerSummary = applied.ledgerSummary;
   } catch (error) {
     return {
       ok: false,
@@ -1586,8 +1600,6 @@ export function applyCompositeBetMutations(userId, payload = {}) {
         Number.isInteger(error?.betId) && error.betId > 0 ? error.betId : null,
     };
   }
-
-  const ledgerSummary = rebuildLedgerSummary(userId);
 
   return {
     ok: true,
@@ -1711,17 +1723,23 @@ export function undoLastBetMutation(
       at: now,
     });
 
-    return db
+    const after = db
       .prepare(
         `SELECT id, event_name, fight, pick, result, archived_at, updated_at
          FROM bets
          WHERE id = ? AND telegram_user_id = ?`
       )
       .get(betId, userId);
+    const ledgerSummary = rebuildLedgerSummaryWithDb(db, userId, { at: now });
+    return {
+      after,
+      ledgerSummary,
+    };
   });
 
-  const after = applyUndo();
-  const ledgerSummary = rebuildLedgerSummary(userId);
+  const applied = applyUndo();
+  const after = applied?.after || null;
+  const ledgerSummary = applied?.ledgerSummary || null;
 
   return {
     ok: true,
@@ -1750,47 +1768,52 @@ export function addBetRecord(userId, record = {}) {
   const normalizedResult = normalizeResult(record.result) || 'pending';
   const settledAt = isSettledResult(normalizedResult) ? ts : null;
 
-  const result = db.prepare(
-    `INSERT INTO bets
-      (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
-  ).run(
-    userId,
-    record.eventName || null,
-    record.fight || null,
-    record.pick || null,
-    record.odds ?? null,
-    record.stake ?? null,
-    record.units ?? null,
-    normalizedResult,
-    record.notes || null,
-    ts,
-    ts,
-    settledAt
-  );
+  const insertRecord = db.transaction(() => {
+    const result = db.prepare(
+      `INSERT INTO bets
+        (telegram_user_id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    ).run(
+      userId,
+      record.eventName || null,
+      record.fight || null,
+      record.pick || null,
+      record.odds ?? null,
+      record.stake ?? null,
+      record.units ?? null,
+      normalizedResult,
+      record.notes || null,
+      ts,
+      ts,
+      settledAt
+    );
 
-  const betId = Number(result.lastInsertRowid);
-  logBetMutation(db, {
-    userId,
-    betId,
-    action: 'create',
-    prevResult: null,
-    nextResult: normalizedResult,
-    prevArchivedAt: null,
-    nextArchivedAt: null,
-    metadata: { source: 'record_user_bet' },
-    at: ts,
+    const betId = Number(result.lastInsertRowid);
+    logBetMutation(db, {
+      userId,
+      betId,
+      action: 'create',
+      prevResult: null,
+      nextResult: normalizedResult,
+      prevArchivedAt: null,
+      nextArchivedAt: null,
+      metadata: { source: 'record_user_bet' },
+      at: ts,
+    });
+
+    rebuildLedgerSummaryWithDb(db, userId, { at: ts });
+
+    const row = db
+      .prepare(
+        `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
+         FROM bets
+         WHERE id = ? AND telegram_user_id = ?`
+      )
+      .get(betId, userId);
+    return row;
   });
 
-  rebuildLedgerSummary(userId);
-
-  const row = db
-    .prepare(
-      `SELECT id, event_name, fight, pick, odds, stake, units, result, notes, created_at, updated_at, settled_at, archived_at
-       FROM bets
-       WHERE id = ? AND telegram_user_id = ?`
-    )
-    .get(betId, userId);
+  const row = insertRecord();
 
   return mapBetRow(row);
 }

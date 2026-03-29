@@ -1054,3 +1054,43 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: definir politica de seeds/mocks para creditos y pagos en dev.
    - **Prioridad:** media.
    - **Estado:** pendiente.
+
+34. **Nuevo esquema de recargas y creditos (packs flexibles en ARS)**
+   - **Objetivo de negocio/UX:** ofrecer opciones de recarga mas naturales para el usuario final y una equivalencia ARS->creditos consistente, simple de entender y sostenible.
+   - **Problema observado (ejemplo real):**
+     - Los packs actuales (`10 cr = $1000`, `20 cr = $1800`) quedan cortos para algunos usos y no cubren montos deseados como `$5000` o `$10000`.
+     - Al iterar precios sin una regla explicita de conversion, puede quedar una percepcion de injusticia entre packs.
+   - **Comportamiento deseado para el usuario final:**
+     - Ver 4 opciones claras de recarga en checkout (ejemplo inicial a validar: `$1000`, `$2000`, `$5000`, `$10000`).
+     - Entender facilmente cuantos creditos recibe por cada opcion antes de pagar.
+     - Mantener la misma logica de acreditacion automatica post-pago, sin friccion adicional.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `TopupPricingPolicy` versionada en backend:
+       - define `base_ars_per_credit` y descuentos por volumen permitidos (si aplica).
+       - genera `MP_TOPUP_PACKS` derivados de una sola fuente de verdad.
+     - `TopupPacksCatalog`:
+       - exponer packs en `/topup/config` y reutilizar en Telegram + web chooser.
+       - incluir metadatos de vigencia (`effective_from`, `version`) para trazabilidad.
+     - Guardrails:
+       - impedir packs con credito no entero o monto invalido.
+       - bloquear cambios de pricing sin bump de version y nota de migracion.
+       - mantener compatibilidad hacia atras para preferencias ya creadas.
+     - Estados operativos sugeridos:
+       - `draft_pricing`
+       - `qa_pricing`
+       - `prod_pricing_active`.
+   - **Criterios de aceptacion verificables:**
+     - Checkout muestra exactamente los packs definidos en politica vigente (sin duplicados ni desalineacion Telegram/web).
+     - El mensaje de creditos muestra una sola seccion de equivalencias coherente con checkout.
+     - Un pago aprobado de cada pack acredita la cantidad de creditos esperada.
+   - **Pruebas de regresion necesarias:**
+     - Smoke de `/topup/checkout?user_id=...` mostrando los 4 packs vigentes.
+     - Validacion de `/topup/config` contra configuracion esperada.
+     - Webhook Mercado Pago aprobado por pack -> acreditacion correcta e idempotente.
+     - Verificacion de copy en Telegram (`Creditos` y `Cargar creditos`) sin texto duplicado.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir formula exacta de conversion ARS->creditos y descuentos por volumen (si corresponde).
+     - Decision abierta: definir si mantener packs por creditos (interno) o por monto ARS (UX) como fuente primaria.
+     - Decision abierta: definir politica de transicion para usuarios con percepcion de precio previa.
+   - **Prioridad:** media.
+   - **Estado:** pendiente.
