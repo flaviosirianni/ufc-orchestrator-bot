@@ -3257,10 +3257,9 @@ function formatLedgerBetLine(
     Number.isFinite(stake) && stake > 0
       ? formatAmountWithCurrency(stake, currency)
       : 'stake N/D';
+  const betIdLabel = Number.isInteger(betId) && betId > 0 ? `bet_id ${betId}` : 'bet_id ?';
 
-  return `- #${Number.isInteger(betId) && betId > 0 ? betId : '?'} ${formatLedgerStatusBadge(
-    bet.result
-  )} | ${fight} | ${pick} | ${oddsLabel} | ${stakeLabel} | ${when}`;
+  return `- ${betIdLabel} | ${formatLedgerStatusBadge(bet.result)} | ${fight} | ${pick} | ${oddsLabel} | ${stakeLabel} | ${when}`;
 }
 
 function buildGuidedPendingLedgerReply(
@@ -3294,7 +3293,20 @@ function buildGuidedPendingLedgerReply(
     lines.push(`... y ${rows.length - 20} pendiente(s) mas.`);
   }
 
-  lines.push('', 'Para cerrar rapido: `bet_id 123 WON`.');
+  const sampleIds = rows
+    .map((bet) => Number(bet?.id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+    .slice(0, 3);
+  if (sampleIds.length) {
+    lines.push(
+      '',
+      `Ejemplos para cerrar: ${sampleIds
+        .map((id, index) => `\`bet_id ${id} ${index % 2 === 0 ? 'LOST' : 'WON'}\``)
+        .join(' | ')}.`
+    );
+  } else {
+    lines.push('', 'Para cerrar rapido: `bet_id 123 WON`.');
+  }
   return lines.join('\n');
 }
 

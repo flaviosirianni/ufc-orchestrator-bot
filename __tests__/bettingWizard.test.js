@@ -4067,7 +4067,7 @@ export async function runBettingWizardTests() {
     assert.match(result.reply, /Total ganado/i);
     assert.match(result.reply, /Total perdido/i);
     assert.match(result.reply, /Win rate/i);
-    assert.match(result.reply, /#3/);
+    assert.match(result.reply, /bet_id 3/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 
@@ -4124,7 +4124,8 @@ export async function runBettingWizardTests() {
     assert.equal(listCalls[0].status, 'pending');
     assert.match(result.reply, /Pendientes del ledger/i);
     assert.match(result.reply, /Exposicion abierta/i);
-    assert.match(result.reply, /#11/);
+    assert.match(result.reply, /bet_id 11/i);
+    assert.match(result.reply, /Ejemplos para cerrar/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 

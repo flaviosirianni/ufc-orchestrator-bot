@@ -1,7 +1,8 @@
 const DIRECT_SHEET_KEYWORDS = /\b(sheet|google sheets|read|leer|write|append|update|set|escrib|agrega|agregar|anadir|añadir)\b/i;
 const RANGE_PATTERN = /\b(?:[A-Za-z0-9_]+![A-Z]+(?:\d+)?(?::[A-Z]+(?:\d+)?)?|[A-Z]+\d+:[A-Z]+\d+|[A-Z]+:[A-Z]+)\b/;
 const RAW_HISTORY_KEYWORDS = /\b(historial|history|filas|rows|tabla|raw data|cache|sync|refresh)\b/i;
-const ANALYSIS_KEYWORDS = /\b(analiz|opina|pick|gana|quien|evento|main card|predic|estrateg|apuesta|vs|versus)\b/i;
+const ANALYSIS_KEYWORDS =
+  /\b(analiz|opina|pick|gana|quien|evento|main card|predic|estrateg|apuestas?|ledger|vs|versus)\b/i;
 
 function parseRouteInput(input) {
   if (typeof input === 'string') {
@@ -119,7 +120,8 @@ export function createRouterChain({
       : defaultResolution(originalMessage);
     const messageForAgent = resolution?.resolvedMessage || originalMessage;
 
-    const target = classifyIntent(originalMessage);
+    const hasGuidedAction = Boolean(String(metadata?.guidedAction || '').trim());
+    const target = hasGuidedAction ? 'bettingwizard' : classifyIntent(originalMessage);
     console.log(`🤖 Router decided: ${target}`);
 
     let rawResult = null;

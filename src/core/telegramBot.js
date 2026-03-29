@@ -156,7 +156,7 @@ const QUICK_ACTION_HINTS = {
     'Ideal: screenshot del resultado de la apuesta (ticket/historial del bookie).',
     'Fallback texto: `bet_id + resultado`.',
     'Ejemplo: `bet_id 31 WON` o `bet_id 31 LOST`.',
-    'Si no sabes el ID, primero tocá `Pendientes`.',
+    'Si no sabes el ID, primero tocá `Pendientes` (aparece como `bet_id 45`).',
   ].join('\n'),
   config_stake: [
     '⚙️ Configurar stake minimo',

@@ -108,6 +108,29 @@ export async function runRouterChainTests() {
     assert.equal(turns[1].role, 'assistant');
   });
 
+  tests.push(async () => {
+    const router = createRouterChain({
+      bettingWizard: {
+        async handleMessage(message) {
+          return `BW:${message}`;
+        },
+      },
+      sheetOps: { async handleMessage() { return 'SO'; } },
+      fightsScalper: {
+        async handleMessage(message) {
+          return `FS:${message}`;
+        },
+      },
+    });
+
+    const response = await router.routeMessage({
+      chatId: 'chat-guided-history-1',
+      message: 'mostrame mi historial de apuestas del ledger',
+      guidedAction: 'ledger_list_history',
+    });
+    assert.equal(response, 'BW:mostrame mi historial de apuestas del ledger');
+  });
+
   for (const test of tests) {
     await test();
   }
