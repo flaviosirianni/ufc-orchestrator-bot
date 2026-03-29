@@ -187,7 +187,8 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - `Ayuda`
 - Free-form text is blocked by default and re-routed to the guided flow, except when it looks like structured odds input.
 - Structured text fallback is controlled with `GUIDED_QUOTES_TEXT_FALLBACK=true|false`.
-- For quote analysis, the recommended input is a full screenshot of the betting page. Text fallback format: `evento, pelea, mercado, cuota`.
+- In this bot, "quotes" means sportsbook odds/cuotas for a specific fight.
+- For actionable quote analysis, the recommended input is a full screenshot of the betting page for that fight (no crop). Text fallback format: `evento, pelea, mercado, cuota`.
 - Rollback to previous behavior is immediate by setting `TELEGRAM_INTERACTION_MODE=hybrid` and restarting the process.
 
 ### Web Enrichment Before Analysis
