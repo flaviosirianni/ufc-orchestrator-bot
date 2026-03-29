@@ -20,6 +20,7 @@ import { createHealthServer } from '../../platform/runtime/healthServer.js';
 import { enforcePolicyPack } from '../../platform/policy/policyGuard.js';
 import {
   addNutritionIntakes,
+  addNutritionUsageRecord,
   addNutritionWeighin,
   appendNutritionJournal,
   calculateProfileStatus,
@@ -203,6 +204,37 @@ function extractOutputText(response = {}) {
   }
 
   return '';
+}
+
+function extractUsageSnapshot(response = {}) {
+  const usage = response?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens);
+  const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens);
+  const totalTokens = Number(
+    usage.total_tokens ??
+      (Number.isFinite(inputTokens) && Number.isFinite(outputTokens)
+        ? inputTokens + outputTokens
+        : NaN)
+  );
+  const reasoningTokens = Number(
+    usage.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens
+  );
+  const cachedTokens = Number(
+    usage.cached_tokens ?? usage.input_tokens_details?.cached_tokens
+  );
+
+  const toNonNegativeOrNull = (value) =>
+    Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+
+  return {
+    inputTokens: toNonNegativeOrNull(inputTokens),
+    outputTokens: toNonNegativeOrNull(outputTokens),
+    totalTokens: toNonNegativeOrNull(totalTokens),
+    reasoningTokens: toNonNegativeOrNull(reasoningTokens),
+    cachedTokens: toNonNegativeOrNull(cachedTokens),
+    rawUsage: usage,
+  };
 }
 
 function toPositiveNumber(value, fallback = 0) {
@@ -417,6 +449,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       const userTimeZone = String(profile?.timezone || DEFAULT_USER_TIMEZONE).trim();
       let replyText = '';
       let shouldCharge = false;
+      let usageSnapshot = null;
 
       if (guidedAction === 'update_profile') {
         if (!cleanMessage) {
@@ -512,6 +545,19 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           instructions: runtimePrompt,
           input: userInput,
         });
+        usageSnapshot = extractUsageSnapshot(response);
+        if (usageSnapshot) {
+          addNutritionUsageRecord(userId, {
+            guidedAction,
+            model,
+            inputTokens: usageSnapshot.inputTokens,
+            outputTokens: usageSnapshot.outputTokens,
+            totalTokens: usageSnapshot.totalTokens,
+            reasoningTokens: usageSnapshot.reasoningTokens,
+            cachedTokens: usageSnapshot.cachedTokens,
+            rawUsage: usageSnapshot.rawUsage,
+          });
+        }
         const rawReply =
           extractOutputText(response) ||
           'No pude generar una respuesta útil en este turno. Reintentá con más contexto.';
@@ -596,6 +642,15 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             guidedAction,
             model,
             mediaStats,
+            tokenUsage: usageSnapshot
+              ? {
+                  inputTokens: usageSnapshot.inputTokens,
+                  outputTokens: usageSnapshot.outputTokens,
+                  totalTokens: usageSnapshot.totalTokens,
+                  reasoningTokens: usageSnapshot.reasoningTokens,
+                  cachedTokens: usageSnapshot.cachedTokens,
+                }
+              : null,
           },
         });
       }

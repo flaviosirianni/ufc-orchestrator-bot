@@ -286,6 +286,23 @@ export function ensureNutritionSchema() {
       active_module TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS nutrition_usage_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      guided_action TEXT,
+      model TEXT,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      total_tokens INTEGER,
+      reasoning_tokens INTEGER,
+      cached_tokens INTEGER,
+      created_at TEXT NOT NULL,
+      raw_usage_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nutrition_usage_user_time
+      ON nutrition_usage_records (telegram_user_id, created_at DESC);
   `);
 
   const seedStmt = db.prepare(`
@@ -620,6 +637,47 @@ export function addNutritionWeighin(userId = '', weighin = {}) {
       notes: String(weighin.notes || '').trim() || null,
       rawInput: String(weighin.rawInput || '').trim() || null,
       createdAt: new Date().toISOString(),
+    });
+
+  return { ok: true };
+}
+
+export function addNutritionUsageRecord(userId = '', payload = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) {
+    return { ok: false, error: 'missing_user_id' };
+  }
+
+  const toIntOrNull = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return null;
+    return Math.round(parsed);
+  };
+
+  getDb()
+    .prepare(
+      `
+    INSERT INTO nutrition_usage_records (
+      telegram_user_id, guided_action, model, input_tokens, output_tokens, total_tokens,
+      reasoning_tokens, cached_tokens, created_at, raw_usage_json
+    ) VALUES (
+      @userId, @guidedAction, @model, @inputTokens, @outputTokens, @totalTokens,
+      @reasoningTokens, @cachedTokens, @createdAt, @rawUsageJson
+    )
+  `
+    )
+    .run({
+      userId: normalizedUserId,
+      guidedAction: String(payload.guidedAction || '').trim() || null,
+      model: String(payload.model || '').trim() || null,
+      inputTokens: toIntOrNull(payload.inputTokens),
+      outputTokens: toIntOrNull(payload.outputTokens),
+      totalTokens: toIntOrNull(payload.totalTokens),
+      reasoningTokens: toIntOrNull(payload.reasoningTokens),
+      cachedTokens: toIntOrNull(payload.cachedTokens),
+      createdAt: new Date().toISOString(),
+      rawUsageJson: payload.rawUsage ? JSON.stringify(payload.rawUsage) : null,
     });
 
   return { ok: true };
