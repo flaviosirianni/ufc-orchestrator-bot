@@ -1,35 +1,45 @@
-import { runRouterChainTests } from './routerChain.test.js';
-import { runToolsHandlersTests } from './toolsHandlers.test.js';
-import { runWebIntelToolTests } from './webIntelTool.test.js';
-import { runConversationStoreTests } from './conversationStore.test.js';
-import { runBettingWizardTests } from './bettingWizard.test.js';
-import { runHistoryScraperTests } from './historyScraper.test.js';
-import { runMessageFormatterTests } from './messageFormatter.test.js';
-import { runAutoSettlementTests } from './autoSettlement.test.js';
-import { runOddsApiToolTests } from './oddsApiTool.test.js';
-import { runBetScoringEngineTests } from './betScoringEngine.test.js';
-import { runSqliteStoreCompositeTests } from './sqliteStoreComposite.test.js';
-import { runTelegramBotTests } from './telegramBot.test.js';
-import { runManifestTests } from './manifest.test.js';
-import { runPolicyGuardTests } from './policyGuard.test.js';
-import { runBillingStoreTests } from './billingStore.test.js';
+import { execFileSync } from 'node:child_process';
+
+const SUITES = [
+  { modulePath: './routerChain.test.js', exportName: 'runRouterChainTests' },
+  { modulePath: './conversationStore.test.js', exportName: 'runConversationStoreTests' },
+  { modulePath: './toolsHandlers.test.js', exportName: 'runToolsHandlersTests' },
+  { modulePath: './webIntelTool.test.js', exportName: 'runWebIntelToolTests' },
+  { modulePath: './oddsApiTool.test.js', exportName: 'runOddsApiToolTests' },
+  { modulePath: './betScoringEngine.test.js', exportName: 'runBetScoringEngineTests' },
+  { modulePath: './historyScraper.test.js', exportName: 'runHistoryScraperTests' },
+  { modulePath: './autoSettlement.test.js', exportName: 'runAutoSettlementTests' },
+  { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
+  { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },
+  { modulePath: './telegramBot.test.js', exportName: 'runTelegramBotTests' },
+  { modulePath: './messageFormatter.test.js', exportName: 'runMessageFormatterTests' },
+  { modulePath: './manifest.test.js', exportName: 'runManifestTests' },
+  { modulePath: './policyGuard.test.js', exportName: 'runPolicyGuardTests' },
+  { modulePath: './billingStore.test.js', exportName: 'runBillingStoreTests' },
+];
+
+async function runSuite({ modulePath = '', exportName = '' } = {}) {
+  const mod = await import(modulePath);
+  const runner = mod?.[exportName];
+  if (typeof runner !== 'function') {
+    throw new Error(`Suite inválida: ${modulePath} no exporta ${exportName}.`);
+  }
+  await runner();
+}
 
 async function main() {
-  await runRouterChainTests();
-  await runConversationStoreTests();
-  await runToolsHandlersTests();
-  await runWebIntelToolTests();
-  await runOddsApiToolTests();
-  await runBetScoringEngineTests();
-  await runHistoryScraperTests();
-  await runAutoSettlementTests();
-  await runSqliteStoreCompositeTests();
-  await runBettingWizardTests();
-  await runTelegramBotTests();
-  await runMessageFormatterTests();
-  await runManifestTests();
-  await runPolicyGuardTests();
-  await runBillingStoreTests();
+  for (const suite of SUITES) {
+    await runSuite(suite);
+  }
+  execFileSync(process.execPath, ['__tests__/nutritionDomain.test.js'], {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      DB_PATH:
+        process.env.DB_PATH ||
+        `/tmp/ufc-orchestrator-nutrition-tests-${Date.now()}.db`,
+    },
+  });
   console.log('All test suites passed.');
 }
 

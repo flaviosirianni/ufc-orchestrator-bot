@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { startTelegramBot } from '../src/core/telegramBot.js';
+import { normalizeGuidedMenuId, startTelegramBot } from '../src/core/telegramBot.js';
 
 class FakeTelegramBot {
   constructor() {
@@ -85,6 +85,12 @@ function createBaseCallback({
 
 export async function runTelegramBotTests() {
   const tests = [];
+
+  tests.push(async () => {
+    assert.equal(normalizeGuidedMenuId('ufc_default'), 'ufc_v1');
+    assert.equal(normalizeGuidedMenuId('default'), 'ufc_v1');
+    assert.equal(normalizeGuidedMenuId('nutrition_v1'), 'nutrition_v1');
+  });
 
   tests.push(async () => {
     const fakeBot = new FakeTelegramBot();
@@ -365,6 +371,153 @@ export async function runTelegramBotTests() {
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /no esta disponible/i);
     assert.equal(router.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_learning',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'explicame recomposicion corporal',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'learning_chat');
+    assert.equal(router.calls[0].inputType, 'text_freechat');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_view_summary',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'view_summary');
+    assert.equal(router.calls[0].inputType, 'synthetic');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_log_weighin',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'hola',
+      })
+    );
+
+    assert.equal(router.calls.length, 0);
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /modo guiado - registrar pesaje/i);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_view_summary',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'hola',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /resumen/i);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      allowedTelegramUserIds: ['999'],
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '13:00 pollo con arroz',
+        userId: 200,
+      })
+    );
+
+    assert.equal(router.calls.length, 0);
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /qa privado/i);
   });
 
   for (const test of tests) {

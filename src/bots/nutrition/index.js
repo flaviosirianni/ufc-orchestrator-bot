@@ -1,8 +1,5 @@
-import { bootstrapScaffoldedBot } from '../../platform/runtime/scaffoldedBotRuntime.js';
+import { bootstrapNutritionBot } from './runtime.js';
 
 export async function bootstrapBot({ manifest } = {}) {
-  return bootstrapScaffoldedBot({
-    manifest,
-    templateId: 'expert_advisor',
-  });
+  return bootstrapNutritionBot({ manifest });
 }

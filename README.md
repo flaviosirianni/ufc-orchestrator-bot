@@ -151,6 +151,8 @@ OPENAI_API_KEY=sk-...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_INTERACTION_MODE=guided_strict
 GUIDED_QUOTES_TEXT_FALLBACK=true
+BOT_ALLOWED_TELEGRAM_USER_IDS=
+DEFAULT_USER_TIMEZONE=America/Argentina/Buenos_Aires
 NUTRITION_TELEGRAM_BOT_TOKEN=
 MEDICAL_READER_TELEGRAM_BOT_TOKEN=
 BILLING_BASE_URL=
@@ -283,7 +285,10 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 ### Guided Interaction Mode (Telegram)
 
 - Default mode is `guided_strict` (`TELEGRAM_INTERACTION_MODE=guided_strict`).
-- In `guided_strict`, the visible menu is minimal:
+- En `guided_strict`, el menú depende del `domain_pack.guided_menu` del manifest:
+  - `ufc_v1`: menú UFC guiado (análisis/ledger/créditos/ayuda).
+  - `nutrition_v1`: módulos guiados de nutrición (`Registrar ingesta`, `Registrar pesaje`, `Perfil/objetivos`, `Resumen`, `Aprendizaje`, `Créditos`, `Ayuda`).
+- Para UFC (`ufc_v1`), el menú visible es:
   - `Analizar cuotas`
   - `Ledger`
   - `Creditos`
@@ -297,6 +302,14 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
   - `Cerrar`: screenshot resultado first, text fallback `bet_id + WON/LOST/PUSH`.
   - `Pendientes` and `Historial`: consultas de lectura del ledger.
 - Rollback to previous behavior is immediate by setting `TELEGRAM_INTERACTION_MODE=hybrid` and restarting the process.
+- QA privado opcional por allowlist: `BOT_ALLOWED_TELEGRAM_USER_IDS=123,456`.
+
+#### Nutrition V1 Notes
+
+- `Aprendizaje` es el único módulo con chat libre.
+- Fuera de `Aprendizaje`, el bot reencauza al módulo operativo seleccionado.
+- V1 no incluye OCR de etiquetas ni lookup online de productos de marca.
+- Si no se informa hora/fecha en ingesta o pesaje, usa hora local del usuario (`DEFAULT_USER_TIMEZONE` o perfil).
 
 ### Web Enrichment Before Analysis
 

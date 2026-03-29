@@ -366,6 +366,7 @@ export async function bootstrapScaffoldedBot({ manifest = {}, templateId = 'expe
   const telegram = startTelegramBot(router, {
     interactionMode:
       manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
+    guidedMenuId: manifest?.domain_pack?.guided_menu || 'default',
     guidedLedgerEnabled: false,
     token:
       process.env[String(manifest?.telegram_token_env || 'TELEGRAM_BOT_TOKEN')] ||

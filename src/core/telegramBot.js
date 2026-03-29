@@ -21,13 +21,24 @@ const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
+const BOT_ALLOWED_TELEGRAM_USER_IDS = process.env.BOT_ALLOWED_TELEGRAM_USER_IDS || '';
 const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
+const GUIDED_MENU_IDS = new Set(['default', 'ufc_default', 'ufc_v1', 'nutrition_v1']);
 const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
   process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict'
 );
 const GUIDED_QUOTES_TEXT_FALLBACK =
   String(process.env.GUIDED_QUOTES_TEXT_FALLBACK ?? 'true').toLowerCase() !== 'false';
-const GUIDED_INPUT_ACTIONS = new Set(['analyze_quotes', 'record_bet', 'settle_bet']);
+const GUIDED_INPUT_ACTIONS = new Set([
+  'analyze_quotes',
+  'record_bet',
+  'settle_bet',
+  'log_intake',
+  'log_weighin',
+  'update_profile',
+  'view_summary',
+  'learning_chat',
+]);
 
 const MAIN_MENU_ROWS = [
   [
@@ -67,6 +78,22 @@ const GUIDED_LEDGER_MENU_ROWS = [
     { text: 'Historial', callback_data: 'qa:list_history' },
   ],
   [{ text: '⬅ Volver', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
+  [
+    { text: 'Registrar ingesta', callback_data: 'qa:nutrition_log_intake' },
+    { text: 'Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' },
+  ],
+  [
+    { text: 'Perfil/objetivos', callback_data: 'qa:nutrition_update_profile' },
+    { text: 'Resumen', callback_data: 'qa:nutrition_view_summary' },
+  ],
+  [
+    { text: 'Aprendizaje', callback_data: 'qa:nutrition_learning' },
+    { text: 'Creditos', callback_data: 'qa:view_credits' },
+  ],
+  [{ text: 'Ayuda', callback_data: 'qa:help' }],
 ];
 
 const BETS_MENU_ROWS = [
@@ -307,6 +334,78 @@ const QUICK_ACTION_HINTS = {
     'Mandame screenshot del resultado del ticket o del historial del bookie.',
     'Si no tenes imagen, usa texto: `bet_id + WON/LOST/PUSH`.',
   ].join('\n'),
+  nutrition_help_guided: [
+    '🆘 Ayuda (Nutricion V1, modo guiado)',
+    '',
+    'Modulos:',
+    '- `Registrar ingesta`: texto simple `hora + lo ingerido` (si no ponés hora, uso ahora local).',
+    '- `Registrar pesaje`: `peso_kg` obligatorio; el resto es opcional.',
+    '- `Perfil/objetivos`: objetivo, kcal target, proteina target, timezone, notas.',
+    '- `Resumen`: hoy + rolling 7d/14d + estado vs objetivo.',
+    '- `Aprendizaje`: unico modulo con chat libre nutricional.',
+    '- `Creditos`: saldo y recarga.',
+    '',
+    'Fuera de `Aprendizaje`, el bot no toma chat ambiguo: te reencauza al modulo activo.',
+  ].join('\n'),
+  nutrition_welcome: [
+    '🥗 Menu principal (Nutricion V1)',
+    'Elegí un modulo:',
+    '- `Registrar ingesta`',
+    '- `Registrar pesaje`',
+    '- `Perfil/objetivos`',
+    '- `Resumen`',
+    '- `Aprendizaje`',
+  ].join('\n'),
+  nutrition_log_intake: [
+    '🍽 Registrar ingesta',
+    'Formato simple recomendado:',
+    '- `13:30 pollo con arroz + ensalada`',
+    '- `mate con 2 tostadas con queso`',
+    'Si no aclarás fecha/hora, uso ahora en tu timezone.',
+  ].join('\n'),
+  nutrition_log_weighin: [
+    '⚖️ Registrar pesaje',
+    'Mandame al menos el peso en kg.',
+    'Ejemplos:',
+    '- `81.4 kg`',
+    '- `hoy 08:15 81.4 kg grasa 18.2% agua 56%`',
+  ].join('\n'),
+  nutrition_update_profile: [
+    '🧭 Perfil / objetivos',
+    'Podés pasar uno o varios campos en el mismo mensaje.',
+    'Ejemplos:',
+    '- `objetivo bajar grasa manteniendo musculo`',
+    '- `target 2200 kcal y 170g proteina`',
+    '- `timezone America/Argentina/Buenos_Aires`',
+    '- `restricciones: sin lactosa`',
+  ].join('\n'),
+  nutrition_view_summary: [
+    '📊 Resumen',
+    'Te voy a mostrar hoy + rolling 7d/14d y comparacion corta vs tu perfil.',
+  ].join('\n'),
+  nutrition_learning: [
+    '🎓 Modo Aprendizaje activo',
+    'Acá sí podés chatear libre sobre nutrición, objetivos y conceptos.',
+    'No voy a registrar ingestas/pesajes desde este modulo salvo instrucción explícita de cambio.',
+  ].join('\n'),
+  nutrition_reencauce: [
+    '📌 Modo guiado Nutricion activo.',
+    'Elegí un modulo en botones para operar: ingesta, pesaje, perfil, resumen o aprendizaje.',
+  ].join('\n'),
+  nutrition_reencauce_intake: [
+    '📌 Modo guiado - Registrar ingesta.',
+    'Mandame texto simple con `hora + lo ingerido`.',
+    'Ejemplo: `14:10 yogur + banana + 30g avena`.',
+  ].join('\n'),
+  nutrition_reencauce_weighin: [
+    '📌 Modo guiado - Registrar pesaje.',
+    'Necesito al menos `peso_kg`.',
+    'Ejemplo: `81.4 kg`.',
+  ].join('\n'),
+  nutrition_reencauce_profile: [
+    '📌 Modo guiado - Perfil/objetivos.',
+    'Pasame campos a actualizar (objetivo, kcal, proteina, timezone, notas/restricciones).',
+  ].join('\n'),
 };
 
 const MENU_SCOPES = new Set(['main', 'ledger', 'bets', 'event', 'config']);
@@ -331,12 +430,54 @@ const GUIDED_ALLOWED_CALLBACKS_MINIMAL = new Set([
   'qa:topup_credits',
 ]);
 
+const NUTRITION_GUIDED_ALLOWED_CALLBACKS = new Set([
+  'menu:main',
+  'qa:nutrition_log_intake',
+  'qa:nutrition_log_weighin',
+  'qa:nutrition_update_profile',
+  'qa:nutrition_view_summary',
+  'qa:nutrition_learning',
+  'qa:help',
+  'qa:view_credits',
+  'qa:topup_credits',
+]);
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function parseAllowedUserIds(raw = '') {
+  return new Set(
+    String(raw || '')
+      .split(',')
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+}
+
+export function normalizeGuidedMenuId(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (GUIDED_MENU_IDS.has(normalized)) {
+    if (normalized === 'default' || normalized === 'ufc_default') {
+      return 'ufc_v1';
+    }
+    return normalized;
+  }
+  return 'ufc_v1';
+}
+
+function getDefaultGuidedAction({ guidedMenuId = 'ufc_v1', guidedLedgerEnabled = true } = {}) {
+  if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
+    return 'log_intake';
+  }
+  if (!guidedLedgerEnabled) {
+    return 'analyze_quotes';
+  }
+  return 'analyze_quotes';
 }
 
 export function normalizeInteractionMode(mode = '') {
@@ -348,14 +489,21 @@ export function isGuidedStrictInteractionMode(mode = '') {
   return normalizeInteractionMode(mode) === 'guided_strict';
 }
 
-export function normalizeGuidedAction(action = '') {
+export function normalizeGuidedAction(action = '', { defaultAction = 'analyze_quotes' } = {}) {
   const normalized = String(action || '').trim().toLowerCase();
-  return GUIDED_INPUT_ACTIONS.has(normalized) ? normalized : 'analyze_quotes';
+  return GUIDED_INPUT_ACTIONS.has(normalized) ? normalized : defaultAction;
 }
 
-export function isGuidedCallbackAllowed(callbackData = '', { ledgerEnabled = true } = {}) {
+export function isGuidedCallbackAllowed(
+  callbackData = '',
+  { ledgerEnabled = true, guidedMenuId = 'ufc_v1' } = {}
+) {
   const value = String(callbackData || '').trim();
-  const allowed = ledgerEnabled ? GUIDED_ALLOWED_CALLBACKS : GUIDED_ALLOWED_CALLBACKS_MINIMAL;
+  const menuId = normalizeGuidedMenuId(guidedMenuId);
+  let allowed = ledgerEnabled ? GUIDED_ALLOWED_CALLBACKS : GUIDED_ALLOWED_CALLBACKS_MINIMAL;
+  if (menuId === 'nutrition_v1') {
+    allowed = NUTRITION_GUIDED_ALLOWED_CALLBACKS;
+  }
   if (allowed.has(value)) {
     return true;
   }
@@ -394,8 +542,20 @@ export function resolveGuidedMessageDecision({
   hasMedia = false,
   allowTextFallback = GUIDED_QUOTES_TEXT_FALLBACK,
   activeGuidedAction = 'analyze_quotes',
+  guidedMenuId = 'ufc_v1',
 } = {}) {
-  const guidedAction = normalizeGuidedAction(activeGuidedAction);
+  const menuId = normalizeGuidedMenuId(guidedMenuId);
+  if (menuId === 'nutrition_v1') {
+    return resolveNutritionGuidedMessageDecision({
+      cleanMessage,
+      hasMedia,
+      activeGuidedAction,
+    });
+  }
+
+  const guidedAction = normalizeGuidedAction(activeGuidedAction, {
+    defaultAction: 'analyze_quotes',
+  });
   if (hasMedia) {
     return {
       action: 'route',
@@ -435,6 +595,105 @@ export function resolveGuidedMessageDecision({
     guidedAction: null,
     inputType: null,
   };
+}
+
+function looksLikeStructuredWeighinText(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+
+  const hasWeightKeyword = /\b(peso|kg|kilo|kilos)\b/.test(text);
+  const hasWeightValue = /\b\d{2,3}([.,]\d{1,2})?\b/.test(text);
+  return hasWeightKeyword && hasWeightValue;
+}
+
+function resolveNutritionGuidedMessageDecision({
+  cleanMessage = '',
+  hasMedia = false,
+  activeGuidedAction = 'log_intake',
+} = {}) {
+  const guidedAction = normalizeGuidedAction(activeGuidedAction, {
+    defaultAction: 'log_intake',
+  });
+  const normalizedText = normalizeText(cleanMessage);
+
+  if (guidedAction === 'learning_chat') {
+    if (hasMedia) {
+      return {
+        action: 'route',
+        guidedAction: 'learning_chat',
+        inputType: 'image_learning',
+      };
+    }
+    if (normalizedText) {
+      return {
+        action: 'route',
+        guidedAction: 'learning_chat',
+        inputType: 'text_freechat',
+      };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  if (guidedAction === 'log_weighin') {
+    if (hasMedia) {
+      return {
+        action: 'route',
+        guidedAction: 'log_weighin',
+        inputType: 'image_weighin',
+      };
+    }
+    if (looksLikeStructuredWeighinText(cleanMessage)) {
+      return {
+        action: 'route',
+        guidedAction: 'log_weighin',
+        inputType: 'text_weighin',
+      };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  if (guidedAction === 'update_profile') {
+    if (normalizedText && !hasMedia) {
+      return {
+        action: 'route',
+        guidedAction: 'update_profile',
+        inputType: 'text_profile',
+      };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  if (guidedAction === 'view_summary') {
+    if (
+      normalizedText &&
+      /\b(resumen|summary|rolling|promedio|hoy|como vengo|cómo vengo)\b/.test(normalizedText)
+    ) {
+      return {
+        action: 'route',
+        guidedAction: 'view_summary',
+        inputType: 'text_summary_request',
+      };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  if (hasMedia) {
+    return {
+      action: 'route',
+      guidedAction: 'log_intake',
+      inputType: 'image_intake',
+    };
+  }
+
+  if (normalizedText) {
+    return {
+      action: 'route',
+      guidedAction: 'log_intake',
+      inputType: 'text_intake',
+    };
+  }
+
+  return { action: 'block', guidedAction: null, inputType: null };
 }
 
 function looksLikeStructuredBetRecordText(message = '') {
@@ -619,8 +878,52 @@ function buildTopupPackButtons() {
   ]);
 }
 
-function resolveGuidedBlockHintByAction(guidedAction = '') {
-  const action = normalizeGuidedAction(guidedAction);
+function buildCreditsQuickActionRows({
+  guidedMenuId = 'ufc_v1',
+  guidedLedgerEnabled = true,
+} = {}) {
+  if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
+    return [
+      [
+        { text: '🍽 Ingesta', callback_data: 'qa:nutrition_log_intake' },
+        { text: '📊 Resumen', callback_data: 'qa:nutrition_view_summary' },
+      ],
+      [{ text: '🎓 Aprendizaje', callback_data: 'qa:nutrition_learning' }],
+    ];
+  }
+
+  return guidedLedgerEnabled
+    ? [
+        [
+          { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+          { text: '🧾 Ledger', callback_data: 'menu:ledger' },
+        ],
+      ]
+    : [[{ text: '📸 Analizar', callback_data: 'qa:analyze_quotes' }]];
+}
+
+function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
+  const menuId = normalizeGuidedMenuId(guidedMenuId);
+  if (menuId === 'nutrition_v1') {
+    const action = normalizeGuidedAction(guidedAction, { defaultAction: 'log_intake' });
+    if (action === 'log_weighin') {
+      return QUICK_ACTION_HINTS.nutrition_reencauce_weighin;
+    }
+    if (action === 'update_profile') {
+      return QUICK_ACTION_HINTS.nutrition_reencauce_profile;
+    }
+    if (action === 'view_summary') {
+      return QUICK_ACTION_HINTS.nutrition_view_summary;
+    }
+    if (action === 'learning_chat') {
+      return QUICK_ACTION_HINTS.nutrition_learning;
+    }
+    return QUICK_ACTION_HINTS.nutrition_reencauce_intake;
+  }
+
+  const action = normalizeGuidedAction(guidedAction, {
+    defaultAction: 'analyze_quotes',
+  });
   if (action === 'record_bet') {
     return QUICK_ACTION_HINTS.guided_reencauce_record_bet;
   }
@@ -630,8 +933,13 @@ function resolveGuidedBlockHintByAction(guidedAction = '') {
   return QUICK_ACTION_HINTS.guided_reencauce;
 }
 
-function guidedMenuScopeForAction(guidedAction = '') {
-  const action = normalizeGuidedAction(guidedAction);
+function guidedMenuScopeForAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
+  if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
+    return 'main';
+  }
+  const action = normalizeGuidedAction(guidedAction, {
+    defaultAction: 'analyze_quotes',
+  });
   return action === 'record_bet' || action === 'settle_bet' ? 'ledger' : 'main';
 }
 
@@ -753,11 +1061,26 @@ export function startTelegramBot(router, options = {}) {
   const interactionMode = normalizeInteractionMode(
     options.interactionMode || TELEGRAM_INTERACTION_MODE
   );
+  const guidedMenuId = normalizeGuidedMenuId(
+    options.guidedMenuId || options.domainGuidedMenu || 'ufc_v1'
+  );
   const guidedLedgerEnabled = options.guidedLedgerEnabled !== false;
   const guidedQuotesTextFallback =
     typeof options.guidedQuotesTextFallback === 'boolean'
       ? options.guidedQuotesTextFallback
       : GUIDED_QUOTES_TEXT_FALLBACK;
+  const allowedUserIds =
+    options.allowedTelegramUserIds instanceof Set
+      ? options.allowedTelegramUserIds
+      : parseAllowedUserIds(
+          Array.isArray(options.allowedTelegramUserIds)
+            ? options.allowedTelegramUserIds.join(',')
+            : String(options.allowedTelegramUserIds || BOT_ALLOWED_TELEGRAM_USER_IDS)
+        );
+  const defaultGuidedAction = getDefaultGuidedAction({
+    guidedMenuId,
+    guidedLedgerEnabled,
+  });
   const downloadFile = options.downloadFileImpl || downloadTelegramFile;
   const transcribeAudioImpl = options.transcribeAudioImpl || transcribeAudio;
   const convertAudioToMp3Impl = options.convertAudioToMp3Impl || convertAudioToMp3;
@@ -782,26 +1105,30 @@ export function startTelegramBot(router, options = {}) {
 
   function getGuidedAction(chatId) {
     const key = String(chatId || '').trim();
-    if (!key) return 'analyze_quotes';
-    const current = normalizeGuidedAction(guidedActionByChat.get(key) || 'analyze_quotes');
+    if (!key) return defaultGuidedAction;
+    const current = normalizeGuidedAction(guidedActionByChat.get(key) || defaultGuidedAction, {
+      defaultAction: defaultGuidedAction,
+    });
     if (
       !guidedLedgerEnabled &&
       (current === 'record_bet' || current === 'settle_bet')
     ) {
-      return 'analyze_quotes';
+      return defaultGuidedAction;
     }
     return current;
   }
 
-  function setGuidedAction(chatId, action = 'analyze_quotes') {
+  function setGuidedAction(chatId, action = defaultGuidedAction) {
     const key = String(chatId || '').trim();
-    if (!key) return 'analyze_quotes';
-    let normalized = normalizeGuidedAction(action);
+    if (!key) return defaultGuidedAction;
+    let normalized = normalizeGuidedAction(action, {
+      defaultAction: defaultGuidedAction,
+    });
     if (
       !guidedLedgerEnabled &&
       (normalized === 'record_bet' || normalized === 'settle_bet')
     ) {
-      normalized = 'analyze_quotes';
+      normalized = defaultGuidedAction;
     }
     guidedActionByChat.set(key, normalized);
     return normalized;
@@ -809,6 +1136,11 @@ export function startTelegramBot(router, options = {}) {
 
   function buildQuickActionsMarkup(scope = 'main') {
     if (isGuidedStrictInteractionMode(interactionMode)) {
+      if (guidedMenuId === 'nutrition_v1') {
+        return {
+          inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS,
+        };
+      }
       if (scope === 'ledger' && guidedLedgerEnabled) {
         return {
           inline_keyboard: GUIDED_LEDGER_MENU_ROWS,
@@ -839,6 +1171,20 @@ export function startTelegramBot(router, options = {}) {
     return {
       inline_keyboard: MAIN_MENU_ROWS,
     };
+  }
+
+  function isUserAllowed(userId) {
+    const normalizedUserId = String(userId || '').trim();
+    if (!normalizedUserId) return false;
+    if (!allowedUserIds.size) return true;
+    return allowedUserIds.has(normalizedUserId);
+  }
+
+  async function sendAccessDenied(chatId) {
+    return sendBotMessage(
+      chatId,
+      '🔒 Esta instancia está en QA privado. Tu usuario no está habilitado todavía.'
+    );
   }
 
   async function sendBotMessage(
@@ -904,6 +1250,9 @@ export function startTelegramBot(router, options = {}) {
 
   async function sendMenu(chatId, scope = 'main') {
     if (isGuidedStrictInteractionMode(interactionMode)) {
+      if (guidedMenuId === 'nutrition_v1') {
+        return sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_welcome, { menuScope: 'main' });
+      }
       if (scope === 'ledger' && guidedLedgerEnabled) {
         return sendBotMessage(chatId, '🧾 Menu Ledger (modo guiado)', {
           menuScope: 'ledger',
@@ -1008,6 +1357,12 @@ export function startTelegramBot(router, options = {}) {
 
   async function processSingleMessage(msg) {
     const chatId = msg.chat.id;
+    const fromUserId = msg?.from?.id ? String(msg.from.id) : '';
+    if (!isUserAllowed(fromUserId)) {
+      await sendAccessDenied(chatId);
+      return;
+    }
+
     let userMessage = msg.text || msg.caption || '';
 
     const inputItems = [];
@@ -1060,18 +1415,26 @@ export function startTelegramBot(router, options = {}) {
     const cleanMessage = String(userMessage || '').trim();
     if (/^\/start\b/i.test(cleanMessage)) {
       if (isGuidedStrictInteractionMode(interactionMode)) {
-        setGuidedAction(chatId, 'analyze_quotes');
+        setGuidedAction(chatId, defaultGuidedAction);
       }
       await sendMenu(chatId, 'main');
       if (isGuidedStrictInteractionMode(interactionMode)) {
-        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
+        await sendBotMessage(
+          chatId,
+          guidedMenuId === 'nutrition_v1'
+            ? QUICK_ACTION_HINTS.nutrition_log_intake
+            : QUICK_ACTION_HINTS.analyze_quotes,
+          { menuScope: 'main' }
+        );
       }
       return;
     }
 
     if (/^\/help\b/i.test(cleanMessage)) {
       const helpText = isGuidedStrictInteractionMode(interactionMode)
-        ? QUICK_ACTION_HINTS.help_guided
+        ? guidedMenuId === 'nutrition_v1'
+          ? QUICK_ACTION_HINTS.nutrition_help_guided
+          : QUICK_ACTION_HINTS.help_guided
         : QUICK_ACTION_HINTS.help;
       await sendBotMessage(chatId, helpText, { menuScope: 'main' });
       return;
@@ -1084,13 +1447,22 @@ export function startTelegramBot(router, options = {}) {
         hasMedia: inputItems.length > 0,
         allowTextFallback: guidedQuotesTextFallback,
         activeGuidedAction,
+        guidedMenuId,
       });
 
       if (decision.action !== 'route') {
-        await sendBotMessage(chatId, resolveGuidedBlockHintByAction(activeGuidedAction), {
-          menuScope: guidedMenuScopeForAction(activeGuidedAction),
-        });
+        await sendBotMessage(
+          chatId,
+          resolveGuidedBlockHintByAction(activeGuidedAction, { guidedMenuId }),
+          {
+            menuScope: guidedMenuScopeForAction(activeGuidedAction, { guidedMenuId }),
+          }
+        );
         return;
+      }
+
+      if (guidedMenuId === 'nutrition_v1' && decision.guidedAction) {
+        setGuidedAction(chatId, decision.guidedAction);
       }
 
       await deliverToRouter({
@@ -1137,6 +1509,11 @@ export function startTelegramBot(router, options = {}) {
 
     const first = messages[0];
     const chatId = first.chat.id;
+    const fromUserId = first?.from?.id ? String(first.from.id) : '';
+    if (!isUserAllowed(fromUserId)) {
+      await sendAccessDenied(chatId);
+      return;
+    }
     const inputItems = [];
     const textParts = [];
     const mediaStats = { imageCount: 0, audioSeconds: 0 };
@@ -1180,13 +1557,22 @@ export function startTelegramBot(router, options = {}) {
         hasMedia: inputItems.length > 0,
         allowTextFallback: guidedQuotesTextFallback,
         activeGuidedAction,
+        guidedMenuId,
       });
 
       if (decision.action !== 'route') {
-        await sendBotMessage(chatId, resolveGuidedBlockHintByAction(activeGuidedAction), {
-          menuScope: guidedMenuScopeForAction(activeGuidedAction),
-        });
+        await sendBotMessage(
+          chatId,
+          resolveGuidedBlockHintByAction(activeGuidedAction, { guidedMenuId }),
+          {
+            menuScope: guidedMenuScopeForAction(activeGuidedAction, { guidedMenuId }),
+          }
+        );
         return;
+      }
+
+      if (guidedMenuId === 'nutrition_v1' && decision.guidedAction) {
+        setGuidedAction(chatId, decision.guidedAction);
       }
 
       await deliverToRouter({
@@ -1225,6 +1611,11 @@ export function startTelegramBot(router, options = {}) {
     if (!chatId) {
       return;
     }
+    const safeUserId = query?.from?.id ? String(query.from.id) : '';
+    if (!isUserAllowed(safeUserId)) {
+      await sendAccessDenied(chatId);
+      return;
+    }
 
     try {
       await bot.answerCallbackQuery(query.id);
@@ -1233,19 +1624,67 @@ export function startTelegramBot(router, options = {}) {
     }
 
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      if (!isGuidedCallbackAllowed(data, { ledgerEnabled: guidedLedgerEnabled })) {
+      if (
+        !isGuidedCallbackAllowed(data, {
+          ledgerEnabled: guidedLedgerEnabled,
+          guidedMenuId,
+        })
+      ) {
         await sendBotMessage(chatId, 'Esa accion no esta disponible en modo guiado.', {
           menuScope: 'main',
         });
         return;
       }
 
-      const safeUserId = query?.from?.id ? String(query.from.id) : '';
-
       if (data === 'menu:main') {
-        setGuidedAction(chatId, 'analyze_quotes');
+        setGuidedAction(chatId, defaultGuidedAction);
         await sendMenu(chatId, 'main');
         return;
+      }
+
+      if (guidedMenuId === 'nutrition_v1') {
+        if (data === 'qa:nutrition_log_intake') {
+          setGuidedAction(chatId, 'log_intake');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_intake, { menuScope: 'main' });
+          return;
+        }
+
+        if (data === 'qa:nutrition_log_weighin') {
+          setGuidedAction(chatId, 'log_weighin');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_weighin, {
+            menuScope: 'main',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_update_profile') {
+          setGuidedAction(chatId, 'update_profile');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_update_profile, {
+            menuScope: 'main',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_learning') {
+          setGuidedAction(chatId, 'learning_chat');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
+            menuScope: 'main',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_view_summary') {
+          setGuidedAction(chatId, 'view_summary');
+          const routed = await routeSyntheticAction(
+            query,
+            'mostrame mi resumen nutricional de hoy con rolling 7d y 14d',
+            { guidedAction: 'view_summary', inputType: 'synthetic' }
+          );
+          await sendBotMessage(chatId, routed || 'No pude calcular el resumen ahora mismo.', {
+            menuScope: 'main',
+          });
+          return;
+        }
       }
 
       if (data === 'menu:ledger') {
@@ -1326,7 +1765,13 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'qa:help') {
-        await sendBotMessage(chatId, QUICK_ACTION_HINTS.help_guided, { menuScope: 'main' });
+        await sendBotMessage(
+          chatId,
+          guidedMenuId === 'nutrition_v1'
+            ? QUICK_ACTION_HINTS.nutrition_help_guided
+            : QUICK_ACTION_HINTS.help_guided,
+          { menuScope: 'main' }
+        );
         return;
       }
 
@@ -1353,12 +1798,10 @@ export function startTelegramBot(router, options = {}) {
             inline_keyboard: [
               ...buildTopupPackButtons(),
               [{ text: '💳 Cargar creditos', callback_data: 'qa:topup_credits' }],
-              guidedLedgerEnabled
-                ? [
-                    { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-                    { text: '🧾 Ledger', callback_data: 'menu:ledger' },
-                  ]
-                : [{ text: '📸 Analizar', callback_data: 'qa:analyze_quotes' }],
+              ...buildCreditsQuickActionRows({
+                guidedMenuId,
+                guidedLedgerEnabled,
+              }),
             ],
           },
         });

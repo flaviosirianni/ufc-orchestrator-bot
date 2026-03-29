@@ -6,7 +6,7 @@
   "domain_pack": {
     "prompt_file": "src/bots/nutrition/prompt.md",
     "enabled_tools": [],
-    "guided_menu": "default"
+    "guided_menu": "nutrition_v1"
   },
   "credit_policy": {
     "costs": {
