@@ -78,3 +78,12 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
 - No asumir ruta de repo en servidor: verificar por `systemd` si hay dudas.
 - No hacer comandos destructivos (`reset --hard`, etc.) sin pedido explicito del usuario.
 - Si `git pull --ff-only` falla, detener y reportar estado (no forzar merge sin confirmacion).
+
+## Bot Factory Build Assistant
+
+- Para tareas de crear/provisionar/lanzar nuevos bots en este proyecto, usar por defecto el skill global `bot-factory-builder`.
+- Ese skill contiene:
+  - preflight de repo Bot Factory,
+  - checklist operativo de rollout por `bot_id`,
+  - validacion de manifest previa a deploy.
+- Si no aplica skill global por contexto, mantener igual la secuencia: preflight -> scaffold -> env/systemd -> smoke Telegram -> rollback path.
