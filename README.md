@@ -153,6 +153,7 @@ TELEGRAM_INTERACTION_MODE=guided_strict
 GUIDED_QUOTES_TEXT_FALLBACK=true
 BOT_ALLOWED_TELEGRAM_USER_IDS=
 DEFAULT_USER_TIMEZONE=America/Argentina/Buenos_Aires
+NUTRITION_SMART_MODELS=gpt-5.4,gpt-5.2,gpt-4.1-mini
 NUTRITION_DB_BACKUP_ENABLED=true
 NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups
 NUTRITION_DB_BACKUP_INTERVAL_MS=21600000
@@ -312,8 +313,10 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 
 - `Aprendizaje` es el único módulo con chat libre.
 - Fuera de `Aprendizaje`, el bot reencauza al módulo operativo seleccionado.
+- `Registrar ingesta` y `Aprendizaje` usan la familia de modelos configurada en `NUTRITION_SMART_MODELS` (fallback automático por disponibilidad).
 - En `Aprendizaje`, si el mensaje pide datos personales (`resumen`, `cómo vengo`, `qué comí`, `perfil`, `último peso`), se responde **DB-first** con datos reales de SQLite antes de usar chat libre.
-- V1 no incluye OCR de etiquetas ni lookup online de productos de marca.
+- V1 no incluye OCR de platos/comidas generales ni lookup online automático de productos de marca.
+- Si en ingesta aparece un producto de paquete no bien identificado, el bot pide foto de tabla nutricional y puede guardar/actualizar ese producto en `INFO_NUTRICIONAL` (catálogo global).
 - Si no se informa hora/fecha en ingesta o pesaje, usa hora local del usuario (`DEFAULT_USER_TIMEZONE` o perfil).
 - Escrituras de `ingesta`, `pesaje` y `perfil` tienen idempotencia por mensaje Telegram (`user_id + operation + message_id`) para evitar duplicados por reintentos.
 - Si una escritura falla, el bot devuelve error explícito y no confirma “anotado”.

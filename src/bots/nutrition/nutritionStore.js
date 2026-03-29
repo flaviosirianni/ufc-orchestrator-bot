@@ -1240,6 +1240,27 @@ export function findFoodCatalogCandidates(query = '', { limit = 25 } = {}) {
   return rows;
 }
 
+export function getFoodCatalogPreview({ limit = 80 } = {}) {
+  ensureNutritionSchema();
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      product_name AS productName,
+      brand,
+      portion_g AS portionG,
+      calories_kcal AS caloriesKcal,
+      protein_g AS proteinG,
+      carbs_g AS carbsG,
+      fat_g AS fatG
+    FROM nutrition_food_catalog
+    ORDER BY updated_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(Math.max(1, Number(limit) || 80));
+}
+
 export function getNutritionSummary(userId = '', localDate = '') {
   const today = getDailyNutritionTotals(userId, localDate);
   const rolling7d = getRollingNutritionAverages(userId, localDate, 7);

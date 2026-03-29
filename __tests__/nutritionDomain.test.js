@@ -43,6 +43,24 @@ export async function runNutritionDomainTests() {
   assert.equal(parsedIntake.items.length, 1);
   assert.equal(parsedIntake.items[0].foodItem, 'arroz cocido');
 
+  const brandedProduct = `yogur ser proteico test ${Date.now()}`;
+  upsertFoodCatalogEntry({
+    productName: brandedProduct,
+    brand: 'Ser',
+    portionG: 170,
+    caloriesKcal: 120,
+    proteinG: 18,
+    carbsG: 8,
+    fatG: 2,
+    source: 'manual',
+  });
+  const brandedPhrase = parseIntakePayload({
+    rawMessage: `1 ${brandedProduct} del que tengo anotado en info nutricional`,
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(brandedPhrase.ok, true);
+  assert.equal(brandedPhrase.items.length >= 1, true);
+
   const parsedRelative = parseIntakePayload({
     rawMessage: 'ayer 20:15 100g pechuga de pollo cocida',
     userTimeZone: 'America/Argentina/Buenos_Aires',

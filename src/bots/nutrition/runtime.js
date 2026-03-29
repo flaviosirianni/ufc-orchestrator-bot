@@ -25,6 +25,8 @@ import {
   appendNutritionJournal,
   calculateProfileStatus,
   ensureNutritionSchema,
+  findFoodCatalogCandidates,
+  getFoodCatalogPreview,
   getLatestNutritionWeighin,
   listNutritionIntakesByDate,
   listRecentNutritionIntakes,
@@ -44,12 +46,37 @@ import {
 } from './nutritionDomain.js';
 
 const DEFAULT_MODEL = process.env.BOT_MODEL || process.env.BETTING_MODEL || 'gpt-4.1-mini';
+const DEFAULT_SMART_MODELS = 'gpt-5.4,gpt-5.2,gpt-4.1-mini';
 const DEFAULT_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const CREDIT_ENFORCE = String(process.env.CREDIT_ENFORCE ?? 'true').toLowerCase() !== 'false';
 const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
+
+function parseModelCandidates(raw = '') {
+  return String(raw || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isUnavailableModelError(error) {
+  const status = Number(error?.status || error?.response?.status || 0);
+  if (status === 404 || status === 400) {
+    const message = String(error?.message || '').toLowerCase();
+    if (
+      message.includes('model') &&
+      (message.includes('not found') ||
+        message.includes('does not exist') ||
+        message.includes('unsupported') ||
+        message.includes('not available'))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function normalizeRouteInput(input = '') {
   if (typeof input === 'string') {
@@ -240,6 +267,62 @@ function extractUsageSnapshot(response = {}) {
   };
 }
 
+function mergeUsageSnapshots(current = null, next = null) {
+  if (!next) return current;
+  if (!current) return next;
+  const sum = (a, b) => {
+    const x = Number(a);
+    const y = Number(b);
+    const hasX = Number.isFinite(x);
+    const hasY = Number.isFinite(y);
+    if (!hasX && !hasY) return null;
+    return (hasX ? x : 0) + (hasY ? y : 0);
+  };
+  return {
+    inputTokens: sum(current.inputTokens, next.inputTokens),
+    outputTokens: sum(current.outputTokens, next.outputTokens),
+    totalTokens: sum(current.totalTokens, next.totalTokens),
+    reasoningTokens: sum(current.reasoningTokens, next.reasoningTokens),
+    cachedTokens: sum(current.cachedTokens, next.cachedTokens),
+    rawUsage: {
+      merged: true,
+      parts: [current.rawUsage || null, next.rawUsage || null].filter(Boolean),
+    },
+  };
+}
+
+function stripCodeFence(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw.startsWith('```')) return raw;
+  return raw
+    .replace(/^```[a-zA-Z0-9_-]*\s*/u, '')
+    .replace(/```$/u, '')
+    .trim();
+}
+
+function extractJsonObject(text = '') {
+  const raw = stripCodeFence(String(text || ''));
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // noop
+  }
+
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const candidate = raw.slice(start, end + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function toPositiveNumber(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return Number(fallback) || 0;
@@ -330,6 +413,192 @@ function shouldTrackOutlier(summary = {}) {
   const daysWithData = Number(summary?.rolling7d?.daysWithData) || 0;
   if (daysWithData < 3 || rolling7 <= 0) return false;
   return today >= rolling7 * 1.35 || today <= rolling7 * 0.65;
+}
+
+function looksLikeLabelIntent(text = '') {
+  return /\b(etiqueta|tabla nutricional|info nutricional|rotulo|r[oó]tulo)\b/.test(
+    normalizeText(text)
+  );
+}
+
+function formatCatalogCandidatesPreview(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return '(sin candidatos)';
+  return rows
+    .slice(0, 40)
+    .map((row) => {
+      const name = String(row?.productName || '').trim();
+      const brand = String(row?.brand || '').trim();
+      return `- ${name}${brand ? ` | ${brand}` : ''}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function createSmartResponse({
+  openai,
+  modelCandidates = [],
+  instructions = '',
+  input,
+} = {}) {
+  let lastError = null;
+  for (const candidate of modelCandidates) {
+    try {
+      const response = await openai.responses.create({
+        model: candidate,
+        instructions,
+        input,
+      });
+      return { ok: true, response, model: candidate };
+    } catch (error) {
+      lastError = error;
+      if (isUnavailableModelError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('No smart model candidates configured');
+}
+
+async function normalizeIntakeWithModel({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  catalogCandidates = [],
+} = {}) {
+  const instructions = [
+    'Sos un normalizador de ingestas para un bot de nutricion.',
+    'Objetivo: convertir el mensaje del usuario a un texto simple parseable o pedir aclaracion puntual.',
+    'Salida obligatoria: JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action":"normalize_intake|ask_label_photo|ask_clarification|reject",',
+    '  "normalized_text":"string",',
+    '  "clarification_question":"string",',
+    '  "should_request_label_photo":true|false,',
+    '  "packaged_product":{"product_name":"string","brand":"string"}',
+    '}',
+    'Reglas:',
+    '- Si el mensaje describe una ingesta logueable, usar action=normalize_intake.',
+    '- En normalized_text, usa formato breve: "HH:MM cantidad unidad alimento + ...".',
+    '- Si no hay hora/fecha, no inventes; deja la frase sin fecha/hora.',
+    '- Si parece producto de paquete/marca no claro para macros exactos, usa should_request_label_photo=true.',
+    '- Si claramente falta un dato critico, usa ask_clarification con una sola pregunta.',
+    '- Si no es ingesta, usa reject.',
+  ].join('\n');
+
+  const inputText = [
+    `Timezone usuario: ${userTimeZone}`,
+    '',
+    'Mensaje usuario:',
+    rawMessage,
+    '',
+    'Catalogo candidatos (usar nombre exacto si aplica):',
+    formatCatalogCandidatesPreview(catalogCandidates),
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [{ type: 'input_text', text: inputText }],
+      },
+    ],
+  });
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || '').trim() || 'reject',
+    normalizedText: String(json.normalized_text || '').trim(),
+    clarificationQuestion: String(json.clarification_question || '').trim(),
+    shouldRequestLabelPhoto: Boolean(json.should_request_label_photo),
+    packagedProduct: {
+      productName: String(json?.packaged_product?.product_name || '').trim(),
+      brand: String(json?.packaged_product?.brand || '').trim(),
+    },
+  };
+}
+
+async function extractNutritionLabelFromImage({
+  openai,
+  modelCandidates = [],
+  inputItems = [],
+  userMessage = '',
+} = {}) {
+  const instructions = [
+    'Sos extractor de tablas nutricionales.',
+    'Analiza la imagen enviada y devuelve JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action":"catalog_entry_ready|unclear_image|not_nutrition_label",',
+    '  "product_name":"string",',
+    '  "brand":"string",',
+    '  "portion_g":number|null,',
+    '  "kcal_per_portion":number|null,',
+    '  "protein_g":number|null,',
+    '  "carbs_g":number|null,',
+    '  "fat_g":number|null,',
+    '  "fiber_g":number|null,',
+    '  "sodium_mg":number|null,',
+    '  "note":"string"',
+    '}',
+    'Reglas:',
+    '- Si no hay tabla nutricional legible, action=unclear_image.',
+    '- Si no es etiqueta nutricional, action=not_nutrition_label.',
+    '- Solo usar catalog_entry_ready si al menos porcion, kcal, proteina, carbos y grasas son legibles.',
+    '- Si usuario menciona nombre/marca en el texto, usarlo para completar.',
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `Texto opcional del usuario: ${String(userMessage || '').trim() || '(vacío)'}`,
+          },
+          ...inputItems,
+        ],
+      },
+    ],
+  });
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  const toNumberOrNull = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || '').trim() || 'unclear_image',
+    productName: String(json.product_name || '').trim(),
+    brand: String(json.brand || '').trim(),
+    portionG: toNumberOrNull(json.portion_g),
+    caloriesKcal: toNumberOrNull(json.kcal_per_portion),
+    proteinG: toNumberOrNull(json.protein_g),
+    carbsG: toNumberOrNull(json.carbs_g),
+    fatG: toNumberOrNull(json.fat_g),
+    fiberG: toNumberOrNull(json.fiber_g),
+    sodiumMg: toNumberOrNull(json.sodium_mg),
+    note: String(json.note || '').trim(),
+  };
 }
 
 function normalizeText(value = '') {
@@ -503,6 +772,11 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
     manifest?.risk_policy || process.env.BOT_POLICY_PACK || 'nutrition_guidance_non_clinical'
   );
   const model = process.env.BOT_MODEL || process.env.BETTING_MODEL || DEFAULT_MODEL;
+  const smartModelCandidates = parseModelCandidates(
+    process.env.NUTRITION_SMART_MODELS ||
+      process.env.NUTRITION_SMART_MODEL ||
+      DEFAULT_SMART_MODELS
+  );
   const promptSnippet = loadPromptFile(manifest);
   const chatIdByUser = new Map();
   const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
@@ -739,16 +1013,17 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               ]
             : cleanMessage;
 
-          const response = await openai.responses.create({
-            model,
+          const smartLearning = await createSmartResponse({
+            openai,
+            modelCandidates: smartModelCandidates,
             instructions: runtimePrompt,
             input: userInput,
           });
-          usageSnapshot = extractUsageSnapshot(response);
+          usageSnapshot = mergeUsageSnapshots(usageSnapshot, extractUsageSnapshot(smartLearning.response));
           if (usageSnapshot) {
             addNutritionUsageRecord(userId, {
               guidedAction,
-              model,
+              model: smartLearning.model,
               inputTokens: usageSnapshot.inputTokens,
               outputTokens: usageSnapshot.outputTokens,
               totalTokens: usageSnapshot.totalTokens,
@@ -758,7 +1033,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             });
           }
           const rawReply =
-            extractOutputText(response) ||
+            extractOutputText(smartLearning.response) ||
             'No pude generar una respuesta útil en este turno. Reintentá con más contexto.';
           replyText = enforcePolicyPack({
             text: rawReply,
@@ -767,20 +1042,152 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           shouldCharge = true;
         }
       } else {
-        if (hasMedia && !cleanMessage) {
-          return [
-            '🍽 En V1 no hago OCR de alimentos.',
-            'Mandame texto simple: `hora + lo ingerido`.',
-            'Ejemplo: `13:40 200g pollo + 150g arroz`.',
-          ].join('\n');
+        const shouldTryLabelExtraction = hasMedia && (!cleanMessage || looksLikeLabelIntent(cleanMessage));
+        if (shouldTryLabelExtraction) {
+          try {
+            const labelResult = await extractNutritionLabelFromImage({
+              openai,
+              modelCandidates: smartModelCandidates,
+              inputItems,
+              userMessage: cleanMessage,
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, labelResult.usage);
+            if (labelResult.usage) {
+              addNutritionUsageRecord(userId, {
+                guidedAction: 'log_intake_label_extraction',
+                model: labelResult.model,
+                inputTokens: labelResult.usage.inputTokens,
+                outputTokens: labelResult.usage.outputTokens,
+                totalTokens: labelResult.usage.totalTokens,
+                reasoningTokens: labelResult.usage.reasoningTokens,
+                cachedTokens: labelResult.usage.cachedTokens,
+                rawUsage: labelResult.usage.rawUsage,
+              });
+            }
+
+            if (labelResult.action === 'catalog_entry_ready') {
+              const catalogWrite = upsertFoodCatalogEntry(
+                {
+                  productName: labelResult.productName || 'producto etiqueta',
+                  brand: labelResult.brand || '',
+                  portionG: labelResult.portionG,
+                  caloriesKcal: labelResult.caloriesKcal,
+                  proteinG: labelResult.proteinG,
+                  carbsG: labelResult.carbsG,
+                  fatG: labelResult.fatG,
+                  fiberG: labelResult.fiberG,
+                  sodiumMg: labelResult.sodiumMg,
+                  source: 'etiqueta',
+                },
+                {
+                  idempotency: {
+                    sourceMessageId,
+                    operationType: 'upsert_food_catalog',
+                    userId,
+                  },
+                }
+              );
+              if (!catalogWrite?.ok) {
+                return formatWriteFailureReply('log_intake', catalogWrite?.error || 'catalog_upsert_failed');
+              }
+
+              if (!cleanMessage || looksLikeLabelIntent(cleanMessage)) {
+                return [
+                  '✅ Producto guardado en INFO_NUTRICIONAL.',
+                  `- Producto: ${labelResult.productName || 'producto etiqueta'}`,
+                  labelResult.brand ? `- Marca: ${labelResult.brand}` : null,
+                  `- Porción: ${Number(labelResult.portionG).toFixed(0)} g`,
+                  `- Kcal/P: ${Number(labelResult.caloriesKcal).toFixed(0)} | P ${Number(
+                    labelResult.proteinG
+                  ).toFixed(1)} g | C ${Number(labelResult.carbsG).toFixed(1)} g | G ${Number(
+                    labelResult.fatG
+                  ).toFixed(1)} g`,
+                  'Ahora podés registrar ingesta con texto simple y este producto ya queda reutilizable.',
+                ]
+                  .filter(Boolean)
+                  .join('\n');
+              }
+            } else if (!cleanMessage) {
+              if (labelResult.action === 'not_nutrition_label') {
+                return [
+                  'No detecté una tabla nutricional clara en la imagen.',
+                  'Si querés cargar un producto de paquete, mandá foto de la etiqueta completa (tabla + porción).',
+                  'Si querés registrar una comida ahora, mandala en texto: `hora + lo ingerido`.',
+                ].join('\n');
+              }
+              return [
+                'No pude leer bien la tabla nutricional.',
+                'Mandá una foto más nítida y frontal de la etiqueta (porción, kcal, proteínas, carbos, grasas).',
+              ].join('\n');
+            }
+          } catch (labelError) {
+            console.error('[nutrition-runtime] label extraction failed', labelError);
+            if (!cleanMessage) {
+              return [
+                'No pude procesar la imagen ahora mismo.',
+                'Si querés cargar producto, reenviá foto de etiqueta; si querés registrar comida, mandala en texto.',
+              ].join('\n');
+            }
+          }
         }
 
-        const parsed = parseIntakePayload({
+        let parsed = parseIntakePayload({
           rawMessage: cleanMessage,
           userTimeZone,
         });
 
+        const catalogCandidates = cleanMessage
+          ? findFoodCatalogCandidates(cleanMessage, { limit: 40 })
+          : getFoodCatalogPreview({ limit: 30 });
+        let modelNormalization = null;
+        if (cleanMessage) {
+          try {
+            modelNormalization = await normalizeIntakeWithModel({
+              openai,
+              modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage,
+              userTimeZone,
+              catalogCandidates,
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, modelNormalization.usage);
+            if (modelNormalization.usage) {
+              addNutritionUsageRecord(userId, {
+                guidedAction: 'log_intake_normalization',
+                model: modelNormalization.model,
+                inputTokens: modelNormalization.usage.inputTokens,
+                outputTokens: modelNormalization.usage.outputTokens,
+                totalTokens: modelNormalization.usage.totalTokens,
+                reasoningTokens: modelNormalization.usage.reasoningTokens,
+                cachedTokens: modelNormalization.usage.cachedTokens,
+                rawUsage: modelNormalization.usage.rawUsage,
+              });
+            }
+          } catch (normalizationError) {
+            console.error('[nutrition-runtime] intake normalization failed', normalizationError);
+          }
+        }
+
+        if (modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
+          const parsedFromModel = parseIntakePayload({
+            rawMessage: modelNormalization.normalizedText,
+            userTimeZone,
+          });
+          if (parsedFromModel.ok) {
+            parsed = parsedFromModel;
+          }
+        }
+
         if (!parsed.ok) {
+          if (modelNormalization?.action === 'ask_label_photo') {
+            return [
+              'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
+              'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
+              'Con eso lo agrego a INFO_NUTRICIONAL y te queda para siempre.',
+            ].join('\n');
+          }
+          if (modelNormalization?.action === 'ask_clarification' && modelNormalization.clarificationQuestion) {
+            return modelNormalization.clarificationQuestion;
+          }
           if (parsed.error === 'partial_resolution' && parsed.unresolvedItems?.length) {
             return [
               'Necesito aclarar algunos items antes de registrar.',
@@ -835,6 +1242,9 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
           `🎯 Estado: ${status}`,
+          modelNormalization?.shouldRequestLabelPhoto
+            ? '📦 Si es un producto de paquete, mandame foto de la etiqueta nutricional y lo agrego a INFO_NUTRICIONAL.'
+            : null,
           formatIdempotencyNotice(intakeWrite.idempotencyStatus),
         ]
           .filter(Boolean)

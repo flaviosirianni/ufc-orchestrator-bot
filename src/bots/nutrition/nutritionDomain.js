@@ -12,6 +12,22 @@ function normalizeText(value = '') {
     .trim();
 }
 
+function sanitizeNameHint(value = '') {
+  const text = String(value || '');
+  if (!text.trim()) return '';
+  return text
+    .replace(
+      /\b(del|de)\s+que\s+tengo\s+anotad[oa]\s+en\s+info\s+nutricional\b/gi,
+      ' '
+    )
+    .replace(/\bque\s+tengo\s+anotad[oa]\b/gi, ' ')
+    .replace(/\ben\s+info\s+nutricional\b/gi, ' ')
+    .replace(/\bde\s+info\s+nutricional\b/gi, ' ')
+    .replace(/\b(info\s+nutricional)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseNumber(value) {
   const normalized = String(value || '').replace(',', '.').trim();
   const parsed = Number(normalized);
@@ -215,7 +231,9 @@ function parseQuantityAndUnit(rawPart = '') {
   if (explicit) {
     const quantityValue = parseNumber(explicit[1]);
     const quantityUnit = normalizeText(explicit[2]);
-    const nameHint = text.replace(explicit[0], ' ').replace(/\s+/g, ' ').trim();
+    const nameHint = sanitizeNameHint(
+      text.replace(explicit[0], ' ').replace(/\s+/g, ' ').trim()
+    );
     return {
       quantityValue,
       quantityUnit,
@@ -228,14 +246,14 @@ function parseQuantityAndUnit(rawPart = '') {
     return {
       quantityValue: parseNumber(leading[1]),
       quantityUnit: 'unidad',
-      nameHint: String(leading[2] || '').trim(),
+      nameHint: sanitizeNameHint(String(leading[2] || '').trim()),
     };
   }
 
   return {
     quantityValue: 1,
     quantityUnit: 'porcion',
-    nameHint: text,
+    nameHint: sanitizeNameHint(text),
   };
 }
 
