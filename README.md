@@ -275,6 +275,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - `GET /topup/checkout?user_id=<telegram_user_id>&credits=<pack>`
   - `GET /topup/checkout?user_id=<telegram_user_id>` (selector web de pack)
   - `POST /webhooks/mercadopago` (webhook de Mercado Pago)
+  - `GET /topup/result?status=...` (pantalla web de resultado, sin descarga de archivo)
   - `GET /topup/config` (estado de configuración)
 - Configuración mínima en `.env`:
   - `MP_ACCESS_TOKEN` (token de producción o de pruebas según ambiente)
@@ -290,6 +291,7 @@ The `start` script launches the Telegram bot with polling enabled. Keep the proc
   - El backend crea una preferencia en Checkout Pro (`/checkout/preferences`).
   - Mercado Pago notifica a `/webhooks/mercadopago`.
   - El backend consulta `/v1/payments/{id}` y acredita créditos solo si `status=approved`.
+  - Si acredita, el bot envía notificación automática por Telegram con créditos sumados y saldo actualizado.
   - La acreditación es idempotente por `payment_id` (evita doble recarga por reintentos del webhook).
 
 ### History Scraper (interno)

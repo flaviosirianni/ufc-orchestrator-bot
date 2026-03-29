@@ -112,6 +112,11 @@ function formatMoneyByCurrency(amount = 0, currencyId = 'ARS') {
   }
 }
 
+function formatCreditsValue(value = 0) {
+  const amount = Number(value) || 0;
+  return amount.toFixed(2);
+}
+
 function buildTopupChooserHtml({ userId = '', packs = [], currencyId = 'ARS' } = {}) {
   const encodedUserId = encodeURIComponent(String(userId || '').trim());
   const packItems = (Array.isArray(packs) ? packs : [])
@@ -151,6 +156,61 @@ function buildTopupChooserHtml({ userId = '', packs = [], currencyId = 'ARS' } =
     '<p>Selecciona cuantos creditos queres cargar. Luego se abre Mercado Pago para completar el pago.</p>',
     `<ul>${packItems || '<li>No hay packs configurados.</li>'}</ul>`,
     '<p class="muted">Al confirmar el pago aprobado, los creditos se acreditan automaticamente en tu usuario de Telegram.</p>',
+    '</main>',
+    '</body>',
+    '</html>',
+  ].join('');
+}
+
+function buildTopupResultHtml(status = 'unknown') {
+  const normalized = String(status || 'unknown').trim().toLowerCase();
+  const titleByStatus = {
+    success: '✅ Recarga acreditada',
+    approved: '✅ Recarga acreditada',
+    pending: '🕓 Pago pendiente',
+    failure: '❌ Pago no completado',
+    rejected: '❌ Pago rechazado',
+    cancelled: '❌ Pago cancelado',
+  };
+  const title = titleByStatus[normalized] || 'ℹ️ Estado de recarga';
+
+  const bodyByStatus = {
+    success:
+      'Tu pago fue confirmado. Si el bot no te avisó todavía en Telegram, abrí el chat y tocá `Creditos` para refrescar el saldo.',
+    approved:
+      'Tu pago fue confirmado. Si el bot no te avisó todavía en Telegram, abrí el chat y tocá `Creditos` para refrescar el saldo.',
+    pending:
+      'Mercado Pago indicó estado pendiente. Cuando se apruebe, los créditos se acreditan automáticamente.',
+    failure:
+      'El pago no se completó. Podés volver al checkout y reintentar con otro medio de pago.',
+    rejected:
+      'El pago fue rechazado. Podés volver al checkout y reintentar con otro medio de pago.',
+    cancelled: 'Cancelaste el pago. Si querés, podés iniciar una recarga nueva desde Telegram.',
+  };
+  const body =
+    bodyByStatus[normalized] ||
+    'Volvé al chat de Telegram y revisá `Creditos` para ver el estado actualizado.';
+
+  return [
+    '<!doctype html>',
+    '<html lang="es">',
+    '<head>',
+    '<meta charset="utf-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    '<title>Estado de recarga</title>',
+    '<style>',
+    'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111827; background: #f8fafc; }',
+    'main { max-width: 580px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; }',
+    'h1 { margin: 0 0 10px; font-size: 1.2rem; }',
+    'p { margin: 0 0 10px; line-height: 1.45; color: #334155; }',
+    '.hint { margin-top: 12px; font-size: 0.95rem; color: #64748b; }',
+    '</style>',
+    '</head>',
+    '<body>',
+    '<main>',
+    `<h1>${escapeHtml(title)}</h1>`,
+    `<p>${escapeHtml(body)}</p>`,
+    '<p class="hint">Ya podés cerrar esta pestaña y volver a Telegram.</p>',
     '</main>',
     '</body>',
     '</html>',
@@ -197,8 +257,64 @@ function mapOddsEventIndexRows(payload = [], fallbackSportKey = 'mma_mixed_marti
 
 function createHealthServer(
   port,
-  { addCredits, creditFromMercadoPagoPayment } = {}
+  {
+    addCredits,
+    creditFromMercadoPagoPayment,
+    getCreditState,
+    getLatestChatIdForUser,
+    notifyUser,
+  } = {}
 ) {
+  const weeklyFreeCredits = Number(process.env.CREDIT_FREE_WEEKLY ?? '5');
+
+  async function notifyTopupApplied({
+    userId,
+    credits = 0,
+    amount = null,
+    paymentId = '',
+    sourceLabel = 'topup',
+  } = {}) {
+    const safeUserId = String(userId || '').trim();
+    if (!safeUserId) return;
+    if (
+      typeof notifyUser !== 'function' ||
+      typeof getLatestChatIdForUser !== 'function' ||
+      typeof getCreditState !== 'function'
+    ) {
+      return;
+    }
+
+    const chatId = getLatestChatIdForUser(safeUserId);
+    if (!chatId) return;
+
+    const creditState = getCreditState(safeUserId, weeklyFreeCredits) || {
+      availableCredits: 0,
+      freeCredits: 0,
+      paidCredits: 0,
+    };
+
+    const lines = [
+      '✅ Recarga acreditada',
+      `• +${formatCreditsValue(credits)} creditos`,
+      `• Saldo actual: ${formatCreditsValue(creditState.availableCredits)} creditos`,
+      `• Free: ${formatCreditsValue(creditState.freeCredits)} | Paid: ${formatCreditsValue(
+        creditState.paidCredits
+      )}`,
+    ];
+    if (Number.isFinite(Number(amount)) && Number(amount) > 0) {
+      lines.push(`• Monto: ${formatMoneyByCurrency(amount, 'ARS')}`);
+    }
+    if (paymentId) {
+      lines.push(`• Ref: ${String(paymentId).trim()}`);
+    }
+    lines.push(`• Fuente: ${sourceLabel}`);
+
+    await notifyUser({
+      chatId,
+      text: lines.join('\n'),
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -216,11 +332,25 @@ function createHealthServer(
         return;
       }
 
+      let applied = null;
       if (typeof addCredits === 'function') {
-        addCredits(String(payload.telegram_user_id), Number(payload.credits), {
+        applied = addCredits(String(payload.telegram_user_id), Number(payload.credits), {
           reason: payload.reason || 'webhook_topup',
           metadata: payload.metadata || null,
         });
+      }
+
+      if (applied?.ok) {
+        try {
+          await notifyTopupApplied({
+            userId: String(payload.telegram_user_id),
+            credits: Number(payload.credits) || 0,
+            amount: Number(payload.amount) || null,
+            sourceLabel: payload.reason || 'webhook_topup',
+          });
+        } catch (error) {
+          console.error('[topup] notification failed (webhooks/credits):', error);
+        }
       }
 
       sendJson(res, 200, { ok: true });
@@ -378,6 +508,20 @@ function createHealthServer(
         return;
       }
 
+      if (!creditResult.alreadyProcessed) {
+        try {
+          await notifyTopupApplied({
+            userId: parsed.userId,
+            credits: parsed.credits,
+            amount: parsed.transactionAmount,
+            paymentId: parsed.paymentId,
+            sourceLabel: 'mercadopago',
+          });
+        } catch (error) {
+          console.error('[topup] notification failed (mercadopago):', error);
+        }
+      }
+
       sendJson(res, 200, {
         ok: true,
         paymentId: parsed.paymentId,
@@ -390,8 +534,11 @@ function createHealthServer(
 
     if (req.method === 'GET' && url.pathname === '/topup/result') {
       const status = String(url.searchParams.get('status') || 'unknown');
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(`Topup status: ${status}`);
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(buildTopupResultHtml(status));
       return;
     }
 
@@ -572,7 +719,17 @@ function bootstrap() {
   });
 
   const port = Number(process.env.PORT || 3000);
-  createHealthServer(port, { addCredits, creditFromMercadoPagoPayment });
+  createHealthServer(port, {
+    addCredits,
+    creditFromMercadoPagoPayment,
+    getCreditState,
+    getLatestChatIdForUser,
+    notifyUser: async ({ chatId, text } = {}) => {
+      if (!chatId || !text) return;
+      if (!telegram?.sendSystemMessage) return;
+      await telegram.sendSystemMessage({ chatId, text });
+    },
+  });
 }
 
 bootstrap();

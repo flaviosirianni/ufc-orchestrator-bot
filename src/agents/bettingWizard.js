@@ -3157,6 +3157,203 @@ function formatIsoForUser(isoValue = '', timezone = DEFAULT_USER_TIMEZONE) {
   }
 }
 
+function normalizeLedgerResult(result = '') {
+  return normalizeBetResult(result) || 'pending';
+}
+
+function formatLedgerStatusBadge(result = '') {
+  const normalized = normalizeLedgerResult(result);
+  if (normalized === 'win') return '✅ WON';
+  if (normalized === 'loss') return '❌ LOST';
+  if (normalized === 'push') return '➖ PUSH';
+  return '🕓 OPEN';
+}
+
+function computeLedgerHistoryMetrics(bets = []) {
+  const rows = Array.isArray(bets) ? bets : [];
+
+  let totalBets = 0;
+  let pendingCount = 0;
+  let wins = 0;
+  let losses = 0;
+  let pushes = 0;
+  let totalStaked = 0;
+  let totalUnits = 0;
+  let settledStaked = 0;
+  let pendingExposure = 0;
+  let totalWon = 0;
+  let totalLost = 0;
+
+  for (const bet of rows) {
+    totalBets += 1;
+    const stake = Number(bet?.stake) || 0;
+    const units = Number(bet?.units) || 0;
+    const odds = Number(bet?.odds);
+    const status = normalizeLedgerResult(bet?.result);
+
+    totalStaked += stake;
+    totalUnits += units;
+
+    if (status === 'pending') {
+      pendingCount += 1;
+      pendingExposure += stake;
+      continue;
+    }
+
+    settledStaked += stake;
+    if (status === 'win') {
+      wins += 1;
+      const profit = Number.isFinite(odds) && odds > 1 ? stake * (odds - 1) : 0;
+      totalWon += Math.max(0, profit);
+      continue;
+    }
+    if (status === 'loss') {
+      losses += 1;
+      totalLost += stake;
+      continue;
+    }
+    if (status === 'push') {
+      pushes += 1;
+    }
+  }
+
+  const gradedNoPush = wins + losses;
+  const net = totalWon - totalLost;
+
+  return {
+    totalBets,
+    pendingCount,
+    wins,
+    losses,
+    pushes,
+    totalStaked,
+    totalUnits,
+    settledStaked,
+    pendingExposure,
+    totalWon,
+    totalLost,
+    net,
+    winRateNoPush: gradedNoPush > 0 ? wins / gradedNoPush : null,
+    roiSettled: settledStaked > 0 ? net / settledStaked : null,
+  };
+}
+
+function formatLedgerBetLine(
+  bet,
+  { currency = 'ARS', timezone = DEFAULT_USER_TIMEZONE } = {}
+) {
+  if (!bet || typeof bet !== 'object') return '';
+
+  const betId = Number(bet.id);
+  const fight = String(bet.fight || 'pelea N/D').trim();
+  const pick = String(bet.pick || 'pick N/D').trim();
+  const odds = Number(bet.odds);
+  const stake = Number(bet.stake);
+  const whenRaw =
+    bet.updatedAt || bet.settledAt || bet.recordedAt || bet.createdAt || bet.created_at || null;
+  const when = whenRaw ? formatIsoForUser(whenRaw, timezone) : 'fecha N/D';
+  const oddsLabel = Number.isFinite(odds) && odds > 0 ? `@${odds.toFixed(2)}` : '@N/D';
+  const stakeLabel =
+    Number.isFinite(stake) && stake > 0
+      ? formatAmountWithCurrency(stake, currency)
+      : 'stake N/D';
+
+  return `- #${Number.isInteger(betId) && betId > 0 ? betId : '?'} ${formatLedgerStatusBadge(
+    bet.result
+  )} | ${fight} | ${pick} | ${oddsLabel} | ${stakeLabel} | ${when}`;
+}
+
+function buildGuidedPendingLedgerReply(
+  bets = [],
+  { currency = 'ARS', timezone = DEFAULT_USER_TIMEZONE } = {}
+) {
+  const rows = Array.isArray(bets) ? bets : [];
+  if (!rows.length) {
+    return [
+      '🧾 Pendientes del ledger',
+      'No tenes apuestas abiertas ahora mismo.',
+      'Para cerrar una apuesta, podes usar `Historial` o mandar `bet_id + WON/LOST/PUSH`.',
+    ].join('\n');
+  }
+
+  const metrics = computeLedgerHistoryMetrics(rows);
+  const lines = [
+    '🧾 Pendientes del ledger',
+    `• Pendientes: ${metrics.pendingCount}`,
+    `• Exposicion abierta: ${formatAmountWithCurrency(metrics.pendingExposure, currency)}`,
+    `• Unidades abiertas: ${formatUnits(metrics.totalUnits)}u`,
+    '',
+    'Apuestas abiertas:',
+  ];
+
+  for (const bet of rows.slice(0, 20)) {
+    lines.push(formatLedgerBetLine(bet, { currency, timezone }));
+  }
+
+  if (rows.length > 20) {
+    lines.push(`... y ${rows.length - 20} pendiente(s) mas.`);
+  }
+
+  lines.push('', 'Para cerrar rapido: `bet_id 123 WON`.');
+  return lines.join('\n');
+}
+
+function buildGuidedHistoryLedgerReply(
+  bets = [],
+  {
+    currency = 'ARS',
+    timezone = DEFAULT_USER_TIMEZONE,
+    ledgerSummary = null,
+  } = {}
+) {
+  const rows = Array.isArray(bets) ? bets : [];
+  if (!rows.length) {
+    return [
+      '📚 Historial del ledger',
+      'No hay apuestas registradas todavia.',
+      'Usa `Registrar` para cargar la primera apuesta.',
+    ].join('\n');
+  }
+
+  const metrics = computeLedgerHistoryMetrics(rows);
+  const summaryTotalStaked = Number(ledgerSummary?.totalStaked);
+  const summaryWins = Number(ledgerSummary?.wins);
+  const summaryLosses = Number(ledgerSummary?.losses);
+  const summaryPushes = Number(ledgerSummary?.pushes);
+  const totalStaked = Number.isFinite(summaryTotalStaked)
+    ? summaryTotalStaked
+    : metrics.totalStaked;
+  const wins = Number.isFinite(summaryWins) ? summaryWins : metrics.wins;
+  const losses = Number.isFinite(summaryLosses) ? summaryLosses : metrics.losses;
+  const pushes = Number.isFinite(summaryPushes) ? summaryPushes : metrics.pushes;
+  const winRateLabel =
+    metrics.winRateNoPush === null ? 'N/D' : `${(metrics.winRateNoPush * 100).toFixed(1)}%`;
+  const roiLabel =
+    metrics.roiSettled === null ? 'N/D' : `${(metrics.roiSettled * 100).toFixed(1)}%`;
+
+  const lines = [
+    '📚 Historial del ledger',
+    `• Total apuestas: ${metrics.totalBets} (W ${wins} | L ${losses} | P ${pushes} | Open ${metrics.pendingCount})`,
+    `• Total apostado: ${formatAmountWithCurrency(totalStaked, currency)}`,
+    `• Total ganado: ${formatAmountWithCurrency(metrics.totalWon, currency)}`,
+    `• Total perdido: ${formatAmountWithCurrency(metrics.totalLost, currency)}`,
+    `• Balance neto: ${formatAmountWithCurrency(metrics.net, currency)} | ROI realizado: ${roiLabel}`,
+    `• Win rate (sin push): ${winRateLabel}`,
+    '',
+    'Ultimas apuestas:',
+  ];
+
+  for (const bet of rows.slice(0, 20)) {
+    lines.push(formatLedgerBetLine(bet, { currency, timezone }));
+  }
+
+  if (rows.length > 20) {
+    lines.push(`... y ${rows.length - 20} apuesta(s) mas.`);
+  }
+
+  return lines.join('\n');
+}
+
 function formatProfileSummary(profile = {}) {
   const safeProfile = profile || {};
   const timezone = safeProfile.timezone || DEFAULT_USER_TIMEZONE;
@@ -5452,6 +5649,82 @@ export function createBettingWizard({
       timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
       originalMessage,
     });
+
+    if (interactionMode === 'guided_strict' && guidedAction === 'ledger_list_pending') {
+      if (!userId) {
+        return {
+          reply: 'No pude resolver tu usuario para listar pendientes.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+      if (typeof userStore?.listUserBets !== 'function') {
+        return {
+          reply: 'El modulo de ledger no esta disponible en este entorno.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const pending = userStore.listUserBets(userId, {
+        status: 'pending',
+        includeArchived: false,
+        limit: 120,
+      });
+      const currency = userProfile?.currency || 'ARS';
+      return {
+        reply: buildGuidedPendingLedgerReply(pending, {
+          currency,
+          timezone: temporalContext.timezone,
+        }),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
+    if (interactionMode === 'guided_strict' && guidedAction === 'ledger_list_history') {
+      if (!userId) {
+        return {
+          reply: 'No pude resolver tu usuario para listar historial.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+      if (typeof userStore?.listUserBets !== 'function') {
+        return {
+          reply: 'El modulo de ledger no esta disponible en este entorno.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const bets = userStore.listUserBets(userId, {
+        includeArchived: false,
+        limit: 200,
+      });
+      const currency = userProfile?.currency || 'ARS';
+      return {
+        reply: buildGuidedHistoryLedgerReply(bets, {
+          currency,
+          timezone: temporalContext.timezone,
+          ledgerSummary,
+        }),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
 
     if (newsAlertsIntent && userStore?.getUserIntelPrefs) {
       if (!userId) {

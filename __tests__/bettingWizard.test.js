@@ -4000,6 +4000,134 @@ export async function runBettingWizardTests() {
     assert.match(blockedPayload, /tool_not_allowed_in_interaction_mode/);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return { currency: 'ARS', timezone: 'America/Argentina/Buenos_Aires' };
+        },
+        getLedgerSummary() {
+          return { totalStaked: 7000, wins: 1, losses: 1, pushes: 0 };
+        },
+        listUserBets() {
+          return [
+            {
+              id: 3,
+              eventName: 'UFC Test',
+              fight: 'Alpha vs Bravo',
+              pick: 'Alpha ML',
+              odds: 2.1,
+              stake: 3000,
+              units: 3,
+              result: 'win',
+              createdAt: '2026-03-20T21:10:00.000Z',
+              updatedAt: '2026-03-20T23:20:00.000Z',
+            },
+            {
+              id: 2,
+              eventName: 'UFC Test',
+              fight: 'Charlie vs Delta',
+              pick: 'Under 2.5',
+              odds: 1.8,
+              stake: 4000,
+              units: 4,
+              result: 'loss',
+              createdAt: '2026-03-19T21:10:00.000Z',
+              updatedAt: '2026-03-19T23:20:00.000Z',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame historial del ledger', {
+      chatId: 'chat-ledger-history-guided-1',
+      userId: 'u-ledger-history-guided-1',
+      interactionMode: 'guided_strict',
+      guidedAction: 'ledger_list_history',
+      inputType: 'synthetic',
+      originalMessage: 'mostrame historial del ledger',
+      resolution: {
+        resolvedMessage: 'mostrame historial del ledger',
+      },
+    });
+
+    assert.match(result.reply, /Historial del ledger/i);
+    assert.match(result.reply, /Total apostado/i);
+    assert.match(result.reply, /Total ganado/i);
+    assert.match(result.reply, /Total perdido/i);
+    assert.match(result.reply, /Win rate/i);
+    assert.match(result.reply, /#3/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const listCalls = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return { currency: 'ARS', timezone: 'America/Argentina/Buenos_Aires' };
+        },
+        listUserBets(_userId, options = {}) {
+          listCalls.push(options);
+          return [
+            {
+              id: 11,
+              eventName: 'UFC Pending',
+              fight: 'Echo vs Foxtrot',
+              pick: 'Echo ML',
+              odds: 1.66,
+              stake: 5000,
+              units: 5,
+              result: 'pending',
+              createdAt: '2026-03-21T21:10:00.000Z',
+              updatedAt: '2026-03-21T22:00:00.000Z',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame pendientes del ledger', {
+      chatId: 'chat-ledger-pending-guided-1',
+      userId: 'u-ledger-pending-guided-1',
+      interactionMode: 'guided_strict',
+      guidedAction: 'ledger_list_pending',
+      inputType: 'synthetic',
+      originalMessage: 'mostrame pendientes del ledger',
+      resolution: {
+        resolvedMessage: 'mostrame pendientes del ledger',
+      },
+    });
+
+    assert.equal(listCalls.length, 1);
+    assert.equal(listCalls[0].status, 'pending');
+    assert.match(result.reply, /Pendientes del ledger/i);
+    assert.match(result.reply, /Exposicion abierta/i);
+    assert.match(result.reply, /#11/);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }
