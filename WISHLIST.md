@@ -1094,3 +1094,45 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: definir politica de transicion para usuarios con percepcion de precio previa.
    - **Prioridad:** media.
    - **Estado:** pendiente.
+
+35. **Creditos gratis semanales no stackeables (wallet global)**
+   - **Objetivo de negocio/UX:** facilitar adopcion y retencion con una base gratuita recurrente, sin generar deuda operativa por acumulacion indefinida de saldo promo.
+   - **Problema observado (ejemplo real):**
+     - El usuario quiere una asignacion semanal de creditos gratis, pero hoy la politica puede quedar ambigua entre bots y entre semanas.
+     - Sin regla explicita de no acumulacion, el saldo free puede crecer por inactividad y distorsionar monetizacion/uso real.
+   - **Comportamiento deseado para el usuario final:**
+     - Cada semana recibe un cupo free fijo (a definir), visible en `Creditos`.
+     - El cupo free no usado en la semana NO se acumula para la siguiente.
+     - Los creditos pagos se mantienen intactos y se consumen despues de agotar free (o segun politica definida).
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `WeeklyFreePolicy` centralizada en `billing-service` (wallet global compartida por usuario entre bots).
+     - Regla canonica no-stack:
+       - al cambiar `week_id`, setear `free_credits = WEEKLY_FREE_AMOUNT` (no sumar remanente).
+       - registrar transaccion `grant_free` con `reason=weekly_grant` una sola vez por semana.
+     - `WeeklyBoundaryResolver`:
+       - fuente horaria unica (UTC o timezone de negocio) para calcular semana ISO.
+       - helper reutilizable para evitar drift entre servicios/bots.
+     - Guardrails:
+       - idempotencia por `telegram_user_id + week_id + reason=weekly_grant`.
+       - no emitir doble grant por race condition de requests concurrentes.
+       - `free_credits >= 0` siempre; nunca permitir underflow.
+     - Estados operativos sugeridos:
+       - `weekly_grant_pending`
+       - `weekly_grant_applied`
+       - `weekly_grant_skipped_already_applied`.
+   - **Criterios de aceptacion verificables:**
+     - Si un usuario termina semana con free remanente, al iniciar semana nueva su free queda exactamente en `WEEKLY_FREE_AMOUNT` (sin acumulacion).
+     - El grant semanal se registra una sola vez por usuario y semana.
+     - En uso concurrente (dos bots en paralelo), el saldo final no duplica grant.
+     - El mensaje de `Creditos` refleja correctamente `Free`, `Paid` y semana activa.
+   - **Pruebas de regresion necesarias:**
+     - Cambio de semana con remanente free > 0 -> reset correcto a monto semanal.
+     - Reintento/idempotencia del grant semanal -> no duplicar transaccion.
+     - Consumo de creditos en paralelo desde bot A y bot B -> consistencia de saldo.
+     - Snapshot de `Creditos` en Telegram despues de rollover semanal -> valores correctos.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir `WEEKLY_FREE_AMOUNT` inicial.
+     - Decision abierta: definir frontera de semana (UTC vs timezone comercial, ej. America/Argentina/Buenos_Aires).
+     - Decision abierta: confirmar orden de consumo (free-first vs paid-first) como politica oficial.
+   - **Prioridad:** media.
+   - **Estado:** pendiente.
