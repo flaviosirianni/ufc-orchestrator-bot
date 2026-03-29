@@ -26,11 +26,14 @@ import {
   calculateProfileStatus,
   ensureNutritionSchema,
   getLatestNutritionWeighin,
+  listNutritionIntakesByDate,
+  listRecentNutritionIntakes,
   getNutritionProfile,
   getNutritionSummary,
   setNutritionUserState,
   upsertNutritionProfile,
 } from './nutritionStore.js';
+import { startNutritionDbReliabilityLoop } from './nutritionReliability.js';
 import {
   formatMacroLine,
   parseIntakePayload,
@@ -329,6 +332,154 @@ function shouldTrackOutlier(summary = {}) {
   return today >= rolling7 * 1.35 || today <= rolling7 * 0.65;
 }
 
+function normalizeText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function looksLikeSummaryQuestion(text = '') {
+  return /\b(resumen|summary|rolling|promedio|hoy|como vengo|totales|macros|progreso|mis datos)\b/.test(
+    text
+  );
+}
+
+function looksLikeProfileQuestion(text = '') {
+  return /\b(perfil|objetivo|target|calorias objetivo|proteina objetivo)\b/.test(text);
+}
+
+function looksLikeRecentIntakesQuestion(text = '') {
+  return /\b(que comi|que consumi|ingestas|comidas de hoy|historial de comidas|ultimas comidas)\b/.test(
+    text
+  );
+}
+
+function looksLikeWeighinQuestion(text = '') {
+  return /\b(ultimo pesaje|ultimo peso|peso actual|cuanto peso|balanza|peso)\b/.test(text);
+}
+
+function formatRecentIntakesReply({
+  title = '🧾 Ingestas recientes',
+  rows = [],
+  localDate = '',
+} = {}) {
+  if (!Array.isArray(rows) || !rows.length) {
+    if (localDate) {
+      return `🧾 No tengo ingestas registradas para ${localDate}.`;
+    }
+    return '🧾 Todavía no tengo ingestas registradas.';
+  }
+
+  const lines = [title];
+  for (const row of rows.slice(0, 8)) {
+    const qValue = Number(row?.quantityValue);
+    const quantity = Number.isFinite(qValue)
+      ? `${qValue}${row?.quantityUnit ? ` ${row.quantityUnit}` : ''}`
+      : row?.quantityUnit || 'porcion';
+    lines.push(
+      `- ${row.localDate} ${row.localTime} | ${row.foodItem} (${quantity}) | ${Math.round(
+        Number(row.caloriesKcal) || 0
+      )} kcal`
+    );
+  }
+  return lines.join('\n');
+}
+
+function resolveDbFirstLearningReply({
+  cleanMessage = '',
+  userId = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  profile = {},
+} = {}) {
+  const normalized = normalizeText(cleanMessage);
+  if (!normalized) return null;
+
+  if (looksLikeSummaryQuestion(normalized)) {
+    const temporal = resolveTemporalContext({
+      rawMessage: cleanMessage || 'hoy',
+      userTimeZone,
+    });
+    const summary = getNutritionSummary(userId, temporal.localDate);
+    const status = calculateProfileStatus(profile, summary.today);
+    const latestWeighin = getLatestNutritionWeighin(userId);
+    return formatSummaryReply({
+      localDate: temporal.localDate,
+      localTime: temporal.localTime,
+      summary,
+      status,
+      latestWeighin,
+    });
+  }
+
+  if (looksLikeProfileQuestion(normalized)) {
+    return formatProfileReply(profile || {});
+  }
+
+  if (looksLikeRecentIntakesQuestion(normalized)) {
+    const temporal = resolveTemporalContext({
+      rawMessage: cleanMessage || 'hoy',
+      userTimeZone,
+    });
+    const byDate = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 24 });
+    if (byDate.length) {
+      return formatRecentIntakesReply({
+        title: `🧾 Ingestas ${temporal.localDate}`,
+        rows: byDate,
+        localDate: temporal.localDate,
+      });
+    }
+    const recent = listRecentNutritionIntakes(userId, { limit: 12 });
+    return formatRecentIntakesReply({
+      title: '🧾 Últimas ingestas (sin registros para ese día)',
+      rows: recent,
+    });
+  }
+
+  if (looksLikeWeighinQuestion(normalized)) {
+    const latestWeighin = getLatestNutritionWeighin(userId);
+    if (!latestWeighin) {
+      return '⚖️ Todavía no tengo pesajes registrados.';
+    }
+    return [
+      '⚖️ Último pesaje',
+      `- Fecha: ${latestWeighin.localDate} ${latestWeighin.localTime}`,
+      `- Peso: ${Number(latestWeighin.weightKg).toFixed(1)} kg`,
+      latestWeighin.bodyFatPercent ? `- Grasa: ${Number(latestWeighin.bodyFatPercent).toFixed(1)}%` : null,
+      latestWeighin.muscleMassKg
+        ? `- Masa muscular: ${Number(latestWeighin.muscleMassKg).toFixed(1)} kg`
+        : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  return null;
+}
+
+function formatWriteFailureReply(action = '', errorCode = '') {
+  const suffix = errorCode ? ` (detalle: ${errorCode})` : '';
+  if (action === 'log_intake') {
+    return `❌ No pude guardar la ingesta en la DB${suffix}. Reintentá en formato: \`13:30 200g pollo + 150g arroz\`.`;
+  }
+  if (action === 'log_weighin') {
+    return `❌ No pude guardar el pesaje en la DB${suffix}. Reintentá con: \`81.4 kg\`.`;
+  }
+  if (action === 'update_profile') {
+    return `❌ No pude guardar el perfil en la DB${suffix}. Reintentá con campos concretos (objetivo, kcal, proteína, timezone).`;
+  }
+  return `❌ No pude guardar el registro en la DB${suffix}.`;
+}
+
+function formatIdempotencyNotice(idempotencyStatus = '') {
+  const normalized = String(idempotencyStatus || '').toLowerCase();
+  if (normalized === 'replayed' || normalized === 'replayed_payload_mismatch') {
+    return 'ℹ️ Ese mensaje ya estaba procesado; no dupliqué datos.';
+  }
+  return '';
+}
+
 function buildLearningInstructions({ promptSnippet = '' } = {}) {
   return [
     promptSnippet ||
@@ -354,6 +505,12 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   const model = process.env.BOT_MODEL || process.env.BETTING_MODEL || DEFAULT_MODEL;
   const promptSnippet = loadPromptFile(manifest);
   const chatIdByUser = new Map();
+  const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
+  const defaultBackupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : '';
+  const nutritionDbReliability = startNutritionDbReliabilityLoop({
+    dbPath,
+    backupDir: String(process.env.NUTRITION_DB_BACKUP_DIR || defaultBackupDir).trim(),
+  });
 
   const billingClient = createBillingApiClient({ botId });
   const billingBridge = createBillingUserStoreBridge({
@@ -375,6 +532,9 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       const userId = String(metadata?.user?.id || '').trim();
       const chatId = String(metadata?.chat?.id || metadata?.chatId || '').trim();
       const guidedAction = String(metadata?.guidedAction || 'log_intake').trim();
+      const sourceMessageId = String(
+        metadata?.telegramMessageId || metadata?.message_id || ''
+      ).trim();
       const mediaStats = metadata?.mediaStats || {};
       const inputItems = Array.isArray(metadata?.inputItems) ? metadata.inputItems : [];
 
@@ -451,6 +611,8 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       let shouldCharge = false;
       let usageSnapshot = null;
 
+      try {
+
       if (guidedAction === 'update_profile') {
         if (!cleanMessage) {
           return [
@@ -467,8 +629,19 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
-        const updated = upsertNutritionProfile(userId, parsed.updates);
-        replyText = formatProfileReply(updated.profile || {});
+        const updated = upsertNutritionProfile(userId, parsed.updates, {
+          idempotency: {
+            sourceMessageId,
+            operationType: 'update_profile',
+          },
+        });
+        if (!updated?.ok) {
+          return formatWriteFailureReply('update_profile', updated?.error || 'db_write_failed');
+        }
+        const idempotencyNotice = formatIdempotencyNotice(updated.idempotencyStatus);
+        replyText = [formatProfileReply(updated.profile || {}), idempotencyNotice]
+          .filter(Boolean)
+          .join('\n');
         shouldCharge = true;
       } else if (guidedAction === 'view_summary') {
         const temporal = resolveTemporalContext({
@@ -504,68 +677,95 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
-        addNutritionWeighin(userId, {
-          ...parsed.weighin,
-          loggedAt: parsed.temporal.loggedAt,
-          localDate: parsed.temporal.localDate,
-          localTime: parsed.temporal.localTime,
-          timezone: parsed.temporal.timeZone,
-          rawInput: cleanMessage,
-        });
+        const weighinWrite = addNutritionWeighin(
+          userId,
+          {
+            ...parsed.weighin,
+            loggedAt: parsed.temporal.loggedAt,
+            localDate: parsed.temporal.localDate,
+            localTime: parsed.temporal.localTime,
+            timezone: parsed.temporal.timeZone,
+            rawInput: cleanMessage,
+          },
+          {
+            idempotency: {
+              sourceMessageId,
+              operationType: 'log_weighin',
+            },
+          }
+        );
+        if (!weighinWrite?.ok) {
+          return formatWriteFailureReply('log_weighin', weighinWrite?.error || 'db_write_failed');
+        }
 
+        const idempotencyNotice = formatIdempotencyNotice(weighinWrite.idempotencyStatus);
         replyText = [
           `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
           '✅ Pesaje registrado.',
           `⚖️ Peso: ${Number(parsed.weighin.weightKg).toFixed(1)} kg`,
-        ].join('\n');
+          idempotencyNotice,
+        ]
+          .filter(Boolean)
+          .join('\n');
         shouldCharge = true;
       } else if (guidedAction === 'learning_chat') {
-        const runtimePrompt = buildLearningInstructions({ promptSnippet });
-        if (!cleanMessage && !hasMedia) {
-          return 'Decime qué querés aprender (ejemplo: distribución de macros, timing de proteína, etc.).';
-        }
-
-        const userInput = hasMedia
-          ? [
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'input_text',
-                    text: cleanMessage || 'Consulta nutricional en modo aprendizaje.',
-                  },
-                  ...inputItems,
-                ],
-              },
-            ]
-          : cleanMessage;
-
-        const response = await openai.responses.create({
-          model,
-          instructions: runtimePrompt,
-          input: userInput,
+        const dbFirstReply = resolveDbFirstLearningReply({
+          cleanMessage,
+          userId,
+          userTimeZone,
+          profile,
         });
-        usageSnapshot = extractUsageSnapshot(response);
-        if (usageSnapshot) {
-          addNutritionUsageRecord(userId, {
-            guidedAction,
+        if (dbFirstReply) {
+          replyText = dbFirstReply;
+          shouldCharge = true;
+        } else {
+          const runtimePrompt = buildLearningInstructions({ promptSnippet });
+          if (!cleanMessage && !hasMedia) {
+            return 'Decime qué querés aprender (ejemplo: distribución de macros, timing de proteína, etc.).';
+          }
+
+          const userInput = hasMedia
+            ? [
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'input_text',
+                      text: cleanMessage || 'Consulta nutricional en modo aprendizaje.',
+                    },
+                    ...inputItems,
+                  ],
+                },
+              ]
+            : cleanMessage;
+
+          const response = await openai.responses.create({
             model,
-            inputTokens: usageSnapshot.inputTokens,
-            outputTokens: usageSnapshot.outputTokens,
-            totalTokens: usageSnapshot.totalTokens,
-            reasoningTokens: usageSnapshot.reasoningTokens,
-            cachedTokens: usageSnapshot.cachedTokens,
-            rawUsage: usageSnapshot.rawUsage,
+            instructions: runtimePrompt,
+            input: userInput,
           });
+          usageSnapshot = extractUsageSnapshot(response);
+          if (usageSnapshot) {
+            addNutritionUsageRecord(userId, {
+              guidedAction,
+              model,
+              inputTokens: usageSnapshot.inputTokens,
+              outputTokens: usageSnapshot.outputTokens,
+              totalTokens: usageSnapshot.totalTokens,
+              reasoningTokens: usageSnapshot.reasoningTokens,
+              cachedTokens: usageSnapshot.cachedTokens,
+              rawUsage: usageSnapshot.rawUsage,
+            });
+          }
+          const rawReply =
+            extractOutputText(response) ||
+            'No pude generar una respuesta útil en este turno. Reintentá con más contexto.';
+          replyText = enforcePolicyPack({
+            text: rawReply,
+            policyPackId,
+          });
+          shouldCharge = true;
         }
-        const rawReply =
-          extractOutputText(response) ||
-          'No pude generar una respuesta útil en este turno. Reintentá con más contexto.';
-        replyText = enforcePolicyPack({
-          text: rawReply,
-          policyPackId,
-        });
-        shouldCharge = true;
       } else {
         if (hasMedia && !cleanMessage) {
           return [
@@ -594,14 +794,26 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
-        addNutritionIntakes(userId, {
-          loggedAt: parsed.temporal.loggedAt,
-          localDate: parsed.temporal.localDate,
-          localTime: parsed.temporal.localTime,
-          timezone: parsed.temporal.timeZone,
-          rawInput: cleanMessage,
-          items: parsed.items,
-        });
+        const intakeWrite = addNutritionIntakes(
+          userId,
+          {
+            loggedAt: parsed.temporal.loggedAt,
+            localDate: parsed.temporal.localDate,
+            localTime: parsed.temporal.localTime,
+            timezone: parsed.temporal.timeZone,
+            rawInput: cleanMessage,
+            items: parsed.items,
+          },
+          {
+            idempotency: {
+              sourceMessageId,
+              operationType: 'log_intake',
+            },
+          }
+        );
+        if (!intakeWrite?.ok) {
+          return formatWriteFailureReply('log_intake', intakeWrite?.error || 'db_write_failed');
+        }
 
         const summary = getNutritionSummary(userId, parsed.temporal.localDate);
         const status = calculateProfileStatus(profile, summary.today);
@@ -623,7 +835,10 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
           `🎯 Estado: ${status}`,
-        ].join('\n');
+          formatIdempotencyNotice(intakeWrite.idempotencyStatus),
+        ]
+          .filter(Boolean)
+          .join('\n');
         shouldCharge = true;
       }
 
@@ -656,6 +871,15 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       }
 
       return replyText || 'No pude completar la acción solicitada.';
+      } catch (error) {
+        console.error('[nutrition-runtime] routeMessage failed', {
+          guidedAction,
+          userId,
+          sourceMessageId,
+          error: error?.message || String(error),
+        });
+        return formatWriteFailureReply(guidedAction, 'unexpected_error');
+      }
     },
   };
 
@@ -699,5 +923,6 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   return {
     ok: true,
     botId,
+    stopReliabilityLoop: () => nutritionDbReliability?.stop?.(),
   };
 }

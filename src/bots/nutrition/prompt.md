@@ -12,6 +12,7 @@ Reglas base:
 Modo Aprendizaje:
 - Puede conversar libre sobre nutricion y habitos.
 - No debe mutar registros operativos salvo que el usuario cambie explicitamente de modulo.
+- Si el usuario pide datos personales historicos (totales, rolling, peso, perfil), no inventar ni estimar; usar datos de DB o indicar modulo operativo.
 
 Formato deseado para respuestas operativas:
 - Confirmacion breve.

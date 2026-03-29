@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { getDb } from '../src/core/sqliteStore.js';
 import {
   addNutritionIntakes,
+  addNutritionWeighin,
   ensureNutritionSchema,
   findFoodCatalogCandidates,
   getNutritionSummary,
@@ -21,6 +22,10 @@ function cleanupUserData(userId = '') {
   db.prepare('DELETE FROM nutrition_profiles WHERE telegram_user_id = ?').run(normalizedUserId);
   db.prepare('DELETE FROM nutrition_journal WHERE telegram_user_id = ?').run(normalizedUserId);
   db.prepare('DELETE FROM nutrition_user_state WHERE telegram_user_id = ?').run(normalizedUserId);
+  db
+    .prepare('DELETE FROM nutrition_operation_receipts WHERE telegram_user_id = ?')
+    .run(normalizedUserId);
+  db.prepare('DELETE FROM nutrition_usage_records WHERE telegram_user_id = ?').run(normalizedUserId);
 }
 
 export async function runNutritionDomainTests() {
@@ -96,6 +101,120 @@ export async function runNutritionDomainTests() {
   assert.equal(summary.today.proteinG, 2.7);
   assert.equal(summary.rolling7d.caloriesKcal, 130);
   assert.equal(summary.rolling14d.caloriesKcal, 130);
+
+  const idempotentPayload = parseIntakePayload({
+    rawMessage: '2026-03-22 13:30 100g arroz cocido',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(idempotentPayload.ok, true);
+
+  const intakeInsertA = addNutritionIntakes(
+    userId,
+    {
+      loggedAt: idempotentPayload.temporal.loggedAt,
+      localDate: idempotentPayload.temporal.localDate,
+      localTime: idempotentPayload.temporal.localTime,
+      timezone: idempotentPayload.temporal.timeZone,
+      rawInput: '100g arroz cocido',
+      items: idempotentPayload.items,
+    },
+    {
+      idempotency: {
+        sourceMessageId: 'msg-intake-1',
+        operationType: 'log_intake',
+      },
+    }
+  );
+  const intakeInsertB = addNutritionIntakes(
+    userId,
+    {
+      loggedAt: idempotentPayload.temporal.loggedAt,
+      localDate: idempotentPayload.temporal.localDate,
+      localTime: idempotentPayload.temporal.localTime,
+      timezone: idempotentPayload.temporal.timeZone,
+      rawInput: '100g arroz cocido',
+      items: idempotentPayload.items,
+    },
+    {
+      idempotency: {
+        sourceMessageId: 'msg-intake-1',
+        operationType: 'log_intake',
+      },
+    }
+  );
+  assert.equal(intakeInsertA.ok, true);
+  assert.equal(intakeInsertA.idempotencyStatus, 'new');
+  assert.equal(intakeInsertB.ok, true);
+  assert.equal(intakeInsertB.idempotencyStatus, 'replayed');
+
+  const conflictingPayload = parseIntakePayload({
+    rawMessage: '2026-03-22 13:30 200g arroz cocido',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(conflictingPayload.ok, true);
+  const intakeConflict = addNutritionIntakes(
+    userId,
+    {
+      loggedAt: conflictingPayload.temporal.loggedAt,
+      localDate: conflictingPayload.temporal.localDate,
+      localTime: conflictingPayload.temporal.localTime,
+      timezone: conflictingPayload.temporal.timeZone,
+      rawInput: '200g arroz cocido',
+      items: conflictingPayload.items,
+    },
+    {
+      idempotency: {
+        sourceMessageId: 'msg-intake-1',
+        operationType: 'log_intake',
+      },
+    }
+  );
+  assert.equal(intakeConflict.ok, true);
+  assert.equal(intakeConflict.idempotencyStatus, 'replayed_payload_mismatch');
+
+  const weighinParsed = parseWeighinPayload({
+    rawMessage: '2026-03-22 08:15 81.2 kg',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(weighinParsed.ok, true);
+  const weighinA = addNutritionWeighin(
+    userId,
+    {
+      ...weighinParsed.weighin,
+      loggedAt: weighinParsed.temporal.loggedAt,
+      localDate: weighinParsed.temporal.localDate,
+      localTime: weighinParsed.temporal.localTime,
+      timezone: weighinParsed.temporal.timeZone,
+      rawInput: '81.2 kg',
+    },
+    {
+      idempotency: {
+        sourceMessageId: 'msg-weighin-1',
+        operationType: 'log_weighin',
+      },
+    }
+  );
+  const weighinB = addNutritionWeighin(
+    userId,
+    {
+      ...weighinParsed.weighin,
+      loggedAt: weighinParsed.temporal.loggedAt,
+      localDate: weighinParsed.temporal.localDate,
+      localTime: weighinParsed.temporal.localTime,
+      timezone: weighinParsed.temporal.timeZone,
+      rawInput: '81.2 kg',
+    },
+    {
+      idempotency: {
+        sourceMessageId: 'msg-weighin-1',
+        operationType: 'log_weighin',
+      },
+    }
+  );
+  assert.equal(weighinA.ok, true);
+  assert.equal(weighinA.idempotencyStatus, 'new');
+  assert.equal(weighinB.ok, true);
+  assert.equal(weighinB.idempotencyStatus, 'replayed');
 
   const uniqueProduct = `producto_prueba_${Date.now()}`;
   upsertFoodCatalogEntry({

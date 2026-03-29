@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { getDb } from '../../core/sqliteStore.js';
 
 const STANDARD_FOOD_CATALOG = [
@@ -171,6 +172,148 @@ function round(value = 0) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function parseJsonOrNull(raw = '') {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  const keys = Object.keys(value).sort();
+  const chunks = keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`);
+  return `{${chunks.join(',')}}`;
+}
+
+function hashPayload(value) {
+  return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
+function normalizeSourceMessageId(value = '') {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  return normalized;
+}
+
+function isValidLocalDate(value = '') {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
+}
+
+function isValidLocalTime(value = '') {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || '').trim());
+}
+
+function isNonNegativeFinite(value) {
+  return Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
+function withOperationReceipt({
+  userId = '',
+  operationType = '',
+  sourceMessageId = '',
+  payloadForHash = null,
+  applyMutation,
+} = {}) {
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedOperationType = String(operationType || '').trim();
+  const normalizedSourceMessageId = normalizeSourceMessageId(sourceMessageId);
+  if (!normalizedUserId || !normalizedOperationType || !normalizedSourceMessageId) {
+    const result = applyMutation?.();
+    return {
+      ok: true,
+      idempotencyStatus: 'not_provided',
+      ...result,
+    };
+  }
+
+  const payloadHash = hashPayload(payloadForHash ?? {});
+  const db = getDb();
+  const run = db.transaction(() => {
+    const existing = db
+      .prepare(
+        `
+      SELECT id, payload_hash AS payloadHash, status, result_json AS resultJson
+      FROM nutrition_operation_receipts
+      WHERE telegram_user_id = ? AND operation_type = ? AND source_message_id = ?
+    `
+      )
+      .get(normalizedUserId, normalizedOperationType, normalizedSourceMessageId);
+
+    if (existing) {
+      if (String(existing.status || '').toLowerCase() === 'committed') {
+        const prior = parseJsonOrNull(existing.resultJson);
+        return {
+          ok: true,
+          idempotencyStatus:
+            String(existing.payloadHash || '') && existing.payloadHash !== payloadHash
+              ? 'replayed_payload_mismatch'
+              : 'replayed',
+          ...(prior && typeof prior === 'object' ? prior : {}),
+        };
+      }
+      return {
+        ok: false,
+        error: 'idempotency_in_progress',
+        idempotencyStatus: 'pending',
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    db.prepare(
+      `
+      INSERT INTO nutrition_operation_receipts (
+        telegram_user_id, operation_type, source_message_id, payload_hash,
+        status, result_json, error_code, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+    ).run(
+      normalizedUserId,
+      normalizedOperationType,
+      normalizedSourceMessageId,
+      payloadHash,
+      'pending',
+      null,
+      null,
+      nowIso,
+      nowIso
+    );
+
+    const result = applyMutation?.() || {};
+    db.prepare(
+      `
+      UPDATE nutrition_operation_receipts
+      SET status = ?, result_json = ?, error_code = ?, updated_at = ?
+      WHERE telegram_user_id = ? AND operation_type = ? AND source_message_id = ?
+    `
+    ).run(
+      'committed',
+      JSON.stringify(result),
+      null,
+      new Date().toISOString(),
+      normalizedUserId,
+      normalizedOperationType,
+      normalizedSourceMessageId
+    );
+
+    return {
+      ok: true,
+      idempotencyStatus: 'new',
+      ...result,
+    };
+  });
+
+  return run();
+}
+
 function shiftIsoDate(isoDate = '', deltaDays = 0) {
   if (!isoDate) return '';
   const date = new Date(`${isoDate}T00:00:00Z`);
@@ -287,6 +430,23 @@ export function ensureNutritionSchema() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS nutrition_operation_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      operation_type TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      payload_hash TEXT,
+      status TEXT NOT NULL,
+      result_json TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (telegram_user_id, operation_type, source_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nutrition_receipts_user_time
+      ON nutrition_operation_receipts (telegram_user_id, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS nutrition_usage_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_user_id TEXT NOT NULL,
@@ -361,7 +521,7 @@ export function getNutritionProfile(userId = '') {
   );
 }
 
-export function upsertNutritionProfile(userId = '', updates = {}) {
+export function upsertNutritionProfile(userId = '', updates = {}, options = {}) {
   ensureNutritionSchema();
   const normalizedUserId = String(userId || '').trim();
   if (!normalizedUserId) {
@@ -384,31 +544,51 @@ export function upsertNutritionProfile(userId = '', updates = {}) {
     updatedAt: nowIso,
   };
 
-  getDb()
-    .prepare(
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'upsert_profile'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash: {
+      payload,
+      operationType: 'upsert_profile',
+    },
+    applyMutation: () => {
+      getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_profiles (
+          telegram_user_id, timezone, main_goal, target_calories_kcal, target_protein_g,
+          notes, restrictions, created_at, updated_at
+        ) VALUES (
+          @userId, @timezone, @mainGoal, @targetCaloriesKcal, @targetProteinG,
+          @notes, @restrictions, @createdAt, @updatedAt
+        )
+        ON CONFLICT(telegram_user_id) DO UPDATE SET
+          timezone = excluded.timezone,
+          main_goal = excluded.main_goal,
+          target_calories_kcal = excluded.target_calories_kcal,
+          target_protein_g = excluded.target_protein_g,
+          notes = excluded.notes,
+          restrictions = excluded.restrictions,
+          updated_at = excluded.updated_at
       `
-    INSERT INTO nutrition_profiles (
-      telegram_user_id, timezone, main_goal, target_calories_kcal, target_protein_g,
-      notes, restrictions, created_at, updated_at
-    ) VALUES (
-      @userId, @timezone, @mainGoal, @targetCaloriesKcal, @targetProteinG,
-      @notes, @restrictions, @createdAt, @updatedAt
-    )
-    ON CONFLICT(telegram_user_id) DO UPDATE SET
-      timezone = excluded.timezone,
-      main_goal = excluded.main_goal,
-      target_calories_kcal = excluded.target_calories_kcal,
-      target_protein_g = excluded.target_protein_g,
-      notes = excluded.notes,
-      restrictions = excluded.restrictions,
-      updated_at = excluded.updated_at
-  `
-    )
-    .run(payload);
+        )
+        .run(payload);
+
+      return {
+        profile: getNutritionProfile(normalizedUserId),
+      };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
 
   return {
     ok: true,
-    profile: getNutritionProfile(normalizedUserId),
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    profile: mutationResult.profile || getNutritionProfile(normalizedUserId),
   };
 }
 
@@ -452,7 +632,7 @@ export function getNutritionUserState(userId = '') {
   );
 }
 
-export function upsertFoodCatalogEntry(entry = {}) {
+export function upsertFoodCatalogEntry(entry = {}, options = {}) {
   ensureNutritionSchema();
   const productName = String(entry.productName || '').trim();
   if (!productName) {
@@ -478,46 +658,70 @@ export function upsertFoodCatalogEntry(entry = {}) {
   }
 
   const nowIso = new Date().toISOString();
-  getDb()
-    .prepare(
-      `
-    INSERT INTO nutrition_food_catalog (
-      product_name, brand, normalized_name, normalized_brand, portion_g,
-      calories_kcal, protein_g, carbs_g, fat_g, fiber_g, sodium_mg, source, created_at, updated_at
-    ) VALUES (
-      @productName, @brand, @normalizedName, @normalizedBrand, @portionG,
-      @caloriesKcal, @proteinG, @carbsG, @fatG, @fiberG, @sodiumMg, @source, @createdAt, @updatedAt
-    )
-    ON CONFLICT(normalized_name, normalized_brand) DO UPDATE SET
-      portion_g = excluded.portion_g,
-      calories_kcal = excluded.calories_kcal,
-      protein_g = excluded.protein_g,
-      carbs_g = excluded.carbs_g,
-      fat_g = excluded.fat_g,
-      fiber_g = excluded.fiber_g,
-      sodium_mg = excluded.sodium_mg,
-      source = excluded.source,
-      updated_at = excluded.updated_at
-  `
-    )
-    .run({
-      productName,
-      brand: brand || null,
-      normalizedName,
-      normalizedBrand,
-      portionG,
-      caloriesKcal,
-      proteinG,
-      carbsG,
-      fatG,
-      fiberG: toNumberOrNull(entry.fiberG),
-      sodiumMg: toNumberOrNull(entry.sodiumMg),
-      source: String(entry.source || 'manual').trim(),
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    });
+  const payload = {
+    productName,
+    brand: brand || null,
+    normalizedName,
+    normalizedBrand,
+    portionG,
+    caloriesKcal,
+    proteinG,
+    carbsG,
+    fatG,
+    fiberG: toNumberOrNull(entry.fiberG),
+    sodiumMg: toNumberOrNull(entry.sodiumMg),
+    source: String(entry.source || 'manual').trim(),
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
 
-  return { ok: true };
+  const receiptUserId =
+    String(options?.idempotency?.userId || options?.userId || '').trim() || 'global_catalog';
+  const mutationResult = withOperationReceipt({
+    userId: receiptUserId,
+    operationType: String(options?.idempotency?.operationType || 'upsert_food_catalog'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash: payload,
+    applyMutation: () => {
+      getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_food_catalog (
+          product_name, brand, normalized_name, normalized_brand, portion_g,
+          calories_kcal, protein_g, carbs_g, fat_g, fiber_g, sodium_mg, source, created_at, updated_at
+        ) VALUES (
+          @productName, @brand, @normalizedName, @normalizedBrand, @portionG,
+          @caloriesKcal, @proteinG, @carbsG, @fatG, @fiberG, @sodiumMg, @source, @createdAt, @updatedAt
+        )
+        ON CONFLICT(normalized_name, normalized_brand) DO UPDATE SET
+          portion_g = excluded.portion_g,
+          calories_kcal = excluded.calories_kcal,
+          protein_g = excluded.protein_g,
+          carbs_g = excluded.carbs_g,
+          fat_g = excluded.fat_g,
+          fiber_g = excluded.fiber_g,
+          sodium_mg = excluded.sodium_mg,
+          source = excluded.source,
+          updated_at = excluded.updated_at
+      `
+        )
+        .run(payload);
+
+      return {
+        normalizedName,
+        normalizedBrand,
+      };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+  };
 }
 
 export function listFoodCatalogEntries() {
@@ -547,12 +751,54 @@ export function listFoodCatalogEntries() {
     .all();
 }
 
-export function addNutritionIntakes(userId = '', payload = {}) {
+export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
   ensureNutritionSchema();
   const normalizedUserId = String(userId || '').trim();
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (!normalizedUserId || !items.length) {
     return { ok: false, error: 'missing_payload' };
+  }
+  const localDate = String(payload.localDate || '').trim();
+  const localTime = String(payload.localTime || '').trim();
+  const timezone = String(payload.timezone || '').trim();
+  const loggedAt = String(payload.loggedAt || new Date().toISOString());
+  if (!isValidLocalDate(localDate) || !isValidLocalTime(localTime) || !timezone) {
+    return { ok: false, error: 'invalid_temporal_payload' };
+  }
+
+  const sanitizedRows = [];
+  for (const row of items) {
+    const foodItem = String(row?.foodItem || '').trim();
+    if (!foodItem) {
+      return { ok: false, error: 'invalid_item_payload' };
+    }
+
+    const caloriesKcal = round(row?.caloriesKcal);
+    const proteinG = round(row?.proteinG);
+    const carbsG = round(row?.carbsG);
+    const fatG = round(row?.fatG);
+    if (
+      !isNonNegativeFinite(caloriesKcal) ||
+      !isNonNegativeFinite(proteinG) ||
+      !isNonNegativeFinite(carbsG) ||
+      !isNonNegativeFinite(fatG)
+    ) {
+      return { ok: false, error: 'invalid_macros_payload' };
+    }
+
+    sanitizedRows.push({
+      mealType: row?.mealType || null,
+      foodItem,
+      quantityValue: toNumberOrNull(row?.quantityValue),
+      quantityUnit: String(row?.quantityUnit || '').trim() || null,
+      brandOrNotes: String(row?.brandOrNotes || '').trim() || null,
+      caloriesKcal,
+      proteinG,
+      carbsG,
+      fatG,
+      confidence: String(row?.confidence || 'media').trim() || 'media',
+      source: String(row?.source || 'base_estandar').trim() || 'base_estandar',
+    });
   }
 
   const stmt = getDb().prepare(`
@@ -570,76 +816,146 @@ export function addNutritionIntakes(userId = '', payload = {}) {
   const transaction = getDb().transaction((rows) => {
     let inserted = 0;
     for (const row of rows) {
-      stmt.run({
+      const result = stmt.run({
         userId: normalizedUserId,
-        loggedAt: String(payload.loggedAt || new Date().toISOString()),
-        localDate: String(payload.localDate || ''),
-        localTime: String(payload.localTime || ''),
-        timezone: String(payload.timezone || ''),
+        loggedAt,
+        localDate,
+        localTime,
+        timezone,
         mealType: row.mealType || null,
         foodItem: String(row.foodItem || '').trim(),
         quantityValue: toNumberOrNull(row.quantityValue),
         quantityUnit: String(row.quantityUnit || '').trim() || null,
         brandOrNotes: String(row.brandOrNotes || '').trim() || null,
-        caloriesKcal: round(row.caloriesKcal),
-        proteinG: round(row.proteinG),
-        carbsG: round(row.carbsG),
-        fatG: round(row.fatG),
+        caloriesKcal: row.caloriesKcal,
+        proteinG: row.proteinG,
+        carbsG: row.carbsG,
+        fatG: row.fatG,
         confidence: String(row.confidence || 'media').trim() || 'media',
         source: String(row.source || 'base_estandar').trim() || 'base_estandar',
         rawInput: String(payload.rawInput || '').trim() || null,
         createdAt: new Date().toISOString(),
       });
-      inserted += 1;
+      inserted += Number(result?.changes) || 0;
+    }
+    if (inserted !== rows.length) {
+      throw new Error('insert_count_mismatch');
     }
     return inserted;
   });
 
-  const insertedCount = transaction(items);
-  return { ok: true, insertedCount };
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_intakes'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash: {
+      userId: normalizedUserId,
+      loggedAt,
+      localDate,
+      localTime,
+      timezone,
+      rawInput: String(payload.rawInput || '').trim() || '',
+      items: sanitizedRows,
+    },
+    applyMutation: () => {
+      const insertedCount = transaction(sanitizedRows);
+      return { insertedCount };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    insertedCount: Number(mutationResult.insertedCount) || 0,
+  };
 }
 
-export function addNutritionWeighin(userId = '', weighin = {}) {
+export function addNutritionWeighin(userId = '', weighin = {}, options = {}) {
   ensureNutritionSchema();
   const normalizedUserId = String(userId || '').trim();
   const weightKg = toNumberOrNull(weighin.weightKg);
   if (!normalizedUserId || !weightKg) {
     return { ok: false, error: 'missing_weight' };
   }
+  const localDate = String(weighin.localDate || '').trim();
+  const localTime = String(weighin.localTime || '').trim();
+  const timezone = String(weighin.timezone || '').trim();
+  const loggedAt = String(weighin.loggedAt || new Date().toISOString());
+  if (!isValidLocalDate(localDate) || !isValidLocalTime(localTime) || !timezone) {
+    return { ok: false, error: 'invalid_temporal_payload' };
+  }
 
-  getDb()
-    .prepare(
+  const numericOptionals = {
+    bodyFatPercent: toNumberOrNull(weighin.bodyFatPercent),
+    visceralFat: toNumberOrNull(weighin.visceralFat),
+    muscleMassKg: toNumberOrNull(weighin.muscleMassKg),
+    bodyWaterPercent: toNumberOrNull(weighin.bodyWaterPercent),
+    bmrKcal: toNumberOrNull(weighin.bmrKcal),
+    boneMassKg: toNumberOrNull(weighin.boneMassKg),
+  };
+  for (const value of Object.values(numericOptionals)) {
+    if (value !== null && !isNonNegativeFinite(value)) {
+      return { ok: false, error: 'invalid_weighin_payload' };
+    }
+  }
+
+  const payload = {
+    userId: normalizedUserId,
+    loggedAt,
+    localDate,
+    localTime,
+    timezone,
+    weightKg,
+    ...numericOptionals,
+    notes: String(weighin.notes || '').trim() || null,
+    rawInput: String(weighin.rawInput || '').trim() || null,
+  };
+
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_weighin'),
+    sourceMessageId: options?.idempotency?.sourceMessageId,
+    payloadForHash: payload,
+    applyMutation: () => {
+      const result = getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_weighins (
+          telegram_user_id, logged_at, local_date, local_time, timezone, weight_kg,
+          body_fat_percent, visceral_fat, muscle_mass_kg, body_water_percent,
+          bmr_kcal, bone_mass_kg, notes, raw_input, created_at
+        ) VALUES (
+          @userId, @loggedAt, @localDate, @localTime, @timezone, @weightKg,
+          @bodyFatPercent, @visceralFat, @muscleMassKg, @bodyWaterPercent,
+          @bmrKcal, @boneMassKg, @notes, @rawInput, @createdAt
+        )
       `
-    INSERT INTO nutrition_weighins (
-      telegram_user_id, logged_at, local_date, local_time, timezone, weight_kg,
-      body_fat_percent, visceral_fat, muscle_mass_kg, body_water_percent,
-      bmr_kcal, bone_mass_kg, notes, raw_input, created_at
-    ) VALUES (
-      @userId, @loggedAt, @localDate, @localTime, @timezone, @weightKg,
-      @bodyFatPercent, @visceralFat, @muscleMassKg, @bodyWaterPercent,
-      @bmrKcal, @boneMassKg, @notes, @rawInput, @createdAt
-    )
-  `
-    )
-    .run({
-      userId: normalizedUserId,
-      loggedAt: String(weighin.loggedAt || new Date().toISOString()),
-      localDate: String(weighin.localDate || ''),
-      localTime: String(weighin.localTime || ''),
-      timezone: String(weighin.timezone || ''),
-      weightKg,
-      bodyFatPercent: toNumberOrNull(weighin.bodyFatPercent),
-      visceralFat: toNumberOrNull(weighin.visceralFat),
-      muscleMassKg: toNumberOrNull(weighin.muscleMassKg),
-      bodyWaterPercent: toNumberOrNull(weighin.bodyWaterPercent),
-      bmrKcal: toNumberOrNull(weighin.bmrKcal),
-      boneMassKg: toNumberOrNull(weighin.boneMassKg),
-      notes: String(weighin.notes || '').trim() || null,
-      rawInput: String(weighin.rawInput || '').trim() || null,
-      createdAt: new Date().toISOString(),
-    });
+        )
+        .run({
+          ...payload,
+          createdAt: new Date().toISOString(),
+        });
 
-  return { ok: true };
+      if ((Number(result?.changes) || 0) !== 1) {
+        throw new Error('insert_count_mismatch');
+      }
+
+      return { inserted: true };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+  };
 }
 
 export function addNutritionUsageRecord(userId = '', payload = {}) {
@@ -831,6 +1147,67 @@ export function getLatestNutritionWeighin(userId = '') {
       )
       .get(String(userId || '').trim()) || null
   );
+}
+
+export function listNutritionIntakesByDate(userId = '', localDate = '', { limit = 80 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedDate = String(localDate || '').trim();
+  if (!normalizedUserId || !normalizedDate) return [];
+
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      id,
+      logged_at AS loggedAt,
+      local_date AS localDate,
+      local_time AS localTime,
+      food_item AS foodItem,
+      quantity_value AS quantityValue,
+      quantity_unit AS quantityUnit,
+      calories_kcal AS caloriesKcal,
+      protein_g AS proteinG,
+      carbs_g AS carbsG,
+      fat_g AS fatG,
+      source
+    FROM nutrition_intakes
+    WHERE telegram_user_id = ? AND local_date = ?
+    ORDER BY logged_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, normalizedDate, Math.max(1, Number(limit) || 80));
+}
+
+export function listRecentNutritionIntakes(userId = '', { limit = 20 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      id,
+      logged_at AS loggedAt,
+      local_date AS localDate,
+      local_time AS localTime,
+      food_item AS foodItem,
+      quantity_value AS quantityValue,
+      quantity_unit AS quantityUnit,
+      calories_kcal AS caloriesKcal,
+      protein_g AS proteinG,
+      carbs_g AS carbsG,
+      fat_g AS fatG,
+      source
+    FROM nutrition_intakes
+    WHERE telegram_user_id = ?
+    ORDER BY logged_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, Math.max(1, Number(limit) || 20));
 }
 
 export function findFoodCatalogCandidates(query = '', { limit = 25 } = {}) {

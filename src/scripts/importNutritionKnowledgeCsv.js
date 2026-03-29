@@ -572,6 +572,7 @@ function resetUserData(userId = '') {
   db.prepare('DELETE FROM nutrition_profiles WHERE telegram_user_id = ?').run(cleanUserId);
   db.prepare('DELETE FROM nutrition_journal WHERE telegram_user_id = ?').run(cleanUserId);
   db.prepare('DELETE FROM nutrition_user_state WHERE telegram_user_id = ?').run(cleanUserId);
+  db.prepare('DELETE FROM nutrition_operation_receipts WHERE telegram_user_id = ?').run(cleanUserId);
   db.prepare('DELETE FROM nutrition_usage_records WHERE telegram_user_id = ?').run(cleanUserId);
 }
 

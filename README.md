@@ -153,6 +153,10 @@ TELEGRAM_INTERACTION_MODE=guided_strict
 GUIDED_QUOTES_TEXT_FALLBACK=true
 BOT_ALLOWED_TELEGRAM_USER_IDS=
 DEFAULT_USER_TIMEZONE=America/Argentina/Buenos_Aires
+NUTRITION_DB_BACKUP_ENABLED=true
+NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups
+NUTRITION_DB_BACKUP_INTERVAL_MS=21600000
+NUTRITION_DB_BACKUP_RETENTION_DAYS=14
 NUTRITION_TELEGRAM_BOT_TOKEN=
 MEDICAL_READER_TELEGRAM_BOT_TOKEN=
 BILLING_BASE_URL=
@@ -308,8 +312,23 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 
 - `Aprendizaje` es el único módulo con chat libre.
 - Fuera de `Aprendizaje`, el bot reencauza al módulo operativo seleccionado.
+- En `Aprendizaje`, si el mensaje pide datos personales (`resumen`, `cómo vengo`, `qué comí`, `perfil`, `último peso`), se responde **DB-first** con datos reales de SQLite antes de usar chat libre.
 - V1 no incluye OCR de etiquetas ni lookup online de productos de marca.
 - Si no se informa hora/fecha en ingesta o pesaje, usa hora local del usuario (`DEFAULT_USER_TIMEZONE` o perfil).
+- Escrituras de `ingesta`, `pesaje` y `perfil` tienen idempotencia por mensaje Telegram (`user_id + operation + message_id`) para evitar duplicados por reintentos.
+- Si una escritura falla, el bot devuelve error explícito y no confirma “anotado”.
+
+#### Nutrition DB Reliability
+
+- Backup automático rotativo para Nutrition DB (configurable por env):
+  - `NUTRITION_DB_BACKUP_ENABLED=true|false`
+  - `NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups`
+  - `NUTRITION_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
+  - `NUTRITION_DB_BACKUP_RETENTION_DAYS=14`
+- En cada ciclo: verificación `PRAGMA quick_check` + validación de tablas críticas + backup `.sqlite`.
+- Comandos manuales:
+  - `npm run nutrition:db:verify`
+  - `npm run nutrition:db:backup`
 
 ### Web Enrichment Before Analysis
 
