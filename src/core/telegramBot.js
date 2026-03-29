@@ -382,40 +382,30 @@ export function resolveGuidedMessageDecision({
     };
   }
 
-  if (
-    allowTextFallback &&
-    guidedAction === 'analyze_quotes' &&
-    looksLikeStructuredOddsText(cleanMessage)
-  ) {
-    return {
-      action: 'route',
-      guidedAction,
-      inputType: 'text_odds',
-    };
-  }
+  if (allowTextFallback) {
+    if (looksLikeStructuredBetSettleText(cleanMessage)) {
+      return {
+        action: 'route',
+        guidedAction: 'settle_bet',
+        inputType: 'text_bet_settle',
+      };
+    }
 
-  if (
-    allowTextFallback &&
-    guidedAction === 'record_bet' &&
-    looksLikeStructuredBetRecordText(cleanMessage)
-  ) {
-    return {
-      action: 'route',
-      guidedAction,
-      inputType: 'text_bet_record',
-    };
-  }
+    if (looksLikeStructuredBetRecordText(cleanMessage)) {
+      return {
+        action: 'route',
+        guidedAction: 'record_bet',
+        inputType: 'text_bet_record',
+      };
+    }
 
-  if (
-    allowTextFallback &&
-    guidedAction === 'settle_bet' &&
-    looksLikeStructuredBetSettleText(cleanMessage)
-  ) {
-    return {
-      action: 'route',
-      guidedAction,
-      inputType: 'text_bet_settle',
-    };
+    if (looksLikeStructuredOddsText(cleanMessage)) {
+      return {
+        action: 'route',
+        guidedAction: 'analyze_quotes',
+        inputType: 'text_odds',
+      };
+    }
   }
 
   return {
@@ -439,7 +429,7 @@ function looksLikeStructuredBetRecordText(message = '') {
     text
   );
 
-  return hasOdds && (hasStake || hasFight || hasPickContext);
+  return hasOdds && hasStake && (hasFight || hasPickContext);
 }
 
 function looksLikeStructuredBetSettleText(message = '') {
@@ -1239,6 +1229,7 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'qa:list_pending') {
+        setGuidedAction(chatId, 'settle_bet');
         const routed = await routeSyntheticAction(
           query,
           'mostrame mis apuestas pending del ledger con bet_id',

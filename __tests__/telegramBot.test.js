@@ -266,6 +266,67 @@ export async function runTelegramBotTests() {
     await fakeBot.emit(
       'callback_query',
       createBaseCallback({
+        data: 'qa:record_bet',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'bet_id 42 LOST',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'settle_bet');
+    assert.equal(router.calls[0].inputType, 'text_bet_settle');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:list_pending',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'bet_id 45 WON',
+      })
+    );
+
+    assert.equal(router.calls.length, 2);
+    assert.equal(router.calls[0].guidedAction, 'ledger_list_pending');
+    assert.equal(router.calls[1].guidedAction, 'settle_bet');
+    assert.equal(router.calls[1].inputType, 'text_bet_settle');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
         data: 'qa:settle_bet',
       })
     );
