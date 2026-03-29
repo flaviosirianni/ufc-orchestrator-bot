@@ -367,6 +367,7 @@ function formatSummaryReply({
   summary = {},
   status = 'sin objetivo configurado',
   latestWeighin = null,
+  todayIntakes = [],
 } = {}) {
   const lines = [
     `Fecha: ${localDate} | Hora: ${localTime}`,
@@ -382,7 +383,60 @@ function formatSummaryReply({
       `⚖️ Último pesaje: ${Number(latestWeighin.weightKg).toFixed(1)} kg (${latestWeighin.localDate} ${latestWeighin.localTime})`
     );
   }
+
+  lines.push('', ...buildIntakeDetailsBlock({
+    title: '🧾 Ingestas de hoy',
+    rows: todayIntakes,
+    includeTime: true,
+    chronological: true,
+    emptyLine: '- (sin ingestas registradas hoy)',
+  }));
+
   return lines.join('\n');
+}
+
+function formatNumberCompact(value = 0, { decimals = 2 } = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '0';
+  return numeric.toFixed(decimals).replace(/\.?0+$/u, '');
+}
+
+function formatQuantityText(value = null, unit = '') {
+  const q = Number(value);
+  const normalizedUnit = String(unit || '').trim();
+  if (Number.isFinite(q)) {
+    return `${formatNumberCompact(q)}${normalizedUnit ? ` ${normalizedUnit}` : ''}`;
+  }
+  return normalizedUnit || 'porcion';
+}
+
+function formatIntakeDetailLine(row = {}, { includeTime = false } = {}) {
+  const food = String(row?.foodItem || '').trim() || 'item';
+  const quantity = formatQuantityText(row?.quantityValue, row?.quantityUnit);
+  const kcal = formatNumberCompact(row?.caloriesKcal);
+  const protein = formatNumberCompact(row?.proteinG);
+  const carbs = formatNumberCompact(row?.carbsG);
+  const fat = formatNumberCompact(row?.fatG);
+  const prefix = includeTime && row?.localTime ? `${row.localTime} | ` : '';
+  return `- ${prefix}${food} (${quantity}) | ${kcal} kcal | P ${protein} g | C ${carbs} g | G ${fat} g`;
+}
+
+function buildIntakeDetailsBlock({
+  title = '🧾 Detalle registrado',
+  rows = [],
+  includeTime = false,
+  chronological = false,
+  emptyLine = '- (sin datos)',
+} = {}) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return [title, emptyLine];
+  }
+
+  const ordered = chronological ? [...rows].reverse() : rows;
+  return [
+    title,
+    ...ordered.map((row) => formatIntakeDetailLine(row, { includeTime })),
+  ];
 }
 
 function formatProfileReply(profile = {}) {
@@ -1090,12 +1144,14 @@ function resolveDbFirstLearningReply({
     const summary = getNutritionSummary(userId, temporal.localDate);
     const status = calculateProfileStatus(profile, summary.today);
     const latestWeighin = getLatestNutritionWeighin(userId);
+    const todayIntakes = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 80 });
     return formatSummaryReply({
       localDate: temporal.localDate,
       localTime: temporal.localTime,
       summary,
       status,
       latestWeighin,
+      todayIntakes,
     });
   }
 
@@ -1342,12 +1398,14 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         const summary = getNutritionSummary(userId, temporal.localDate);
         const status = calculateProfileStatus(profile, summary.today);
         const latestWeighin = getLatestNutritionWeighin(userId);
+        const todayIntakes = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 80 });
         replyText = formatSummaryReply({
           localDate: temporal.localDate,
           localTime: temporal.localTime,
           summary,
           status,
           latestWeighin,
+          todayIntakes,
         });
         shouldCharge = true;
       } else if (guidedAction === 'log_weighin') {
@@ -1719,6 +1777,12 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         replyText = [
           `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
           'OK, quedó anotado.',
+          ...buildIntakeDetailsBlock({
+            title: '🧾 Detalle registrado',
+            rows: parsed.items,
+            includeTime: false,
+            chronological: false,
+          }),
           formatMacroLine('📊 Hoy: ', summary.today),
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
