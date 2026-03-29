@@ -628,6 +628,33 @@ function toPositiveFiniteOrNull(value) {
   return parsed;
 }
 
+function parseFlexibleNumber(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+
+  const normalized = text.replace(',', '.');
+  const direct = Number(normalized);
+  if (Number.isFinite(direct)) return direct;
+
+  const fraction = normalized.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (fraction) {
+    const numerator = Number(fraction[1]);
+    const denominator = Number(fraction[2]);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return numerator / denominator;
+    }
+  }
+
+  if (normalized === 'media' || normalized === 'medio') return 0.5;
+  if (normalized === 'un cuarto' || normalized === 'cuarto') return 0.25;
+  if (normalized === 'tres cuartos') return 0.75;
+
+  return null;
+}
+
 function roundMacro(value = 0) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
@@ -644,6 +671,33 @@ function computeQuantityFactor(quantityValue = null, quantityUnit = '', portionG
   if (unit === 'l' || unit === 'litro' || unit === 'litros') return (q * 1000) / p;
   if (unit === 'ml' || unit === 'cc') return q / p;
   return q;
+}
+
+function buildPhotoHintLine() {
+  return '📷 Si hay duda, mandame foto del plato/ticket o etiqueta nutricional y lo ajusto con más precisión.';
+}
+
+function parseStructuredEstimatedTotals(item = {}) {
+  const caloriesKcal = Number(item?.estimatedTotals?.caloriesKcal);
+  const proteinG = Number(item?.estimatedTotals?.proteinG);
+  const carbsG = Number(item?.estimatedTotals?.carbsG);
+  const fatG = Number(item?.estimatedTotals?.fatG);
+  const isValid =
+    Number.isFinite(caloriesKcal) &&
+    caloriesKcal >= 0 &&
+    Number.isFinite(proteinG) &&
+    proteinG >= 0 &&
+    Number.isFinite(carbsG) &&
+    carbsG >= 0 &&
+    Number.isFinite(fatG) &&
+    fatG >= 0;
+  if (!isValid) return null;
+  return {
+    caloriesKcal: roundMacro(caloriesKcal),
+    proteinG: roundMacro(proteinG),
+    carbsG: roundMacro(carbsG),
+    fatG: roundMacro(fatG),
+  };
 }
 
 function resolveCatalogEntryFromStructuredItem(item = {}, catalogRows = []) {
@@ -727,7 +781,26 @@ function buildParsedIntakeFromStructured({
   const unresolvedItems = [];
   for (const structuredItem of normalizedItems) {
     const entry = resolveCatalogEntryFromStructuredItem(structuredItem, catalogRows);
+    const estimatedTotals = parseStructuredEstimatedTotals(structuredItem);
     if (!entry) {
+      if (estimatedTotals && String(structuredItem?.foodName || '').trim()) {
+        items.push({
+          foodItem: String(structuredItem.foodName || '').trim(),
+          quantityValue:
+            toPositiveFiniteOrNull(structuredItem?.quantityValue) ??
+            toPositiveFiniteOrNull(structuredItem?.quantity) ??
+            1,
+          quantityUnit: String(structuredItem?.quantityUnit || 'porcion').trim() || 'porcion',
+          caloriesKcal: estimatedTotals.caloriesKcal,
+          proteinG: estimatedTotals.proteinG,
+          carbsG: estimatedTotals.carbsG,
+          fatG: estimatedTotals.fatG,
+          confidence: String(structuredItem?.confidence || 'baja').trim() || 'baja',
+          source: 'estimacion_gpt',
+          brandOrNotes: String(structuredItem?.brand || '').trim() || null,
+        });
+        continue;
+      }
       unresolvedItems.push(
         String(structuredItem?.foodName || structuredItem?.catalogId || 'item').trim() || 'item'
       );
@@ -794,7 +867,7 @@ async function parseStructuredIntakeWithModel({
     '{',
     '  "action":"log_intake|ask_label_photo|ask_clarification|reject",',
     '  "temporal":{"local_date":"YYYY-MM-DD|null","local_time":"HH:MM|null"},',
-    '  "items":[{"catalog_id":number|null,"food_name":"string","brand":"string","quantity_value":number|null,"quantity_unit":"string"}],',
+    '  "items":[{"catalog_id":number|null,"food_name":"string","brand":"string","quantity_value":number|string|null,"quantity_unit":"string","confidence":"alta|media|baja","estimated_totals":{"calories_kcal":number,"protein_g":number,"carbs_g":number,"fat_g":number}|null}],',
     '  "clarification_question":"string",',
     '  "should_request_label_photo":true|false',
     '}',
@@ -803,8 +876,16 @@ async function parseStructuredIntakeWithModel({
     '- Usa catalog_id cuando encuentres producto en el catalogo recibido.',
     '- No inventes catalog_id; si no existe, deja null y completa food_name.',
     '- Si hay temporalidad explicita, mapea local_date/local_time; si no, usa null.',
-    '- Si falta dato critico, action=ask_clarification con una sola pregunta concreta.',
-    '- Si detectas producto de paquete ambiguo para macros exactos, should_request_label_photo=true.',
+    '- Si no hay match de catálogo pero se entiende el item, estimá macros del item en estimated_totals y confidence media/baja (no bloquear).',
+    '- Solo pedir aclaracion si de verdad no se puede estimar ni identificar el item.',
+    '- Si detectas producto de paquete ambiguo para macros exactos, should_request_label_photo=true (podés estimar igual para registrar ahora).',
+    '- Entendé lenguaje natural rioplatense y verbos operativos: "registrame", "anotá", "sumá", "me comí", "desayuné", "almorcé", "cené", "tomé".',
+    '- Soportá horarios: "18:30", "18.30", "18h", "18hs", "a las 18", "hoy", "ayer".',
+    '- Soportá cantidades coloquiales: "1/2", "media", "un cuarto", "2 tostadas", "1 flat white", "cookie de cafetería".',
+    '- Separadores comunes: coma, "y", "+", "con".',
+    '- Si action=ask_clarification, la pregunta debe ser breve y accionable.',
+    '- Nunca devuelvas texto fuera del JSON.',
+    '- Ejemplo valido: {"action":"log_intake","temporal":{"local_date":null,"local_time":"18:30"},"items":[{"catalog_id":null,"food_name":"flat white con leche entera","brand":"","quantity_value":1,"quantity_unit":"unidad","confidence":"media","estimated_totals":{"calories_kcal":180,"protein_g":8,"carbs_g":12,"fat_g":10}},{"catalog_id":null,"food_name":"cookie de cafeteria mantecosa","brand":"","quantity_value":"1/2","quantity_unit":"unidad","confidence":"baja","estimated_totals":{"calories_kcal":160,"protein_g":2,"carbs_g":18,"fat_g":9}}],"clarification_question":"","should_request_label_photo":true}',
     '- Si el mensaje no es ingesta, action=reject.',
   ].join('\n');
 
@@ -849,8 +930,17 @@ async function parseStructuredIntakeWithModel({
         catalogId: Number(item?.catalog_id),
         foodName: String(item?.food_name || '').trim(),
         brand: String(item?.brand || '').trim(),
-        quantityValue: Number(item?.quantity_value),
+        quantityValue: parseFlexibleNumber(item?.quantity_value),
         quantityUnit: String(item?.quantity_unit || '').trim(),
+        confidence: String(item?.confidence || '').trim(),
+        estimatedTotals: item?.estimated_totals
+          ? {
+              caloriesKcal: Number(item?.estimated_totals?.calories_kcal),
+              proteinG: Number(item?.estimated_totals?.protein_g),
+              carbsG: Number(item?.estimated_totals?.carbs_g),
+              fatG: Number(item?.estimated_totals?.fat_g),
+            }
+          : null,
       }))
       .filter((item) => item.foodName || Number.isFinite(item.catalogId)),
   };
@@ -1560,31 +1650,35 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
               'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
               'Con eso lo agrego a INFO_NUTRICIONAL y te queda para siempre.',
+              buildPhotoHintLine(),
             ].join('\n');
           }
           if (modelStructured?.action === 'ask_clarification' && modelStructured.clarificationQuestion) {
-            return modelStructured.clarificationQuestion;
+            return [modelStructured.clarificationQuestion, buildPhotoHintLine()].join('\n');
           }
           if (modelNormalization?.action === 'ask_label_photo') {
             return [
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
               'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
               'Con eso lo agrego a INFO_NUTRICIONAL y te queda para siempre.',
+              buildPhotoHintLine(),
             ].join('\n');
           }
           if (modelNormalization?.action === 'ask_clarification' && modelNormalization.clarificationQuestion) {
-            return modelNormalization.clarificationQuestion;
+            return [modelNormalization.clarificationQuestion, buildPhotoHintLine()].join('\n');
           }
           if (parsed.error === 'partial_resolution' && parsed.unresolvedItems?.length) {
             return [
               'Necesito aclarar algunos items antes de registrar.',
               `No pude interpretar: ${parsed.unresolvedItems.join(', ')}`,
               'Mandalo en formato simple por item: `hora alimento cantidad`.',
+              buildPhotoHintLine(),
             ].join('\n');
           }
           return [
             'No pude detectar una ingesta registrable.',
             'Formato recomendado: `13:30 200g pollo + 150g arroz`.',
+            buildPhotoHintLine(),
           ].join('\n');
         }
 

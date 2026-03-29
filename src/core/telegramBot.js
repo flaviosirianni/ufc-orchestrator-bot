@@ -82,18 +82,18 @@ const GUIDED_LEDGER_MENU_ROWS = [
 
 const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
   [
-    { text: 'Registrar ingesta', callback_data: 'qa:nutrition_log_intake' },
-    { text: 'Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' },
+    { text: '🍽 Registrar ingesta', callback_data: 'qa:nutrition_log_intake' },
+    { text: '⚖️ Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' },
   ],
   [
-    { text: 'Perfil/objetivos', callback_data: 'qa:nutrition_update_profile' },
-    { text: 'Resumen', callback_data: 'qa:nutrition_view_summary' },
+    { text: '🧭 Perfil/objetivos', callback_data: 'qa:nutrition_update_profile' },
+    { text: '📊 Resumen', callback_data: 'qa:nutrition_view_summary' },
   ],
   [
-    { text: 'Aprendizaje', callback_data: 'qa:nutrition_learning' },
-    { text: 'Creditos', callback_data: 'qa:view_credits' },
+    { text: '🎓 Aprendizaje', callback_data: 'qa:nutrition_learning' },
+    { text: '💳 Creditos', callback_data: 'qa:view_credits' },
   ],
-  [{ text: 'Ayuda', callback_data: 'qa:help' }],
+  [{ text: '🆘 Ayuda', callback_data: 'qa:help' }],
 ];
 
 const BETS_MENU_ROWS = [
