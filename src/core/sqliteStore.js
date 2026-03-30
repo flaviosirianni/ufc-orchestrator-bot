@@ -76,6 +76,28 @@ function initSchema(db) {
       updated_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS event_budget_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      event_id TEXT,
+      event_name TEXT NOT NULL,
+      event_norm_key TEXT NOT NULL,
+      event_date_utc TEXT,
+      currency TEXT,
+      budget_amount REAL NOT NULL,
+      base_stake_hint REAL,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      closed_at TEXT
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_event_budget_active
+      ON event_budget_sessions (telegram_user_id, event_norm_key)
+      WHERE closed_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_event_budget_user_updated
+      ON event_budget_sessions (telegram_user_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS bets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_user_id TEXT,
@@ -850,6 +872,201 @@ export function updateUserProfile(userId, updates = {}) {
   return next;
 }
 
+export function getActiveEventBudgetSession(userId, scope = {}) {
+  if (!userId) return null;
+  const db = getDb();
+  const cleanUserId = String(userId || '').trim();
+  if (!cleanUserId) return null;
+
+  const cleanEventId = String(scope?.eventId || '').trim();
+  if (cleanEventId) {
+    const byEventId = db
+      .prepare(
+        `SELECT id, telegram_user_id, event_id, event_name, event_norm_key, event_date_utc,
+                currency, budget_amount, base_stake_hint, notes, created_at, updated_at, closed_at
+         FROM event_budget_sessions
+         WHERE telegram_user_id = ?
+           AND event_id = ?
+           AND closed_at IS NULL
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get(cleanUserId, cleanEventId);
+    if (byEventId) {
+      return mapEventBudgetSessionRow(byEventId);
+    }
+  }
+
+  const byNormKeys = Array.from(
+    new Set(
+      [
+        buildEventBudgetNormKey(scope),
+        buildEventBudgetNormKey({
+          eventNormKey: scope?.eventNormKey,
+          eventName: scope?.eventName,
+          eventDateUtc: scope?.eventDateUtc,
+        }),
+      ].filter(Boolean)
+    )
+  );
+  for (const normKey of byNormKeys) {
+    const byNorm = db
+      .prepare(
+        `SELECT id, telegram_user_id, event_id, event_name, event_norm_key, event_date_utc,
+                currency, budget_amount, base_stake_hint, notes, created_at, updated_at, closed_at
+         FROM event_budget_sessions
+         WHERE telegram_user_id = ?
+           AND event_norm_key = ?
+           AND closed_at IS NULL
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get(cleanUserId, normKey);
+    if (byNorm) {
+      return mapEventBudgetSessionRow(byNorm);
+    }
+  }
+
+  if (scope?.allowAnyActive === true) {
+    const latest = db
+      .prepare(
+        `SELECT id, telegram_user_id, event_id, event_name, event_norm_key, event_date_utc,
+                currency, budget_amount, base_stake_hint, notes, created_at, updated_at, closed_at
+         FROM event_budget_sessions
+         WHERE telegram_user_id = ?
+           AND closed_at IS NULL
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1`
+      )
+      .get(cleanUserId);
+    return mapEventBudgetSessionRow(latest);
+  }
+
+  return null;
+}
+
+export function upsertEventBudgetSession(userId, payload = {}) {
+  if (!userId || !payload || typeof payload !== 'object') return null;
+  const db = getDb();
+  const cleanUserId = String(userId || '').trim();
+  if (!cleanUserId) return null;
+
+  const budgetAmount = Number(payload.budgetAmount);
+  if (!Number.isFinite(budgetAmount) || budgetAmount <= 0) {
+    return null;
+  }
+
+  const cleanEventId = String(payload.eventId || '').trim() || null;
+  const cleanEventDateUtc = toIsoDateOrNull(payload.eventDateUtc || '');
+  const cleanEventNormKey = buildEventBudgetNormKey({
+    eventId: cleanEventId,
+    eventNormKey: payload.eventNormKey,
+    eventName: payload.eventName,
+    eventDateUtc: cleanEventDateUtc,
+  });
+  if (!cleanEventNormKey) {
+    return null;
+  }
+
+  const providedEventName = String(payload.eventName || '').trim();
+  const currencyRaw = String(payload.currency || '').trim().toUpperCase();
+  const parsedBaseStakeHint = Number(payload.baseStakeHint);
+  const hasBaseStakeHint = Object.prototype.hasOwnProperty.call(payload, 'baseStakeHint');
+  const hasNotes = Object.prototype.hasOwnProperty.call(payload, 'notes');
+  const notesValue = hasNotes ? String(payload.notes || '').trim() || null : undefined;
+  const ts = nowIso();
+
+  const write = db.transaction(() => {
+    const existing = db
+      .prepare(
+        `SELECT id, event_id, event_name, event_date_utc, currency, budget_amount, base_stake_hint, notes
+         FROM event_budget_sessions
+         WHERE telegram_user_id = ?
+           AND event_norm_key = ?
+           AND closed_at IS NULL
+         ORDER BY id DESC
+         LIMIT 1`
+      )
+      .get(cleanUserId, cleanEventNormKey);
+
+    if (existing?.id) {
+      const nextEventId = cleanEventId || existing.event_id || null;
+      const nextEventName =
+        providedEventName || existing.event_name || cleanEventId || 'Evento UFC';
+      const nextEventDateUtc = cleanEventDateUtc || existing.event_date_utc || null;
+      const nextCurrency = currencyRaw || existing.currency || null;
+      const nextBaseStakeHint = hasBaseStakeHint
+        ? Number.isFinite(parsedBaseStakeHint) && parsedBaseStakeHint > 0
+          ? parsedBaseStakeHint
+          : null
+        : existing.base_stake_hint ?? null;
+      const nextNotes = hasNotes ? notesValue : existing.notes ?? null;
+
+      db.prepare(
+        `UPDATE event_budget_sessions
+         SET event_id = ?,
+             event_name = ?,
+             event_date_utc = ?,
+             currency = ?,
+             budget_amount = ?,
+             base_stake_hint = ?,
+             notes = ?,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(
+        nextEventId,
+        nextEventName,
+        nextEventDateUtc,
+        nextCurrency,
+        budgetAmount,
+        nextBaseStakeHint,
+        nextNotes,
+        ts,
+        Number(existing.id)
+      );
+
+      return Number(existing.id);
+    }
+
+    const eventName = providedEventName || cleanEventId || 'Evento UFC';
+    const currency = currencyRaw || null;
+    const baseStakeHint =
+      Number.isFinite(parsedBaseStakeHint) && parsedBaseStakeHint > 0 ? parsedBaseStakeHint : null;
+    const notes = hasNotes ? notesValue : null;
+
+    const inserted = db.prepare(
+      `INSERT INTO event_budget_sessions
+        (telegram_user_id, event_id, event_name, event_norm_key, event_date_utc, currency,
+         budget_amount, base_stake_hint, notes, created_at, updated_at, closed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    ).run(
+      cleanUserId,
+      cleanEventId,
+      eventName,
+      cleanEventNormKey,
+      cleanEventDateUtc,
+      currency,
+      budgetAmount,
+      baseStakeHint,
+      notes,
+      ts,
+      ts
+    );
+    return Number(inserted.lastInsertRowid);
+  });
+
+  const rowId = write();
+  const row = db
+    .prepare(
+      `SELECT id, telegram_user_id, event_id, event_name, event_norm_key, event_date_utc,
+              currency, budget_amount, base_stake_hint, notes, created_at, updated_at, closed_at
+       FROM event_budget_sessions
+       WHERE id = ?`
+    )
+    .get(rowId);
+  return mapEventBudgetSessionRow(row);
+}
+
 function normalizeResult(result = '') {
   const value = String(result || '').toLowerCase();
   if (!value.trim()) return 'pending';
@@ -894,6 +1111,73 @@ function normalizeLooseText(value = '') {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function toIsoDateOrNull(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
+function normalizeEventBudgetNormKey(value = '') {
+  return normalizeLooseText(value)
+    .replace(/[^a-z0-9:_\-\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildEventBudgetNormKey({
+  eventId = null,
+  eventNormKey = null,
+  eventName = null,
+  eventDateUtc = null,
+} = {}) {
+  const providedNormKey = normalizeEventBudgetNormKey(eventNormKey || '');
+  if (providedNormKey) {
+    return providedNormKey;
+  }
+
+  const cleanEventName = normalizeEventBudgetNormKey(eventName || '');
+  const cleanEventDate = toIsoDateOrNull(eventDateUtc || '');
+  if (cleanEventName && cleanEventDate) {
+    return `${cleanEventName}::${cleanEventDate}`;
+  }
+  if (cleanEventName) {
+    return `name:${cleanEventName}`;
+  }
+  const cleanEventId = normalizeEventBudgetNormKey(eventId || '');
+  if (cleanEventId) {
+    return `id:${cleanEventId}`;
+  }
+  return '';
+}
+
+function mapEventBudgetSessionRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    telegramUserId: String(row.telegram_user_id || ''),
+    eventId: row.event_id || null,
+    eventName: row.event_name || null,
+    eventNormKey: row.event_norm_key || null,
+    eventDateUtc: row.event_date_utc || null,
+    currency: row.currency || null,
+    budgetAmount:
+      row.budget_amount === null || row.budget_amount === undefined
+        ? null
+        : Number(row.budget_amount),
+    baseStakeHint:
+      row.base_stake_hint === null || row.base_stake_hint === undefined
+        ? null
+        : Number(row.base_stake_hint),
+    notes: row.notes || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    closedAt: row.closed_at || null,
+  };
 }
 
 function isSettledResult(result = '') {

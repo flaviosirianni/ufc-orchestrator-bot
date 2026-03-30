@@ -1,0 +1,19 @@
+field,value
+edad,34 (35 el 28/10/2026)
+sexo,masculino
+altura_cm,175
+peso_inicial_kg,"84,15"
+estilo_alimentacion,omnivoro
+alergias_intolerancias,ninguna
+objetivo_principal,bajar grasa abdominal sin perder masa muscular
+nivel_actividad,media
+entrenamiento,Boxeo 2x/semana (2hs) + caminatas diarias 30-40min
+ayuno_intermitente,si (ventana aprox 13-22hs)
+suplementos,ninguno
+alimentos_base,"huevos, granola, frutos secos, leche, manteca de mani, legumbres, carne vacuna, pollo, frutas y verduras"
+dificultades_principales,"dulces, helado, chocolates, panificados, salidas"
+tdee_estimado_kcal,2600-2700
+objetivo_calorico_kcal,2300-2400
+objetivo_proteina_g,150-165
+fecha_inicio,2026-01-30
+notas,Perfil inicial creado junto al usuario

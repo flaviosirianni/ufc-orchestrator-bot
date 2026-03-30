@@ -18,6 +18,12 @@ const MAX_AUDIO_TRANSCRIPT_CHARS = Number(
 const MEDIA_GROUP_FLUSH_MS = Number(process.env.MEDIA_GROUP_FLUSH_MS ?? '900');
 const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
 const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?? '4500');
+const CALLBACK_DEDUP_WINDOW_MS = Number(
+  process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ?? '2500'
+);
+const CALLBACK_DEDUP_MAX_KEYS_PER_CHAT = Number(
+  process.env.TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT ?? '80'
+);
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
@@ -452,6 +458,14 @@ function normalizeText(value = '') {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function toPositiveInt(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return Number(fallback) || 0;
+  }
+  return Math.round(parsed);
 }
 
 function parseAllowedUserIds(raw = '') {
@@ -1073,6 +1087,19 @@ export function startTelegramBot(router, options = {}) {
     typeof options.guidedQuotesTextFallback === 'boolean'
       ? options.guidedQuotesTextFallback
       : GUIDED_QUOTES_TEXT_FALLBACK;
+  const callbackDedupWindowMs = toPositiveInt(
+    options.callbackDedupWindowMs ??
+      process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ??
+      CALLBACK_DEDUP_WINDOW_MS,
+    CALLBACK_DEDUP_WINDOW_MS
+  );
+  const callbackDedupMaxKeysPerChat = toPositiveInt(
+    options.callbackDedupMaxKeysPerChat ??
+      process.env.TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT ??
+      CALLBACK_DEDUP_MAX_KEYS_PER_CHAT,
+    CALLBACK_DEDUP_MAX_KEYS_PER_CHAT
+  );
+  const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : Date.now;
   const allowedUserIds =
     options.allowedTelegramUserIds instanceof Set
       ? options.allowedTelegramUserIds
@@ -1092,6 +1119,7 @@ export function startTelegramBot(router, options = {}) {
   const inFlightByChat = new Set();
   const menuScopeByChat = new Map();
   const guidedActionByChat = new Map();
+  const recentCallbacksByChat = new Map();
 
   function getMenuScope(chatId) {
     const key = String(chatId || '').trim();
@@ -1136,6 +1164,58 @@ export function startTelegramBot(router, options = {}) {
     }
     guidedActionByChat.set(key, normalized);
     return normalized;
+  }
+
+  function buildCallbackDedupKey({ data = '', messageId = '', userId = '' } = {}) {
+    return `${String(userId || '').trim()}|${String(messageId || '').trim()}|${String(data || '').trim()}`;
+  }
+
+  function shouldSkipDuplicateCallback({
+    chatId = '',
+    data = '',
+    messageId = '',
+    userId = '',
+  } = {}) {
+    if (!callbackDedupWindowMs) {
+      return false;
+    }
+    const key = buildCallbackDedupKey({ data, messageId, userId });
+    if (!key) return false;
+
+    const chatKey = String(chatId || '').trim();
+    if (!chatKey) return false;
+
+    const nowMs = Number(nowProvider()) || Date.now();
+    let seen = recentCallbacksByChat.get(chatKey);
+    if (!seen) {
+      seen = new Map();
+      recentCallbacksByChat.set(chatKey, seen);
+    }
+
+    for (const [existingKey, seenAt] of seen.entries()) {
+      if (nowMs - seenAt > callbackDedupWindowMs) {
+        seen.delete(existingKey);
+      }
+    }
+
+    const lastSeenAt = seen.get(key);
+    if (Number.isFinite(lastSeenAt) && nowMs - lastSeenAt <= callbackDedupWindowMs) {
+      seen.set(key, nowMs);
+      return true;
+    }
+
+    seen.set(key, nowMs);
+    if (seen.size > callbackDedupMaxKeysPerChat) {
+      const overflow = seen.size - callbackDedupMaxKeysPerChat;
+      let dropped = 0;
+      for (const existingKey of seen.keys()) {
+        seen.delete(existingKey);
+        dropped += 1;
+        if (dropped >= overflow) break;
+      }
+    }
+
+    return false;
   }
 
   function buildQuickActionsMarkup(scope = 'main') {
@@ -1618,6 +1698,22 @@ export function startTelegramBot(router, options = {}) {
     const safeUserId = query?.from?.id ? String(query.from.id) : '';
     if (!isUserAllowed(safeUserId)) {
       await sendAccessDenied(chatId);
+      return;
+    }
+
+    if (
+      shouldSkipDuplicateCallback({
+        chatId,
+        data,
+        messageId: query?.message?.message_id,
+        userId: safeUserId,
+      })
+    ) {
+      try {
+        await bot.answerCallbackQuery(query.id);
+      } catch (error) {
+        console.error('⚠️ Error respondiendo callback duplicado:', error);
+      }
       return;
     }
 

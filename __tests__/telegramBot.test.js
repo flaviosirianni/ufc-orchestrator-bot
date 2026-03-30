@@ -520,6 +520,82 @@ export async function runTelegramBotTests() {
     assert.match(out.text, /qa privado/i);
   });
 
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      callbackDedupWindowMs: 5000,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        callbackId: 'cb_dedupe_1',
+        data: 'qa:list_pending',
+      })
+    );
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        callbackId: 'cb_dedupe_2',
+        data: 'qa:list_pending',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(fakeBot.answeredCallbacks.length, 2);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+    let nowMs = 1000;
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      callbackDedupWindowMs: 1000,
+      nowProvider: () => nowMs,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        callbackId: 'cb_dedupe_ttl_1',
+        data: 'qa:list_pending',
+      })
+    );
+
+    nowMs = 1500;
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        callbackId: 'cb_dedupe_ttl_2',
+        data: 'qa:list_pending',
+      })
+    );
+
+    nowMs = 2601;
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        callbackId: 'cb_dedupe_ttl_3',
+        data: 'qa:list_pending',
+      })
+    );
+
+    assert.equal(router.calls.length, 2);
+    assert.equal(fakeBot.answeredCallbacks.length, 3);
+  });
+
   for (const test of tests) {
     await test();
   }

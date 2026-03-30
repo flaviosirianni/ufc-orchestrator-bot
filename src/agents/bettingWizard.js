@@ -55,6 +55,8 @@ const STAKE_MAX_PICK_EXPOSURE_MODERADO = Number(
 const STAKE_MAX_PICK_EXPOSURE_AGRESIVO = Number(
   process.env.STAKE_MAX_PICK_EXPOSURE_AGRESIVO ?? '30'
 );
+const STAKE_EVENT_FIGHTS_DEFAULT = Number(process.env.STAKE_EVENT_FIGHTS_DEFAULT ?? '6');
+const STAKE_EVENT_DYNAMIC_FLOOR_PCT = Number(process.env.STAKE_EVENT_DYNAMIC_FLOOR_PCT ?? '75');
 const PICK_COMMITTEE_ENABLED = process.env.BETTING_PICK_COMMITTEE === 'true';
 const PICK_COMMITTEE_MODEL =
   process.env.BETTING_PICK_COMMITTEE_MODEL || DECISION_MODEL || MODEL;
@@ -2966,8 +2968,12 @@ function pruneExposureClaims(text = '') {
     /\bplan de exposicion\b/i,
     /\bmismo evento donde tenias\b/i,
     /\bpresupuesto objetivo\b/i,
+    /\bpresupuesto activo\b/i,
     /\bcomprometido en esta recomendacion\b/i,
+    /\bcomprometido \(open \+ recomendacion\)\b/i,
     /\bremanente estimado\b/i,
+    /\bremanente del evento\b/i,
+    /\bstake objetivo por pick\b/i,
     /\bexposicion maxima\b/i,
   ];
 
@@ -3119,6 +3125,231 @@ function parseStakePreferenceMessage(message = '') {
   return {
     minStakeAmount,
     minUnitsPerBet,
+  };
+}
+
+function normalizeEventKeyPart(value = '') {
+  return normalizeText(value)
+    .replace(/[^a-z0-9:_\-\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLikelySameEventName(left = '', right = '') {
+  const a = normalizeEventKeyPart(left);
+  const b = normalizeEventKeyPart(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function extractEventNameHintFromMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+
+  const ufcNumber = raw.match(/\bufc\s*(\d{2,4})\b/i);
+  if (ufcNumber) {
+    return `UFC ${ufcNumber[1]}`;
+  }
+
+  const fightNight = raw.match(/\bufc\s*(fight\s*night(?:\s*[:\-]\s*|\s+)[^\n,.;]{2,80})/i);
+  if (fightNight) {
+    const normalized = String(fightNight[1] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return `UFC ${normalized}`;
+  }
+
+  return null;
+}
+
+function buildEventBudgetNormKey({
+  eventId = null,
+  eventName = null,
+  eventDateUtc = null,
+} = {}) {
+  const cleanEventName = normalizeEventKeyPart(eventName || '');
+  const cleanEventDate = toIsoDateSafe(eventDateUtc || '');
+  if (cleanEventName && cleanEventDate) {
+    return `${cleanEventName}::${cleanEventDate}`;
+  }
+  if (cleanEventName) {
+    return `name:${cleanEventName}`;
+  }
+  const cleanEventId = normalizeEventKeyPart(eventId || '');
+  if (cleanEventId) {
+    return `id:${cleanEventId}`;
+  }
+  return '';
+}
+
+function resolveDecisionEventContext({
+  oddsSnapshot = null,
+  session = null,
+  originalMessage = '',
+} = {}) {
+  const snapshotEvent = oddsSnapshot?.event || null;
+  const sessionEvent = session?.lastEvent || null;
+
+  const eventId = String(snapshotEvent?.event_id || '').trim() || null;
+  const snapshotEventName = String(snapshotEvent?.name || '').trim();
+  const sessionEventName = String(sessionEvent?.eventName || '').trim();
+  const messageEventName = extractEventNameHintFromMessage(originalMessage);
+  let eventName = null;
+  let source = null;
+  if (snapshotEventName) {
+    eventName = snapshotEventName;
+    source = 'odds_snapshot';
+  } else if (sessionEventName) {
+    eventName = sessionEventName;
+    source = 'session_last_event';
+  } else if (messageEventName) {
+    eventName = messageEventName;
+    source = 'message_hint';
+  }
+  if (!source && eventId) {
+    source = 'odds_snapshot';
+  }
+  const eventDateUtc =
+    toIsoDateSafe(snapshotEvent?.date_utc || '') ||
+    toIsoDateSafe(sessionEvent?.date || '') ||
+    null;
+  const eventNormKey = buildEventBudgetNormKey({
+    eventId,
+    eventName,
+    eventDateUtc,
+  });
+  if (!eventNormKey) {
+    return null;
+  }
+
+  return {
+    eventId,
+    eventName,
+    eventDateUtc,
+    eventNormKey,
+    eventNameNorm: normalizeEventKeyPart(eventName || ''),
+    source: source || null,
+  };
+}
+
+function parseEventBudgetPreferenceMessage(message = '') {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+  const text = normalizeText(raw);
+
+  const hasBudgetKeyword = /\b(presupuesto|budget)\b/.test(text);
+  const hasBudgetUpdateVerb = /\b(actualiza|ajusta|cambia|defin[ei]|setea|set)\b/.test(text);
+  const referencesEventScope = /\b(evento|cartelera|card|esta cartelera|este evento)\b/.test(text);
+  const hasAmountToken = /\$?\s*[0-9][0-9\.,]*/.test(raw);
+  const touchedAny =
+    hasBudgetKeyword ||
+    (hasBudgetUpdateVerb && referencesEventScope && hasAmountToken) ||
+    (referencesEventScope && /\b(invertir|inverti|jugar|jugo|poner|pongo|destinar)\b/.test(text) && hasAmountToken);
+
+  if (!touchedAny) return null;
+
+  const amountMatch =
+    raw.match(
+      /\b(?:presupuesto|budget|invertir|inverti|jugar|jugo|poner|pongo|destinar)\b[^0-9$]{0,24}\$?\s*([0-9][0-9\.,]*)/i
+    ) ||
+    raw.match(/\$\s*([0-9][0-9\.,]*)/) ||
+    raw.match(/\b([0-9][0-9\.,]*)\s*(?:ars|usd)\b/i);
+  const budgetAmount = amountMatch ? parseDecimalLike(amountMatch[1]) : null;
+
+  const currencyMatch =
+    raw.match(/\b(ars|usd)\b/i) || raw.match(/\$\s*([0-9][0-9\.,]*)\s*(ars|usd)\b/i);
+  const currency = currencyMatch ? String(currencyMatch[currencyMatch.length - 1] || '').toUpperCase() : null;
+
+  const baseStakeMatch = raw.match(
+    /\b(?:base(?:\s+stake)?|stake\s+base|base\s+por\s+pick)\b[^0-9$]{0,20}\$?\s*([0-9][0-9\.,]*)/i
+  );
+  const baseStakeHint = baseStakeMatch ? parseDecimalLike(baseStakeMatch[1]) : null;
+
+  return {
+    touchedAny,
+    budgetAmount:
+      Number.isFinite(Number(budgetAmount)) && Number(budgetAmount) > 0 ? Number(budgetAmount) : null,
+    currency: currency || null,
+    baseStakeHint:
+      Number.isFinite(Number(baseStakeHint)) && Number(baseStakeHint) > 0
+        ? Number(baseStakeHint)
+        : null,
+  };
+}
+
+function doesBetMatchEventContext(bet = {}, eventContext = null) {
+  if (!eventContext) return false;
+  const betEventName = String(bet?.eventName || '').trim();
+  const betEventNorm = normalizeEventKeyPart(betEventName);
+  if (!betEventNorm) return false;
+  if (eventContext.eventNameNorm) {
+    if (
+      betEventNorm === eventContext.eventNameNorm ||
+      betEventNorm.includes(eventContext.eventNameNorm) ||
+      eventContext.eventNameNorm.includes(betEventNorm)
+    ) {
+      return true;
+    }
+  }
+  if (eventContext.eventName) {
+    return isLikelySameEventName(betEventName, eventContext.eventName);
+  }
+  return false;
+}
+
+function computeCommittedExposureForEvent(pendingBets = [], eventContext = null) {
+  const rows = Array.isArray(pendingBets) ? pendingBets : [];
+  if (!eventContext) {
+    return { committedAmount: 0, pendingCount: 0 };
+  }
+  let committedAmount = 0;
+  let pendingCount = 0;
+  for (const bet of rows) {
+    if (!doesBetMatchEventContext(bet, eventContext)) continue;
+    pendingCount += 1;
+    committedAmount += Number(bet?.stake) || 0;
+  }
+  return {
+    committedAmount: Math.max(0, committedAmount),
+    pendingCount,
+  };
+}
+
+function estimateEventFightsRemaining({
+  eventContext = null,
+  pendingBets = [],
+  session = null,
+  eventCard = null,
+} = {}) {
+  const defaultFights = Math.max(1, Number(STAKE_EVENT_FIGHTS_DEFAULT) || 6);
+  const eventName = String(eventContext?.eventName || '').trim();
+  let totalFightsEstimate = 0;
+
+  if (eventCard?.fights?.length) {
+    const eventCardName = String(eventCard?.eventName || '').trim();
+    if (!eventName || !eventCardName || isLikelySameEventName(eventName, eventCardName)) {
+      totalFightsEstimate = eventCard.fights.length;
+    }
+  }
+
+  if (!totalFightsEstimate && session?.lastCardFights?.length) {
+    const sessionEventName = String(session?.lastEvent?.eventName || '').trim();
+    if (!eventName || !sessionEventName || isLikelySameEventName(eventName, sessionEventName)) {
+      totalFightsEstimate = session.lastCardFights.length;
+    }
+  }
+
+  if (!totalFightsEstimate) {
+    totalFightsEstimate = defaultFights;
+  }
+
+  const committed = computeCommittedExposureForEvent(pendingBets, eventContext);
+  const fightsRemainingEstimate = Math.max(1, totalFightsEstimate - committed.pendingCount);
+
+  return {
+    totalFightsEstimate,
+    pendingCount: committed.pendingCount,
+    fightsRemainingEstimate,
   };
 }
 
@@ -3411,7 +3642,7 @@ function getMaxPerPickExposurePct(riskProfile = 'moderado') {
   return STAKE_MAX_PICK_EXPOSURE_MODERADO;
 }
 
-function getStakeCalibrationConfig(userProfile = {}) {
+function getStakeCalibrationConfig(userProfile = {}, options = {}) {
   const minStakeAmount = toNumberOrNull(userProfile?.minStakeAmount) ?? STAKE_MIN_AMOUNT_DEFAULT;
   const minUnitsPerBet = toNumberOrNull(userProfile?.minUnitsPerBet) ?? STAKE_MIN_UNITS_DEFAULT;
   const unitSize = toNumberOrNull(userProfile?.unitSize);
@@ -3425,12 +3656,22 @@ function getStakeCalibrationConfig(userProfile = {}) {
     configuredUtil && configuredUtil > 0 && configuredUtil <= 100
       ? configuredUtil
       : defaultUtil;
-
-  const maxPerPickExposurePct = getMaxPerPickExposurePct(riskProfile);
-  const eventBudget =
+  const eventBudgetFromProfile =
     Number.isFinite(bankroll) && bankroll > 0 && targetEventUtilizationPct > 0
       ? (bankroll * targetEventUtilizationPct) / 100
       : null;
+  const eventBudgetSessionAmount = toNumberOrNull(options?.eventBudgetSession?.budgetAmount);
+  const eventBudget =
+    Number.isFinite(eventBudgetSessionAmount) && eventBudgetSessionAmount > 0
+      ? eventBudgetSessionAmount
+      : eventBudgetFromProfile;
+  const eventBudgetSource =
+    Number.isFinite(eventBudgetSessionAmount) && eventBudgetSessionAmount > 0
+      ? 'event_session'
+      : 'profile_utilization';
+  const eventCommittedAmount = Math.max(0, toNumberOrNull(options?.eventCommittedAmount) || 0);
+
+  const maxPerPickExposurePct = getMaxPerPickExposurePct(riskProfile);
   const maxPerPickAmount =
     Number.isFinite(eventBudget) && eventBudget > 0 && maxPerPickExposurePct > 0
       ? (eventBudget * maxPerPickExposurePct) / 100
@@ -3447,6 +3688,42 @@ function getStakeCalibrationConfig(userProfile = {}) {
     floorUnits = Math.max(minUnitsPerBet, minStakeAmount / unitSize);
   }
 
+  const fightsRemainingEstimate = Math.max(
+    1,
+    Number.isFinite(toNumberOrNull(options?.fightsRemainingEstimate))
+      ? Number(toNumberOrNull(options?.fightsRemainingEstimate))
+      : STAKE_EVENT_FIGHTS_DEFAULT
+  );
+  const remainingBudgetBeforeRecommendation =
+    Number.isFinite(eventBudget) && eventBudget > 0
+      ? Math.max(0, eventBudget - eventCommittedAmount)
+      : null;
+  const dynamicStakeTargetAmount =
+    Number.isFinite(remainingBudgetBeforeRecommendation) &&
+    remainingBudgetBeforeRecommendation > 0 &&
+    Number.isFinite(fightsRemainingEstimate) &&
+    fightsRemainingEstimate > 0
+      ? remainingBudgetBeforeRecommendation / fightsRemainingEstimate
+      : null;
+  const dynamicFloorPct = clampNumber(STAKE_EVENT_DYNAMIC_FLOOR_PCT, 40, 100);
+  let dynamicFloorAmount =
+    Number.isFinite(dynamicStakeTargetAmount) && dynamicStakeTargetAmount > 0
+      ? (dynamicStakeTargetAmount * dynamicFloorPct) / 100
+      : null;
+  if (
+    Number.isFinite(dynamicFloorAmount) &&
+    Number.isFinite(maxPerPickAmount) &&
+    maxPerPickAmount > 0
+  ) {
+    dynamicFloorAmount = Math.min(dynamicFloorAmount, maxPerPickAmount);
+  }
+  if (Number.isFinite(dynamicFloorAmount) && dynamicFloorAmount > floorAmount) {
+    floorAmount = dynamicFloorAmount;
+    if (unitSize && unitSize > 0) {
+      floorUnits = Math.max(floorUnits, floorAmount / unitSize);
+    }
+  }
+
   return {
     unitSize,
     bankroll,
@@ -3459,6 +3736,13 @@ function getStakeCalibrationConfig(userProfile = {}) {
     targetEventUtilizationPct,
     maxPerPickExposurePct,
     eventBudget,
+    eventBudgetSource,
+    eventBudgetSessionId: options?.eventBudgetSession?.id ?? null,
+    eventBudgetSessionName: options?.eventBudgetSession?.eventName ?? null,
+    eventCommittedAmount,
+    remainingBudgetBeforeRecommendation,
+    fightsRemainingEstimate,
+    dynamicStakeTargetAmount,
     maxPerPickAmount,
     maxPerPickUnits,
   };
@@ -3506,30 +3790,61 @@ function extractStakeAmountsFromLines(lines = [], { unitSize = null } = {}) {
 }
 
 function buildStakingBudgetSummaryLines(config = {}, totalStakeAmount = 0) {
-  if (!Number.isFinite(totalStakeAmount) || totalStakeAmount <= 0) {
-    return [];
-  }
   if (!Number.isFinite(config.eventBudget) || config.eventBudget <= 0) {
     return [];
   }
 
-  const remaining = config.eventBudget - totalStakeAmount;
+  const recommendationStakeAmount =
+    Number.isFinite(totalStakeAmount) && totalStakeAmount > 0 ? totalStakeAmount : 0;
+  const committedBefore = Math.max(0, Number(config.eventCommittedAmount) || 0);
+  if (recommendationStakeAmount <= 0 && committedBefore <= 0) {
+    return [];
+  }
+
+  const committedAfter = committedBefore + recommendationStakeAmount;
+  const remaining = config.eventBudget - committedAfter;
   const budgetLabel = formatAmountWithCurrency(config.eventBudget, config.currency);
-  const committedLabel = formatAmountWithCurrency(totalStakeAmount, config.currency);
+  const committedLabel = formatAmountWithCurrency(committedAfter, config.currency);
+  const committedOpenLabel = formatAmountWithCurrency(committedBefore, config.currency);
+  const recommendationLabel = formatAmountWithCurrency(recommendationStakeAmount, config.currency);
   const remainingLabel = formatAmountWithCurrency(Math.abs(remaining), config.currency);
 
-  const lines = [
-    `Plan de evento: presupuesto objetivo ${budgetLabel} (${formatUnits(
-      config.targetEventUtilizationPct
-    )}% del bankroll).`,
-  ];
-  if (remaining >= 0) {
+  const lines = [];
+  if (config.eventBudgetSource === 'event_session') {
     lines.push(
-      `Comprometido en esta recomendacion: ${committedLabel} | Remanente estimado: ${remainingLabel}.`
+      `Plan de evento: presupuesto activo ${budgetLabel}${
+        config.eventBudgetSessionName ? ` (${config.eventBudgetSessionName})` : ''
+      }.`
     );
   } else {
     lines.push(
-      `Comprometido en esta recomendacion: ${committedLabel} | Exceso sobre objetivo: ${remainingLabel}.`
+      `Plan de evento: presupuesto objetivo ${budgetLabel} (${formatUnits(
+        config.targetEventUtilizationPct
+      )}% del bankroll).`
+    );
+  }
+  if (remaining >= 0) {
+    lines.push(
+      `Comprometido (open + recomendacion): ${committedLabel} = ${committedOpenLabel} + ${recommendationLabel}.`,
+      `Remanente estimado del evento: ${remainingLabel}.`
+    );
+  } else {
+    lines.push(
+      `Comprometido (open + recomendacion): ${committedLabel} = ${committedOpenLabel} + ${recommendationLabel}.`,
+      `Exceso sobre objetivo del evento: ${remainingLabel}.`
+    );
+  }
+  if (
+    Number.isFinite(config.fightsRemainingEstimate) &&
+    config.fightsRemainingEstimate > 0 &&
+    Number.isFinite(config.dynamicStakeTargetAmount) &&
+    config.dynamicStakeTargetAmount > 0
+  ) {
+    lines.push(
+      `Peleas restantes estimadas: ${Math.round(config.fightsRemainingEstimate)} | Stake objetivo por pick: ${formatAmountWithCurrency(
+        config.dynamicStakeTargetAmount,
+        config.currency
+      )}.`
     );
   }
   return lines;
@@ -3696,7 +4011,13 @@ function calibrateStakeLine(line = '', config = {}) {
   };
 }
 
-function enforceStakeCalibration(reply = '', originalMessage = '', userProfile = {}, turnContext = null) {
+function enforceStakeCalibration(
+  reply = '',
+  originalMessage = '',
+  userProfile = {},
+  turnContext = null,
+  options = {}
+) {
   const text = String(reply || '').trim();
   if (!text) return text;
 
@@ -3709,7 +4030,7 @@ function enforceStakeCalibration(reply = '', originalMessage = '', userProfile =
     return text;
   }
 
-  const config = getStakeCalibrationConfig(userProfile || {});
+  const config = getStakeCalibrationConfig(userProfile || {}, options);
   const lines = text.split('\n');
   let changed = false;
   let adjustedByFloor = false;
@@ -5604,6 +5925,9 @@ export function createBettingWizard({
       resolvedFight: resolution?.resolvedFight || null,
       eventCard: null,
     };
+    const sessionSnapshot = conversationStore?.getSession
+      ? conversationStore.getSession(chatId)
+      : null;
 
     const wantsLedger = hasLedgerSignals(originalMessage) || isGuidedLedgerTurn;
     const wantsCredits = hasCreditSignals(originalMessage);
@@ -5617,6 +5941,9 @@ export function createBettingWizard({
     let oddsSnapshot = null;
     let ledgerSummary = null;
     let userProfile = null;
+    let decisionEventContext = null;
+    let activeEventBudgetSession = null;
+    let eventBudgetRuntimeState = null;
 
     if (userId && userStore) {
       if (userStore.getUserProfile) {
@@ -5661,6 +5988,52 @@ export function createBettingWizard({
       timezone: userProfile?.timezone || DEFAULT_USER_TIMEZONE,
       originalMessage,
     });
+    decisionEventContext = resolveDecisionEventContext({
+      oddsSnapshot,
+      session: sessionSnapshot,
+      originalMessage,
+    });
+
+    if (userId && decisionEventContext && typeof userStore?.getActiveEventBudgetSession === 'function') {
+      activeEventBudgetSession =
+        userStore.getActiveEventBudgetSession(userId, {
+          eventId: decisionEventContext.eventId,
+          eventNormKey: decisionEventContext.eventNormKey,
+          eventName: decisionEventContext.eventName,
+          eventDateUtc: decisionEventContext.eventDateUtc,
+        }) || null;
+    }
+
+    const refreshEventBudgetRuntimeState = () => {
+      if (!decisionEventContext || !activeEventBudgetSession) {
+        eventBudgetRuntimeState = null;
+        return eventBudgetRuntimeState;
+      }
+      const pendingBets =
+        userId && typeof userStore?.listUserBets === 'function'
+          ? userStore.listUserBets(userId, {
+              status: 'pending',
+              includeArchived: false,
+              limit: 200,
+            })
+          : [];
+      const exposure = computeCommittedExposureForEvent(pendingBets, decisionEventContext);
+      const remaining = estimateEventFightsRemaining({
+        eventContext: decisionEventContext,
+        pendingBets,
+        session: sessionSnapshot,
+        eventCard: runtimeState.eventCard,
+      });
+      eventBudgetRuntimeState = {
+        committedAmount: exposure.committedAmount,
+        pendingCount: exposure.pendingCount,
+        fightsRemainingEstimate: remaining.fightsRemainingEstimate,
+        totalFightsEstimate: remaining.totalFightsEstimate,
+      };
+      return eventBudgetRuntimeState;
+    };
+
+    refreshEventBudgetRuntimeState();
 
     if (interactionMode === 'guided_strict' && guidedAction === 'ledger_list_pending') {
       if (!userId) {
@@ -6627,6 +7000,134 @@ export function createBettingWizard({
 
     const stakePreference = parseStakePreferenceMessage(originalMessage);
     const profilePreference = parseProfilePreferenceMessage(originalMessage);
+    const eventBudgetPreference = parseEventBudgetPreferenceMessage(originalMessage);
+
+    if (eventBudgetPreference?.touchedAny) {
+      if (!userId || typeof userStore?.upsertEventBudgetSession !== 'function') {
+        return {
+          reply:
+            'No puedo guardar presupuesto de evento en este entorno. Reintenta cuando el modulo de storage este disponible.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+      if (!decisionEventContext) {
+        return {
+          reply: [
+            'Necesito saber de que evento hablamos para guardar el presupuesto.',
+            'Mandame algo como: `presupuesto evento UFC 314 $10000`.',
+          ].join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+      if (!eventBudgetPreference.budgetAmount) {
+        return {
+          reply: [
+            'Detecte que queres ajustar presupuesto de evento, pero me falta el monto.',
+            'Ejemplos: `presupuesto evento $10000` o `actualiza presupuesto del evento a $20000`.',
+          ].join('\n'),
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      const savedBudgetSession = userStore.upsertEventBudgetSession(userId, {
+        eventId: decisionEventContext.eventId,
+        eventName: decisionEventContext.eventName,
+        eventNormKey: decisionEventContext.eventNormKey,
+        eventDateUtc: decisionEventContext.eventDateUtc,
+        budgetAmount: eventBudgetPreference.budgetAmount,
+        currency: eventBudgetPreference.currency || userProfile?.currency || 'ARS',
+        baseStakeHint: eventBudgetPreference.baseStakeHint,
+        notes: 'set_from_chat',
+      });
+
+      if (!savedBudgetSession?.id) {
+        return {
+          reply:
+            'No pude guardar el presupuesto de evento en este turno. Reintenta en una sola linea con monto y evento.',
+          metadata: {
+            resolvedFight: runtimeState.resolvedFight,
+            eventCard: runtimeState.eventCard,
+          },
+        };
+      }
+
+      activeEventBudgetSession = savedBudgetSession;
+      refreshEventBudgetRuntimeState();
+
+      const currency = savedBudgetSession.currency || userProfile?.currency || 'ARS';
+      const committedAmount = Number(eventBudgetRuntimeState?.committedAmount) || 0;
+      const remainingAmount = Number(savedBudgetSession.budgetAmount || 0) - committedAmount;
+      const lines = [
+        '✅ Presupuesto de evento guardado.',
+        `- Evento: ${savedBudgetSession.eventName || decisionEventContext.eventName || 'N/D'}`,
+        `- Presupuesto: ${formatAmountWithCurrency(savedBudgetSession.budgetAmount, currency)}`,
+        `- Comprometido OPEN: ${formatAmountWithCurrency(committedAmount, currency)}`,
+      ];
+      if (remainingAmount >= 0) {
+        lines.push(`- Remanente estimado: ${formatAmountWithCurrency(remainingAmount, currency)}`);
+      } else {
+        lines.push(`- Exceso sobre presupuesto: ${formatAmountWithCurrency(Math.abs(remainingAmount), currency)}`);
+      }
+      if (Number.isFinite(eventBudgetRuntimeState?.fightsRemainingEstimate)) {
+        lines.push(
+          `- Peleas restantes estimadas: ${Math.round(eventBudgetRuntimeState.fightsRemainingEstimate)}`
+        );
+      }
+      lines.push(
+        '',
+        'Desde ahora calibro stake con este presupuesto para esta cartelera.'
+      );
+
+      return {
+        reply: lines.join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
+    const canReliablyGateEventBudget =
+      decisionEventContext?.source === 'odds_snapshot' ||
+      decisionEventContext?.source === 'message_hint' ||
+      isGuidedAnalyzeTurn ||
+      hasOddsSignals(originalMessage);
+    const shouldGateForEventBudget =
+      Boolean(userId) &&
+      wantsBetDecision &&
+      !isGuidedLedgerTurn &&
+      !isLedgerMutationIntentMessage(originalMessage) &&
+      !activeEventBudgetSession &&
+      Boolean(decisionEventContext) &&
+      canReliablyGateEventBudget &&
+      typeof userStore?.upsertEventBudgetSession === 'function';
+    if (shouldGateForEventBudget) {
+      const detectedEventLabel =
+        decisionEventContext?.eventName ||
+        sessionSnapshot?.lastEvent?.eventName ||
+        'cartelera actual';
+      return {
+        reply: [
+          `💼 Antes de recomendar stake para ${detectedEventLabel}, decime tu presupuesto del evento.`,
+          'Formato rapido: `presupuesto evento $10000`.',
+          'Opcional: `presupuesto evento $10000 base $2000`.',
+        ].join('\n'),
+        metadata: {
+          resolvedFight: runtimeState.resolvedFight,
+          eventCard: runtimeState.eventCard,
+        },
+      };
+    }
+
     if ((stakePreference || profilePreference) && userId && userStore?.updateUserProfile) {
       const updates = {};
       if (stakePreference?.minStakeAmount !== null && stakePreference?.minStakeAmount !== undefined) {
@@ -8797,7 +9298,12 @@ export function createBettingWizard({
             replyWithRationale,
             originalMessage,
             userProfile || {},
-            turnToolEffects
+            turnToolEffects,
+            {
+              eventBudgetSession: activeEventBudgetSession,
+              eventCommittedAmount: eventBudgetRuntimeState?.committedAmount || 0,
+              fightsRemainingEstimate: eventBudgetRuntimeState?.fightsRemainingEstimate || null,
+            }
           );
       const replyWithDecisionGate = committeeBlocked
         ? replyWithStakeCalibration

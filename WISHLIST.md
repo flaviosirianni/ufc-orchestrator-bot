@@ -19,7 +19,27 @@ Cada item nuevo debe escribirse con este nivel de detalle, porque se usa como ba
 
 La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (plan en 3 PRs).
 
-## Pendientes
+## Backlog Unificado (Bot Factory)
+
+Revision de estado: `2026-03-30` (post migracion a arquitectura Core + Bots, deploy OCI y billing global).
+
+### Estructura actual del backlog
+
+- **Plataforma/Billing (cross-bot):** items 1, 2, 3, 8, 9, 11, 13, 14, 20, 29, 34, 35.
+- **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33.
+- **Nutrition (dominio nutricion):** item 36 (mas backlog incremental a crear en esta seccion en siguientes iteraciones).
+
+### Leyenda de estado
+
+- `resuelto`: implementado en codigo y operativo en deploy actual.
+- `en progreso`: implementacion parcial o MVP activo, falta hardening/cobertura final.
+- `pendiente`: aun no implementado.
+
+### Snapshot de avance (2026-03-30)
+
+- `resuelto`: 10 items.
+- `en progreso`: 19 items.
+- `pendiente`: 7 items.
 
 1. **Feedback de "pensando" mientras el bot procesa la respuesta**
    - **Objetivo:** mejorar la UX cuando la respuesta tarda varios segundos.
@@ -28,7 +48,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Mostrar estado "escribiendo..." en Telegram mientras se genera la respuesta.
      - Como fallback, enviar un mensaje corto tipo "Pensando..." y luego la respuesta final.
    - **Contexto:** hoy hay demoras de algunos segundos y desde el POV del usuario parece que el bot "se queda" sin reaccion.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (typing en curso + feedback inmediato mientras procesa).
 
 2. **Consultas de creditos y pagos desde el bot**
    - **Objetivo:** que el usuario pueda consultar su estado de cuenta sin salir del chat.
@@ -38,7 +58,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Ultimas transacciones de creditos (gastos y recargas).
      - Confirmacion de pagos acreditados cuando aplique.
    - **Contexto:** hoy esa informacion existe en backend/DB pero no esta expuesta en el flujo conversacional al usuario final.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (estado de creditos, movimientos y recargas expuestos en Telegram).
 
 3. **Hardening de seguridad y operacion de la base de datos**
    - **Objetivo:** mejorar resiliencia, seguridad y trazabilidad de datos sensibles (usuarios, creditos y pagos).
@@ -48,7 +68,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Agregar snapshots/backups periodicos con politica de retencion.
      - Incorporar logs operativos y auditoria de pagos (eventos, resultado, motivo, timestamp, idempotencia).
    - **Contexto:** a medida que crece la integracion de pagos, aumenta el riesgo operativo y la necesidad de trazabilidad.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (DB fuera del repo + loops de backup/verify activos en UFC y Nutrition + billing idempotente; falta estandarizar restore drills y alertas operativas cross-bot).
 
 4. **UX clara para usuario final (que puede hacer y que esta haciendo el bot)**
    - **Objetivo:** reducir friccion inicial y evitar que el usuario tenga que "guiar" al bot para que complete una tarea.
@@ -68,7 +88,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Flujo onboarding desde `/start` hasta primer pick recomendado.
      - Flujo con input incompleto (sin cuotas) y recuperacion guiada.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (menus guiados y ayudas contextuales activos; falta terminar telemetria de friccion/onboarding de punta a punta).
 
 5. **Tracking automatico del ciclo de apuesta en ledger (recomendacion -> ejecucion -> resultado)**
    - **Objetivo:** pasar de "recomendaciones sueltas" a tracking completo de performance real del usuario.
@@ -95,7 +115,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Reintento idempotente de registro de la misma apuesta.
      - Settlement manual y settlement automatico.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (registro/cierre/historial operativos con receipts; falta cerrar 100% del flujo recommendation -> execution con menos friccion).
 
 6. **[PRIORIDAD ALTA] Robustecer logica de fechas y validez temporal de datos deportivos**
    - **Objetivo:** eliminar errores de fecha/recencia que rompen confianza y afectan decisiones de apuesta.
@@ -139,7 +159,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - "Ya te pase cuotas" -> no vuelve a pedir si estan guardadas.
      - "Pelea 1" -> resolucion correcta desde contexto previo.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (router guiado + acciones/callbacks deterministicas implementadas; falta cubrir mas casos de composicion multi-intent y recovery avanzado).
 
 8. **Suite de regresion conversacional end-to-end (calidad continua)**
    - **Objetivo:** prevenir reincidencia de errores ya detectados en produccion.
@@ -156,7 +176,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Los incidentes ya registrados quedan cubiertos por tests.
      - No se mergean cambios que rompan esos escenarios.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (cobertura de regresion ya ampliada en `__tests__`; falta matriz E2E basada en transcripciones reales de produccion).
 
 9. **Notificacion inmediata de recarga acreditada + acceso rapido a saldo**
    - **Objetivo:** mejorar transparencia de pagos y reducir ansiedad/friccion despues de una recarga.
@@ -188,7 +208,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir fallback cuando no exista chat_id activo para notificar (guardar notificacion pendiente o enviar al proximo mensaje del usuario).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (webhooks y flujo de topup ya notifican acreditacion + saldo actualizado por Telegram).
 
 10. **Favoritos de peleadores (watchlist personal por usuario)**
    - **Objetivo:** permitir seguimiento personalizado de peleadores que le interesan al usuario durante eventos y analisis futuros.
@@ -238,7 +258,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si mostrar alertas proactivas cuando haya pelea nueva de un favorito (futuro scope).
      - Definir limite maximo de favoritos por usuario para evitar listas inmanejables.
    - **Prioridad:** media.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (Fase 1 y 2 implementadas: gate de primer analisis, persistencia `event_budget_sessions`, override por chat y calibracion dinamica por remanente/peleas restantes; falta cerrar Fase 3 completa de reconciliacion automatica al registrar/cerrar apuestas en todos los caminos de respuesta).
 
 11. **Render correcto de formato en Telegram (negritas/listas sin markdown crudo)**
    - **Objetivo:** mejorar legibilidad y evitar mensajes visualmente rotos.
@@ -270,7 +290,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Elegir estandar final (`HTML` vs `MarkdownV2`) y migrar templates existentes.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (`parse_mode=HTML` + `MessageFormatter` central + fallback automatico a plain text si Telegram rechaza formato).
 
 12. **Ajuste de staking: unidades demasiado bajas vs bankroll declarado**
    - **Objetivo:** que el tamaño de apuesta recomendado sea coherente con el bankroll total y el plan del evento.
@@ -306,7 +326,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir objetivo de utilizacion de presupuesto por evento (ej: 60%-85% recomendado, no 100% fijo).
      - Definir si estelares reciben peso adicional por defecto o solo por edge/confianza.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (stake minimo/unidades y calibracion base activos; falta allocator completo por presupuesto de evento).
 
 13. **Progreso visible durante respuestas lentas (status while thinking)**
    - **Objetivo:** reducir ansiedad del usuario y evitar percepcion de bot trabado cuando el procesamiento tarda.
@@ -337,7 +357,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir si usar mensaje visible, `typing`, o combinacion de ambos segun duracion.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (feedback visible con `typing` recurrente durante procesamiento).
 
 14. **Guardrail para mensajes encadenados mientras el bot aun procesa**
    - **Objetivo:** mantener coherencia turno-a-turno y evitar que se rompa el flujo cuando el usuario manda multiples lineas antes de respuesta.
@@ -367,7 +387,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Elegir politica por defecto (`reject` vs `coalesce`) segun UX esperada.
      - Definir excepciones (comandos como `/cancel` o `/stop` deben pasar siempre).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (`InFlightTurnGuard` activo: bloquea encadenados y avisa al usuario mientras hay turno en curso).
 
 15. **Educar al usuario para cargar cuotas (quotes) completas como input principal**
    - **Objetivo:** mejorar la calidad de recomendaciones haciendo explicito que el bot rinde mejor cuando analiza cuotas reales del usuario.
@@ -397,7 +417,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir cuanta insistencia aplicar para no volver la UX repetitiva.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (copy de ayuda/onboarding y reencauce guiado ya obligan a quotes/screenshot completo para decisiones accionables).
 
 16. **[PRIORIDAD CRITICA] Cierre de apuestas en ledger: evitar updates sobre pelea equivocada**
    - **Objetivo:** prevenir errores de data integrity al cerrar apuestas (`WON/LOST`) en conversaciones largas.
@@ -552,7 +572,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir si el scheduler vive dentro del bot o en infraestructura externa (cron/worker separado).
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (scheduler de sync en background activo con control de single-flight y logs de frescura/gap).
 
 21. **Reconciliar "ultimo evento UFC" vs cobertura real de la Sheet**
    - **Objetivo:** evitar respuestas desactualizadas sobre calendario y detectar cuando la sheet esta atrasada respecto a eventos reales.
@@ -579,7 +599,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Caso sync con sheet vieja -> mensaje de posible hueco.
      - Caso reconciliacion detecta faltantes y dispara relleno.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (deteccion de frescura/gap y rutas de calendario mejoradas; falta reconciliacion automatica completa contra fuente oficial).
 
 22. **[PRIORIDAD CRITICA] Resolver "hoy/manana" con ventana de evento local (evitar falso "no hay evento" despues de medianoche)**
    - **Objetivo de negocio/UX:** evitar respuestas incorrectas de calendario en horario nocturno que erosionan confianza justo en momento de apuesta en vivo.
@@ -610,7 +630,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir timezone por defecto inicial para usuarios sin perfil completo.
      - Definir umbral exacto de "ventana nocturna" por tipo de evento.
    - **Prioridad:** critico.
-   - **Estado:** en progreso (ventana temporal local y reconciliacion por fecha local implementadas con regresion; faltan `NoEventClaimGuard` estricto end-to-end y captura/persistencia de timezone faltante).
+   - **Estado:** en progreso (UFC: ventana temporal local y reconciliacion por fecha local implementadas con regresion; faltan `NoEventClaimGuard` estricto end-to-end y captura/persistencia de timezone faltante. En Nutrition, este riesgo ya quedo cubierto por timezone persistente + logging local).
 
 23. **Auto-monitoreo de apuestas abiertas + cierre automatico con notificacion al usuario**
    - **Objetivo de negocio/UX:** reducir friccion post-apuesta y asegurar ledger actualizado sin depender de reporte manual del usuario.
@@ -686,7 +706,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si el menu se muestra siempre o solo en respuestas clave.
      - Definir copy final de instrucciones por boton para evitar ruido excesivo.
    - **Prioridad:** alta.
-   - **Estado:** en progreso (botones base + instrucciones guiadas implementadas; falta cobertura completa de flujos y pruebas de callback expirado/doble tap).
+   - **Estado:** en progreso (botones base + instrucciones guiadas implementadas; dedupe de doble tap de callbacks ya activo con tests, falta cobertura completa de flujos compuestos).
 
 25. **Explicabilidad obligatoria: pedirle al bot que fundamente su eleccion de apuesta**
    - **Objetivo de negocio/UX:** aumentar confianza del usuario y evitar ejecucion ciega de picks mostrando razonamiento auditable en cada recomendacion.
@@ -768,7 +788,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir piso por defecto para usuarios sin preferencia declarada.
      - Definir jerarquia final entre `min_stake_amount` y `min_units_per_bet` cuando entran en conflicto.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso (calibracion minima + guardrail NO_BET implementados; falta cerrar distribucion por evento y explicacion de sizing por pick).
 
 27. **Reducir confirmaciones de mutaciones de ledger cuando el target es inequivoco**
    - **Objetivo de negocio/UX:** eliminar friccion innecesaria en operaciones de DB cuando la intencion del usuario es clara y segura.
@@ -825,7 +845,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
    - **Riesgos y decisiones abiertas:**
      - Definir si conviene `editMessageText` (chat mas limpio) vs mensajes nuevos (trazabilidad completa).
    - **Prioridad:** alta.
-   - **Estado:** en progreso (menu principal + submenus Apuestas/Config y persistencia de scope por chat implementados; falta evaluar `editMessageText` e idempotencia avanzada de taps).
+   - **Estado:** en progreso (menu principal + submenus Apuestas/Config y persistencia de scope por chat implementados; idempotencia de taps reforzada, falta evaluar `editMessageText` para limpieza de chat).
 
 29. **Checkout de recarga de creditos desde Home (Mercado Pago packs)**
    - **Objetivo de negocio/UX:** reducir friccion para monetizacion y evitar duplicidad/confusion de acciones en home menu.
@@ -868,7 +888,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Definir si el selector de pack vive en Telegram (submenu) o en landing web de checkout.
      - Definir copy legal/comercial final de recarga y devolucion.
    - **Prioridad:** alta.
-   - **Estado:** pendiente (entrypoint inicial en Home implementado; falta UX completa de packs y selector).
+   - **Estado:** resuelto (home/topup integrado con selector de packs, checkout web y acreditacion idempotente end-to-end).
 
 30. **Evitar contexto falso de exposicion/evento cuando no hay apuestas abiertas previas**
    - **Objetivo de negocio/UX:** preservar confianza operacional y evitar recomendaciones de riesgo basadas en un estado de ledger incorrecto.
@@ -1011,7 +1031,7 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: ajustar el umbral de deteccion de "texto estructurado suficiente" para evitar falsos positivos/falsos bloqueos.
      - Decision abierta: definir si `update_user_profile` debe habilitarse en una fase 2 de guiado.
    - **Prioridad:** alta.
-   - **Estado:** pendiente.
+   - **Estado:** resuelto (`guided_strict` + `GuidedInputGate` + `ToolAllowlistGuard` implementados; luego evolucionado para sumar ledger guiado sin reabrir chat ambiguo).
 
 33. **Entorno dev Telegram aislado de prod (doble bot + DB separada)**
    - **Objetivo de negocio/UX:** permitir pruebas reales por Telegram sin riesgo sobre produccion ni contaminacion de datos operativos.

@@ -151,9 +151,15 @@ OPENAI_API_KEY=sk-...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_INTERACTION_MODE=guided_strict
 GUIDED_QUOTES_TEXT_FALLBACK=true
+TELEGRAM_CALLBACK_DEDUP_WINDOW_MS=2500
+TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT=80
 BOT_ALLOWED_TELEGRAM_USER_IDS=
 DEFAULT_USER_TIMEZONE=America/Argentina/Buenos_Aires
 NUTRITION_SMART_MODELS=gpt-5.4,gpt-5.2,gpt-4.1-mini
+UFC_DB_BACKUP_ENABLED=true
+UFC_DB_BACKUP_DIR=/home/ubuntu/bot-data/ufc/backups
+UFC_DB_BACKUP_INTERVAL_MS=21600000
+UFC_DB_BACKUP_RETENTION_DAYS=14
 NUTRITION_DB_BACKUP_ENABLED=true
 NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups
 NUTRITION_DB_BACKUP_INTERVAL_MS=21600000
@@ -182,6 +188,8 @@ STAKE_EVENT_UTILIZATION_AGRESIVO=45
 STAKE_MAX_PICK_EXPOSURE_CONSERVADOR=16
 STAKE_MAX_PICK_EXPOSURE_MODERADO=22
 STAKE_MAX_PICK_EXPOSURE_AGRESIVO=30
+STAKE_EVENT_FIGHTS_DEFAULT=6
+STAKE_EVENT_DYNAMIC_FLOOR_PCT=75
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
 KNOWLEDGE_MAX_CHARS=9000
 DB_PATH=/var/lib/ufc-orchestrator/bot.db
@@ -332,6 +340,18 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 - Comandos manuales:
   - `npm run nutrition:db:verify`
   - `npm run nutrition:db:backup`
+
+#### UFC DB Reliability
+
+- Backup automático rotativo para UFC DB (configurable por env):
+  - `UFC_DB_BACKUP_ENABLED=true|false`
+  - `UFC_DB_BACKUP_DIR=/home/ubuntu/bot-data/ufc/backups`
+  - `UFC_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
+  - `UFC_DB_BACKUP_RETENTION_DAYS=14`
+- En cada ciclo: verificación `PRAGMA quick_check` + validación de tablas críticas + backup `.sqlite`.
+- Comandos manuales:
+  - `npm run ufc:db:verify`
+  - `npm run ufc:db:backup`
 
 ### Web Enrichment Before Analysis
 

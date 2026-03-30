@@ -32,6 +32,8 @@ export async function runSqliteStoreCompositeTests() {
       listUserBets,
       previewCompositeBetMutations,
       applyCompositeBetMutations,
+      getActiveEventBudgetSession,
+      upsertEventBudgetSession,
       getDb,
     } = store;
 
@@ -225,6 +227,55 @@ export async function runSqliteStoreCompositeTests() {
       });
       assert.equal(invalidPolicy.ok, false);
       assert.equal(invalidPolicy.error, 'invalid_transaction_policy');
+    }
+
+    // Event budget sessions are upserted per user+event and retrieved deterministically.
+    {
+      const userId = 'u-event-budget-1';
+      const first = upsertEventBudgetSession(userId, {
+        eventName: 'UFC 314',
+        eventDateUtc: '2026-04-11',
+        budgetAmount: 10000,
+        currency: 'ARS',
+      });
+      assert.equal(Boolean(first?.id), true);
+      assert.equal(first?.eventName, 'UFC 314');
+      assert.equal(first?.budgetAmount, 10000);
+
+      const loadedByName = getActiveEventBudgetSession(userId, {
+        eventName: 'ufc 314',
+        eventDateUtc: '2026-04-11',
+      });
+      assert.equal(loadedByName?.id, first?.id);
+
+      const updatedSameEvent = upsertEventBudgetSession(userId, {
+        eventId: 'event_ufc_314',
+        eventName: 'UFC 314',
+        eventDateUtc: '2026-04-11',
+        budgetAmount: 14500,
+        currency: 'ARS',
+      });
+      assert.equal(updatedSameEvent?.id, first?.id);
+      assert.equal(updatedSameEvent?.budgetAmount, 14500);
+      assert.equal(updatedSameEvent?.eventId, 'event_ufc_314');
+
+      const loadedByEventId = getActiveEventBudgetSession(userId, {
+        eventId: 'event_ufc_314',
+      });
+      assert.equal(loadedByEventId?.id, first?.id);
+      assert.equal(loadedByEventId?.budgetAmount, 14500);
+
+      const second = upsertEventBudgetSession(userId, {
+        eventName: 'UFC 315',
+        eventDateUtc: '2026-05-10',
+        budgetAmount: 9000,
+        currency: 'ARS',
+      });
+      assert.equal(Boolean(second?.id), true);
+      assert.notEqual(second?.id, first?.id);
+
+      const latestAny = getActiveEventBudgetSession(userId, { allowAnyActive: true });
+      assert.equal(latestAny?.id, second?.id);
     }
 
     console.log('All sqliteStore composite mutation tests passed.');

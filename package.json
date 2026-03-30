@@ -15,6 +15,8 @@
     "nutrition:import": "node src/scripts/importNutritionKnowledgeCsv.js",
     "nutrition:db:verify": "node src/scripts/nutritionDbVerify.js",
     "nutrition:db:backup": "node src/scripts/nutritionDbBackup.js",
+    "ufc:db:verify": "node src/scripts/ufcDbVerify.js",
+    "ufc:db:backup": "node src/scripts/ufcDbBackup.js",
     "test": "node __tests__/runTests.js",
     "history:sync": "node src/scripts/runHistoryScraper.js",
     "credits:add": "node src/scripts/addCredits.js"

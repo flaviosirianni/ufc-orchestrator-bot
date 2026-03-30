@@ -2851,6 +2851,186 @@ export async function runBettingWizardTests() {
 
   tests.push(async () => {
     const conversationStore = createConversationStore();
+    conversationStore.setLastCard('chat-event-budget-gate-1', {
+      eventName: 'UFC 314',
+      date: '2026-04-11',
+      fights: [{ fighterA: 'Fighter A', fighterB: 'Fighter B' }],
+    });
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            currency: 'ARS',
+          };
+        },
+        getActiveEventBudgetSession() {
+          return null;
+        },
+        upsertEventBudgetSession() {
+          return null;
+        },
+      },
+    });
+
+    const resolution = conversationStore.resolveMessage(
+      'chat-event-budget-gate-1',
+      'dame pick con stake para la pelea 1 @2.10'
+    );
+    const result = await wizard.handleMessage(resolution.resolvedMessage, {
+      chatId: 'chat-event-budget-gate-1',
+      userId: 'u-event-budget-gate-1',
+      originalMessage: 'dame pick con stake para la pelea 1 @2.10',
+      resolution,
+    });
+
+    assert.match(result.reply, /Antes de recomendar stake/i);
+    assert.match(result.reply, /presupuesto evento/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    conversationStore.setLastCard('chat-event-budget-set-1', {
+      eventName: 'UFC 314',
+      date: '2026-04-11',
+      fights: [
+        { fighterA: 'Fighter A', fighterB: 'Fighter B' },
+        { fighterA: 'Fighter C', fighterB: 'Fighter D' },
+      ],
+    });
+    const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
+    let upsertPayload = null;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return { currency: 'ARS' };
+        },
+        upsertEventBudgetSession(_userId, payload = {}) {
+          upsertPayload = payload;
+          return {
+            id: 14,
+            eventName: payload.eventName,
+            budgetAmount: payload.budgetAmount,
+            currency: payload.currency || 'ARS',
+          };
+        },
+        listUserBets() {
+          return [
+            {
+              id: 20,
+              eventName: 'UFC 314',
+              stake: 2000,
+              result: 'pending',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('presupuesto evento $10000', {
+      chatId: 'chat-event-budget-set-1',
+      userId: 'u-event-budget-set-1',
+      originalMessage: 'presupuesto evento $10000',
+      resolution: {
+        resolvedMessage: 'presupuesto evento $10000',
+      },
+    });
+
+    assert.equal(Number(upsertPayload?.budgetAmount), 10000);
+    assert.match(result.reply, /Presupuesto de evento guardado/i);
+    assert.match(result.reply, /Remanente estimado/i);
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    conversationStore.setLastCard('chat-event-budget-cal-1', {
+      eventName: 'UFC 314',
+      date: '2026-04-11',
+      fights: [
+        { fighterA: 'Fighter A', fighterB: 'Fighter B' },
+        { fighterA: 'Fighter C', fighterB: 'Fighter D' },
+        { fighterA: 'Fighter E', fighterB: 'Fighter F' },
+        { fighterA: 'Fighter G', fighterB: 'Fighter H' },
+        { fighterA: 'Fighter I', fighterB: 'Fighter J' },
+      ],
+    });
+    const fakeClient = createSequentialFakeClient([
+      responseWithText('Pick principal\n- Stake: 1u (=$500 ARS)\n- Cuota: @2.10'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getUserProfile() {
+          return {
+            unitSize: 500,
+            minStakeAmount: 500,
+            minUnitsPerBet: 1,
+            riskProfile: 'moderado',
+            currency: 'ARS',
+          };
+        },
+        getActiveEventBudgetSession() {
+          return {
+            id: 31,
+            eventName: 'UFC 314',
+            budgetAmount: 10000,
+            currency: 'ARS',
+          };
+        },
+        listUserBets() {
+          return [
+            {
+              id: 30,
+              eventName: 'UFC 314',
+              stake: 3000,
+              result: 'pending',
+            },
+          ];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('dame un pick con stake', {
+      chatId: 'chat-event-budget-cal-1',
+      userId: 'u-event-budget-cal-1',
+      originalMessage: 'dame un pick con stake',
+      resolution: {
+        resolvedMessage: 'dame un pick con stake',
+      },
+    });
+
+    assert.match(result.reply, /Plan de evento: presupuesto activo \$10\.000 ARS/i);
+    assert.match(result.reply, /Comprometido \(open \+ recomendacion\)/i);
+    assert.match(result.reply, /Stake objetivo por pick/i);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no debería ejecutarse')]);
     let receivedUpdates = null;
 

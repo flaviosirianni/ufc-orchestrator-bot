@@ -13,8 +13,11 @@ import { startEventIntelMonitor } from '../../core/eventIntel.js';
 import { startOddsIntelMonitor } from '../../core/oddsIntel.js';
 import { startPreFightAnalysisMonitor } from '../../core/preFightAnalysis.js';
 import {
+  getDb,
   getUserProfile,
   updateUserProfile,
+  getActiveEventBudgetSession,
+  upsertEventBudgetSession,
   addBetRecord,
   getBetHistory,
   getLedgerSummary,
@@ -61,6 +64,7 @@ import {
   getDbPath,
   creditFromMercadoPagoPayment,
 } from '../../core/sqliteStore.js';
+import { startUfcDbReliabilityLoop } from './ufcReliability.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
@@ -119,7 +123,11 @@ function formatCreditsValue(value = 0) {
 export async function bootstrapBot({ manifest } = {}) {
   const conversationStore = createConversationStore();
   const sessionLogger = createSessionLogger();
+  getDb();
   console.log('[bootstrap][ufc] SQLite DB:', getDbPath());
+  startUfcDbReliabilityLoop({
+    dbPath: getDbPath(),
+  });
 
   const billingClient = createBillingApiClient({
     botId: manifest?.bot_id || 'ufc',
@@ -161,6 +169,8 @@ export async function bootstrapBot({ manifest } = {}) {
     userStore: {
       getUserProfile,
       updateUserProfile,
+      getActiveEventBudgetSession,
+      upsertEventBudgetSession,
       addBetRecord,
       getBetHistory,
       getLedgerSummary,
