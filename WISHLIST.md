@@ -68,7 +68,7 @@ Revision de estado: `2026-03-30` (post migracion a arquitectura Core + Bots, dep
      - Agregar snapshots/backups periodicos con politica de retencion.
      - Incorporar logs operativos y auditoria de pagos (eventos, resultado, motivo, timestamp, idempotencia).
    - **Contexto:** a medida que crece la integracion de pagos, aumenta el riesgo operativo y la necesidad de trazabilidad.
-   - **Estado:** en progreso (DB fuera del repo + loops de backup/verify activos en UFC y Nutrition + billing idempotente; falta estandarizar restore drills y alertas operativas cross-bot).
+   - **Estado:** en progreso (DB fuera del repo + loops de backup/verify activos en UFC/Nutrition/Billing + verificación post-backup restaurable + billing con WAL/synchronous/quick_check; falta cerrar alertas operativas cross-bot y drills de restore automatizados con reporte).
 
 4. **UX clara para usuario final (que puede hacer y que esta haciendo el bot)**
    - **Objetivo:** reducir friccion inicial y evitar que el usuario tenga que "guiar" al bot para que complete una tarea.

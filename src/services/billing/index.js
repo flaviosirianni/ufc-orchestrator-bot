@@ -2,6 +2,7 @@ import '../../core/env.js';
 import { createBillingStore } from './store.js';
 import { createMercadoPagoGateway } from './mercadoPagoGateway.js';
 import { createBillingServer } from './server.js';
+import { startBillingDbReliabilityLoop } from './reliability.js';
 
 function resolveEventHooks() {
   const fromList = String(process.env.BILLING_EVENT_WEBHOOK_URLS || '')
@@ -19,6 +20,9 @@ function bootstrapBillingService() {
   const store = createBillingStore();
   const mercadoPago = createMercadoPagoGateway();
   const eventHooks = resolveEventHooks();
+  const reliability = startBillingDbReliabilityLoop({
+    dbPath: store.dbPath,
+  });
 
   const app = createBillingServer({
     store,
@@ -45,7 +49,31 @@ function bootstrapBillingService() {
     },
   });
 
-  app.start();
+  const server = app.start();
+  let shutdownInFlight = false;
+  const shutdown = (signal = 'SIGTERM') => {
+    if (shutdownInFlight) return;
+    shutdownInFlight = true;
+    console.log(`[billing] shutting down (${signal})`);
+    reliability.stop();
+    server.close(() => {
+      try {
+        store.close();
+      } finally {
+        process.exit(0);
+      }
+    });
+    setTimeout(() => {
+      try {
+        store.close();
+      } finally {
+        process.exit(1);
+      }
+    }, 10_000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 bootstrapBillingService();

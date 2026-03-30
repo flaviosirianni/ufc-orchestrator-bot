@@ -5,8 +5,30 @@ import Database from 'better-sqlite3';
 
 const OCI_DEFAULT_DB_PATH = '/home/ubuntu/bot-data/billing/billing.db';
 const LOCAL_DEFAULT_DB_PATH = path.resolve(os.homedir(), '.bot-factory', 'billing.db');
-const DEFAULT_DB_PATH =
+export const DEFAULT_BILLING_DB_PATH =
   process.env.NODE_ENV === 'production' ? OCI_DEFAULT_DB_PATH : LOCAL_DEFAULT_DB_PATH;
+export const REQUIRED_BILLING_TABLES = [
+  'wallets',
+  'credit_transactions',
+  'processed_payments',
+  'usage_events',
+];
+const BILLING_DB_STARTUP_QUICK_CHECK =
+  String(process.env.BILLING_DB_STARTUP_QUICK_CHECK ?? 'true').toLowerCase() !== 'false';
+const BILLING_SQLITE_BUSY_TIMEOUT_MS = Number(
+  process.env.BILLING_SQLITE_BUSY_TIMEOUT_MS ?? '5000'
+);
+const BILLING_SQLITE_WAL_AUTOCHECKPOINT_PAGES = Number(
+  process.env.BILLING_SQLITE_WAL_AUTOCHECKPOINT_PAGES ?? '1000'
+);
+
+function normalizeSynchronousMode(raw = '') {
+  const value = String(raw || 'FULL').trim().toUpperCase();
+  if (value === 'OFF' || value === 'NORMAL' || value === 'FULL' || value === 'EXTRA') {
+    return value;
+  }
+  return 'FULL';
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -36,6 +58,43 @@ function parseJsonOrNull(raw = '') {
   } catch {
     return null;
   }
+}
+
+function readQuickCheckMessages(db) {
+  const rows = db.prepare('PRAGMA quick_check').all();
+  return rows
+    .map((row) => Object.values(row || {})[0])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+}
+
+function readMissingTables(db, requiredTables = []) {
+  const missing = [];
+  const probe = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
+  );
+  for (const tableName of requiredTables) {
+    const exists = probe.get(String(tableName || '').trim());
+    if (!exists) {
+      missing.push(tableName);
+    }
+  }
+  return missing;
+}
+
+function runStartupDbHealthCheck(db) {
+  if (!BILLING_DB_STARTUP_QUICK_CHECK) return;
+  const quickCheck = readQuickCheckMessages(db);
+  const quickCheckOk = quickCheck.length > 0 && quickCheck.every((msg) => msg.toLowerCase() === 'ok');
+  const missingTables = readMissingTables(db, REQUIRED_BILLING_TABLES);
+  if (quickCheckOk && missingTables.length === 0) return;
+
+  const error = new Error('billing_db_startup_health_check_failed');
+  error.details = {
+    quickCheck,
+    missingTables,
+  };
+  throw error;
 }
 
 function initSchema(db) {
@@ -90,10 +149,21 @@ function initSchema(db) {
   `);
 }
 
-export function createBillingStore({ dbPath = process.env.BILLING_DB_PATH || DEFAULT_DB_PATH } = {}) {
+export function createBillingStore({
+  dbPath = process.env.BILLING_DB_PATH || DEFAULT_BILLING_DB_PATH,
+} = {}) {
   ensureDir(dbPath);
   const db = new Database(dbPath);
+  const synchronousMode = normalizeSynchronousMode(
+    process.env.BILLING_SQLITE_SYNCHRONOUS || process.env.SQLITE_SYNCHRONOUS || 'FULL'
+  );
+  db.pragma('journal_mode = WAL');
+  db.pragma(`busy_timeout = ${Math.max(1000, Number(BILLING_SQLITE_BUSY_TIMEOUT_MS) || 5000)}`);
+  db.pragma(`wal_autocheckpoint = ${Math.max(100, Number(BILLING_SQLITE_WAL_AUTOCHECKPOINT_PAGES) || 1000)}`);
+  db.pragma('foreign_keys = ON');
+  db.pragma(`synchronous = ${synchronousMode}`);
   initSchema(db);
+  runStartupDbHealthCheck(db);
 
   function ensureWallet(userId, { weeklyFreeCredits = 0 } = {}) {
     const cleanUserId = String(userId || '').trim();

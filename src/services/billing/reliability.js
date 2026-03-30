@@ -3,18 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import '../../core/env.js';
-
-const REQUIRED_NUTRITION_TABLES = [
-  'nutrition_profiles',
-  'nutrition_intakes',
-  'nutrition_weighins',
-  'nutrition_food_catalog',
-  'nutrition_journal',
-  'nutrition_user_state',
-  'nutrition_operation_receipts',
-  'nutrition_usage_records',
-  'nutrition_user_product_defaults',
-];
+import { DEFAULT_BILLING_DB_PATH, REQUIRED_BILLING_TABLES } from './store.js';
 
 function ensureDir(dirPath = '') {
   const normalized = String(dirPath || '').trim();
@@ -22,13 +11,6 @@ function ensureDir(dirPath = '') {
   if (!fs.existsSync(normalized)) {
     fs.mkdirSync(normalized, { recursive: true });
   }
-}
-
-function fileSha256(filePath = '') {
-  const normalized = String(filePath || '').trim();
-  if (!normalized || !fs.existsSync(normalized)) return '';
-  const payload = fs.readFileSync(normalized);
-  return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
 function nowStamp() {
@@ -41,17 +23,17 @@ function toPositiveInt(value, fallback) {
   return Math.round(parsed);
 }
 
-function resolveDefaultBackupDir(dbPath = '') {
-  const normalizedDbPath = String(dbPath || '').trim();
-  if (!normalizedDbPath) return '';
-  return path.join(path.dirname(normalizedDbPath), 'backups');
-}
-
 function isFeatureEnabled(rawValue, fallback = true) {
   if (rawValue === undefined || rawValue === null || rawValue === '') {
     return Boolean(fallback);
   }
   return String(rawValue).toLowerCase() !== 'false';
+}
+
+function resolveDefaultBackupDir(dbPath = '') {
+  const normalizedDbPath = String(dbPath || '').trim();
+  if (!normalizedDbPath) return '';
+  return path.join(path.dirname(normalizedDbPath), 'backups');
 }
 
 function readQuickCheckMessages(db) {
@@ -76,13 +58,20 @@ function readMissingTables(db, requiredTables = []) {
   return missing;
 }
 
+function fileSha256(filePath = '') {
+  const normalized = String(filePath || '').trim();
+  if (!normalized || !fs.existsSync(normalized)) return '';
+  const payload = fs.readFileSync(normalized);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
 function pruneOldBackups(backupDir, retentionDays) {
   const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const pruned = [];
   const items = fs.readdirSync(backupDir, { withFileTypes: true });
   for (const item of items) {
     if (!item.isFile()) continue;
-    if (!item.name.startsWith('nutrition-backup-') || !item.name.endsWith('.sqlite')) continue;
+    if (!item.name.startsWith('billing-backup-') || !item.name.endsWith('.sqlite')) continue;
     const fullPath = path.join(backupDir, item.name);
     const stat = fs.statSync(fullPath);
     if (stat.mtimeMs < cutoffMs) {
@@ -93,9 +82,9 @@ function pruneOldBackups(backupDir, retentionDays) {
   return pruned;
 }
 
-export function verifyNutritionDb({
-  dbPath = process.env.DB_PATH || '',
-  requiredTables = REQUIRED_NUTRITION_TABLES,
+export function verifyBillingDb({
+  dbPath = process.env.BILLING_DB_PATH || DEFAULT_BILLING_DB_PATH,
+  requiredTables = REQUIRED_BILLING_TABLES,
 } = {}) {
   const normalizedDbPath = String(dbPath || '').trim();
   if (!normalizedDbPath) {
@@ -134,24 +123,23 @@ export function verifyNutritionDb({
   }
 }
 
-export async function createNutritionDbBackup({
-  dbPath = process.env.DB_PATH || '',
-  backupDir = process.env.NUTRITION_DB_BACKUP_DIR || '',
-  retentionDays = toPositiveInt(process.env.NUTRITION_DB_BACKUP_RETENTION_DAYS, 14),
-  verifyBackup = isFeatureEnabled(process.env.NUTRITION_DB_BACKUP_VERIFY_RESTORE, true),
+export async function createBillingDbBackup({
+  dbPath = process.env.BILLING_DB_PATH || DEFAULT_BILLING_DB_PATH,
+  backupDir = process.env.BILLING_DB_BACKUP_DIR || '',
+  retentionDays = toPositiveInt(process.env.BILLING_DB_BACKUP_RETENTION_DAYS, 14),
+  verifyBackup = isFeatureEnabled(process.env.BILLING_DB_BACKUP_VERIFY_RESTORE, true),
 } = {}) {
   const normalizedDbPath = String(dbPath || '').trim();
-  const normalizedBackupDir =
-    String(backupDir || '').trim() || resolveDefaultBackupDir(normalizedDbPath);
+  const resolvedBackupDir = String(backupDir || '').trim() || resolveDefaultBackupDir(normalizedDbPath);
   if (!normalizedDbPath) {
     return { ok: false, error: 'missing_db_path' };
   }
-  if (!normalizedBackupDir) {
+  if (!resolvedBackupDir) {
     return { ok: false, error: 'missing_backup_dir' };
   }
-  ensureDir(normalizedBackupDir);
+  ensureDir(resolvedBackupDir);
 
-  const tempFile = path.join(normalizedBackupDir, `nutrition-backup-${nowStamp()}.tmp.sqlite`);
+  const tempFile = path.join(resolvedBackupDir, `billing-backup-${nowStamp()}.tmp.sqlite`);
   const finalFile = tempFile.replace('.tmp.sqlite', '.sqlite');
 
   const db = new Database(normalizedDbPath, { readonly: true, fileMustExist: true });
@@ -164,7 +152,7 @@ export async function createNutritionDbBackup({
   fs.renameSync(tempFile, finalFile);
   fs.chmodSync(finalFile, 0o600);
   const backupVerification = verifyBackup
-    ? verifyNutritionDb({ dbPath: finalFile })
+    ? verifyBillingDb({ dbPath: finalFile })
     : { ok: true, skipped: true };
   if (!backupVerification.ok) {
     fs.rmSync(finalFile, { force: true });
@@ -172,19 +160,20 @@ export async function createNutritionDbBackup({
       ok: false,
       error: 'backup_verification_failed',
       dbPath: normalizedDbPath,
-      backupDir: normalizedBackupDir,
+      backupDir: resolvedBackupDir,
       backupFile: finalFile,
       backupVerification,
       createdAt: new Date().toISOString(),
     };
   }
-  const pruned = pruneOldBackups(normalizedBackupDir, toPositiveInt(retentionDays, 14));
+
+  const pruned = pruneOldBackups(resolvedBackupDir, toPositiveInt(retentionDays, 14));
   const stat = fs.statSync(finalFile);
 
   return {
     ok: true,
     dbPath: normalizedDbPath,
-    backupDir: normalizedBackupDir,
+    backupDir: resolvedBackupDir,
     backupFile: finalFile,
     sizeBytes: Number(stat.size) || 0,
     sha256: fileSha256(finalFile),
@@ -194,13 +183,13 @@ export async function createNutritionDbBackup({
   };
 }
 
-export function startNutritionDbReliabilityLoop({
-  enabled = isFeatureEnabled(process.env.NUTRITION_DB_BACKUP_ENABLED, true),
-  dbPath = process.env.DB_PATH || '',
-  backupDir = process.env.NUTRITION_DB_BACKUP_DIR || '',
-  intervalMs = toPositiveInt(process.env.NUTRITION_DB_BACKUP_INTERVAL_MS, 6 * 60 * 60 * 1000),
-  retentionDays = toPositiveInt(process.env.NUTRITION_DB_BACKUP_RETENTION_DAYS, 14),
-  verifyBackup = isFeatureEnabled(process.env.NUTRITION_DB_BACKUP_VERIFY_RESTORE, true),
+export function startBillingDbReliabilityLoop({
+  enabled = isFeatureEnabled(process.env.BILLING_DB_BACKUP_ENABLED, true),
+  dbPath = process.env.BILLING_DB_PATH || DEFAULT_BILLING_DB_PATH,
+  backupDir = process.env.BILLING_DB_BACKUP_DIR || '',
+  intervalMs = toPositiveInt(process.env.BILLING_DB_BACKUP_INTERVAL_MS, 6 * 60 * 60 * 1000),
+  retentionDays = toPositiveInt(process.env.BILLING_DB_BACKUP_RETENTION_DAYS, 14),
+  verifyBackup = isFeatureEnabled(process.env.BILLING_DB_BACKUP_VERIFY_RESTORE, true),
   logger = console,
 } = {}) {
   if (!enabled) {
@@ -215,29 +204,26 @@ export function startNutritionDbReliabilityLoop({
     if (stopped || inFlight) return;
     inFlight = true;
     try {
-      const verification = verifyNutritionDb({ dbPath });
+      const verification = verifyBillingDb({ dbPath });
       if (!verification.ok) {
-        logger.error(
-          `[nutrition-db] verification failed (${trigger})`,
-          JSON.stringify(verification)
-        );
+        logger.error(`[billing-db] verification failed (${trigger})`, JSON.stringify(verification));
         return;
       }
-      const backupResult = await createNutritionDbBackup({
+      const backupResult = await createBillingDbBackup({
         dbPath,
         backupDir,
         retentionDays,
         verifyBackup,
       });
       if (!backupResult.ok) {
-        logger.error(`[nutrition-db] backup failed (${trigger})`, JSON.stringify(backupResult));
+        logger.error(`[billing-db] backup failed (${trigger})`, JSON.stringify(backupResult));
         return;
       }
       logger.log(
-        `[nutrition-db] backup ok (${trigger}) file=${backupResult.backupFile} size=${backupResult.sizeBytes}`
+        `[billing-db] backup ok (${trigger}) file=${backupResult.backupFile} size=${backupResult.sizeBytes}`
       );
     } catch (error) {
-      logger.error(`[nutrition-db] reliability cycle failed (${trigger})`, error);
+      logger.error(`[billing-db] reliability cycle failed (${trigger})`, error);
     } finally {
       inFlight = false;
     }

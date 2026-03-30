@@ -156,14 +156,18 @@ TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT=80
 BOT_ALLOWED_TELEGRAM_USER_IDS=
 DEFAULT_USER_TIMEZONE=America/Argentina/Buenos_Aires
 NUTRITION_SMART_MODELS=gpt-5.4,gpt-5.2,gpt-4.1-mini
+UFC_DB_PATH=
+NUTRITION_DB_PATH=
 UFC_DB_BACKUP_ENABLED=true
 UFC_DB_BACKUP_DIR=/home/ubuntu/bot-data/ufc/backups
 UFC_DB_BACKUP_INTERVAL_MS=21600000
 UFC_DB_BACKUP_RETENTION_DAYS=14
+UFC_DB_BACKUP_VERIFY_RESTORE=true
 NUTRITION_DB_BACKUP_ENABLED=true
 NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups
 NUTRITION_DB_BACKUP_INTERVAL_MS=21600000
 NUTRITION_DB_BACKUP_RETENTION_DAYS=14
+NUTRITION_DB_BACKUP_VERIFY_RESTORE=true
 NUTRITION_TELEGRAM_BOT_TOKEN=
 MEDICAL_READER_TELEGRAM_BOT_TOKEN=
 BILLING_BASE_URL=
@@ -171,6 +175,15 @@ BILLING_API_TOKEN=
 BILLING_TIMEOUT_MS=8000
 BILLING_PORT=3200
 BILLING_DB_PATH=/home/ubuntu/bot-data/billing/billing.db
+BILLING_DB_STARTUP_QUICK_CHECK=true
+BILLING_SQLITE_SYNCHRONOUS=FULL
+BILLING_SQLITE_BUSY_TIMEOUT_MS=5000
+BILLING_SQLITE_WAL_AUTOCHECKPOINT_PAGES=1000
+BILLING_DB_BACKUP_ENABLED=true
+BILLING_DB_BACKUP_DIR=/home/ubuntu/bot-data/billing/backups
+BILLING_DB_BACKUP_INTERVAL_MS=21600000
+BILLING_DB_BACKUP_RETENTION_DAYS=14
+BILLING_DB_BACKUP_VERIFY_RESTORE=true
 BILLING_PUBLIC_URL=
 BILLING_EVENT_WEBHOOK_URLS=
 SHEET_ID=...
@@ -193,6 +206,9 @@ STAKE_EVENT_DYNAMIC_FLOOR_PCT=75
 KNOWLEDGE_FILE=./Knowledge/ufc_bets_playbook.md
 KNOWLEDGE_MAX_CHARS=9000
 DB_PATH=/var/lib/ufc-orchestrator/bot.db
+SQLITE_SYNCHRONOUS=FULL
+SQLITE_BUSY_TIMEOUT_MS=5000
+SQLITE_WAL_AUTOCHECKPOINT_PAGES=1000
 CONVERSATION_TTL_MS=86400000
 CONVERSATION_MAX_TURNS=20
 CONVERSATION_MAX_TURN_CHARS=1600
@@ -337,6 +353,8 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
   - `NUTRITION_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
   - `NUTRITION_DB_BACKUP_RETENTION_DAYS=14`
 - En cada ciclo: verificación `PRAGMA quick_check` + validación de tablas críticas + backup `.sqlite`.
+- Post-backup verification (default on): `NUTRITION_DB_BACKUP_VERIFY_RESTORE=true|false`.
+  - Si el backup no pasa `quick_check`/tablas críticas, se descarta y el ciclo falla explícitamente.
 - Comandos manuales:
   - `npm run nutrition:db:verify`
   - `npm run nutrition:db:backup`
@@ -349,9 +367,27 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
   - `UFC_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
   - `UFC_DB_BACKUP_RETENTION_DAYS=14`
 - En cada ciclo: verificación `PRAGMA quick_check` + validación de tablas críticas + backup `.sqlite`.
+- Post-backup verification (default on): `UFC_DB_BACKUP_VERIFY_RESTORE=true|false`.
+  - Si el backup no pasa `quick_check`/tablas críticas, se descarta y el ciclo falla explícitamente.
 - Comandos manuales:
   - `npm run ufc:db:verify`
   - `npm run ufc:db:backup`
+
+#### Billing DB Reliability
+
+- Billing-service ahora corre con SQLite endurecido: `journal_mode=WAL`, `synchronous=FULL` (configurable), `busy_timeout`, `wal_autocheckpoint`.
+- Health-check de arranque (default on): `BILLING_DB_STARTUP_QUICK_CHECK=true|false`.
+  - Si falla `quick_check` o faltan tablas críticas, el proceso no levanta.
+- Backup automático rotativo para Billing DB (configurable por env):
+  - `BILLING_DB_BACKUP_ENABLED=true|false`
+  - `BILLING_DB_BACKUP_DIR=/home/ubuntu/bot-data/billing/backups`
+  - `BILLING_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
+  - `BILLING_DB_BACKUP_RETENTION_DAYS=14`
+  - `BILLING_DB_BACKUP_VERIFY_RESTORE=true|false`
+- Comandos manuales:
+  - `npm run billing:db:verify`
+  - `npm run billing:db:backup`
+  - `npm run db:doctor` (auditoría unificada UFC/Nutrition/Billing; usa paths por env o flags `--ufc_db/--nutrition_db/--billing_db`).
 
 ### Web Enrichment Before Analysis
 

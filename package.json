@@ -17,6 +17,9 @@
     "nutrition:db:backup": "node src/scripts/nutritionDbBackup.js",
     "ufc:db:verify": "node src/scripts/ufcDbVerify.js",
     "ufc:db:backup": "node src/scripts/ufcDbBackup.js",
+    "billing:db:verify": "node src/scripts/billingDbVerify.js",
+    "billing:db:backup": "node src/scripts/billingDbBackup.js",
+    "db:doctor": "node src/scripts/dbReliabilityDoctor.js",
     "test": "node __tests__/runTests.js",
     "history:sync": "node src/scripts/runHistoryScraper.js",
     "credits:add": "node src/scripts/addCredits.js"

@@ -16,6 +16,7 @@ const SUITES = [
   { modulePath: './manifest.test.js', exportName: 'runManifestTests' },
   { modulePath: './policyGuard.test.js', exportName: 'runPolicyGuardTests' },
   { modulePath: './billingStore.test.js', exportName: 'runBillingStoreTests' },
+  { modulePath: './billingReliability.test.js', exportName: 'runBillingReliabilityTests' },
 ];
 
 async function runSuite({ modulePath = '', exportName = '' } = {}) {

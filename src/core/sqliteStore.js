@@ -12,6 +12,20 @@ const DB_STARTUP_QUICK_CHECK =
   String(process.env.DB_STARTUP_QUICK_CHECK ?? 'true').toLowerCase() !== 'false';
 const ODDS_CACHE_SELF_HEAL_ENABLED =
   String(process.env.ODDS_CACHE_SELF_HEAL_ENABLED ?? 'true').toLowerCase() !== 'false';
+const SQLITE_BUSY_TIMEOUT_MS = Number(process.env.SQLITE_BUSY_TIMEOUT_MS ?? '5000');
+const SQLITE_WAL_AUTOCHECKPOINT_PAGES = Number(
+  process.env.SQLITE_WAL_AUTOCHECKPOINT_PAGES ?? '1000'
+);
+
+function normalizeSynchronousMode(raw = '') {
+  const value = String(raw || 'FULL').trim().toUpperCase();
+  if (value === 'OFF' || value === 'NORMAL' || value === 'FULL' || value === 'EXTRA') {
+    return value;
+  }
+  return 'FULL';
+}
+
+const SQLITE_SYNCHRONOUS_MODE = normalizeSynchronousMode(process.env.SQLITE_SYNCHRONOUS || 'FULL');
 
 let dbInstance = null;
 let oddsCacheRecoveryInFlight = false;
@@ -651,7 +665,9 @@ export function getDb() {
   ensureDir(DB_PATH);
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
-  db.pragma('busy_timeout = 5000');
+  db.pragma(`busy_timeout = ${Math.max(1000, Number(SQLITE_BUSY_TIMEOUT_MS) || 5000)}`);
+  db.pragma(`wal_autocheckpoint = ${Math.max(100, Number(SQLITE_WAL_AUTOCHECKPOINT_PAGES) || 1000)}`);
+  db.pragma(`synchronous = ${SQLITE_SYNCHRONOUS_MODE}`);
   db.pragma('foreign_keys = ON');
   initSchema(db);
   ensureBetSchema(db);

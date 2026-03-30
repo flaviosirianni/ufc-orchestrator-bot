@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import '../../core/env.js';
 
@@ -25,6 +26,13 @@ function ensureDir(dirPath = '') {
   if (!fs.existsSync(normalized)) {
     fs.mkdirSync(normalized, { recursive: true });
   }
+}
+
+function fileSha256(filePath = '') {
+  const normalized = String(filePath || '').trim();
+  if (!normalized || !fs.existsSync(normalized)) return '';
+  const payload = fs.readFileSync(normalized);
+  return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
 function nowStamp() {
@@ -134,6 +142,7 @@ export async function createUfcDbBackup({
   dbPath = process.env.DB_PATH || '',
   backupDir = process.env.UFC_DB_BACKUP_DIR || '',
   retentionDays = toPositiveInt(process.env.UFC_DB_BACKUP_RETENTION_DAYS, 14),
+  verifyBackup = isFeatureEnabled(process.env.UFC_DB_BACKUP_VERIFY_RESTORE, true),
 } = {}) {
   const normalizedDbPath = String(dbPath || '').trim();
   const resolvedBackupDir = String(backupDir || '').trim() || resolveDefaultBackupDir(normalizedDbPath);
@@ -157,6 +166,21 @@ export async function createUfcDbBackup({
 
   fs.renameSync(tempFile, finalFile);
   fs.chmodSync(finalFile, 0o600);
+  const backupVerification = verifyBackup
+    ? verifyUfcDb({ dbPath: finalFile })
+    : { ok: true, skipped: true };
+  if (!backupVerification.ok) {
+    fs.rmSync(finalFile, { force: true });
+    return {
+      ok: false,
+      error: 'backup_verification_failed',
+      dbPath: normalizedDbPath,
+      backupDir: resolvedBackupDir,
+      backupFile: finalFile,
+      backupVerification,
+      createdAt: new Date().toISOString(),
+    };
+  }
   const pruned = pruneOldBackups(resolvedBackupDir, toPositiveInt(retentionDays, 14));
   const stat = fs.statSync(finalFile);
 
@@ -166,6 +190,8 @@ export async function createUfcDbBackup({
     backupDir: resolvedBackupDir,
     backupFile: finalFile,
     sizeBytes: Number(stat.size) || 0,
+    sha256: fileSha256(finalFile),
+    backupVerification,
     pruned,
     createdAt: new Date().toISOString(),
   };
@@ -177,6 +203,7 @@ export function startUfcDbReliabilityLoop({
   backupDir = process.env.UFC_DB_BACKUP_DIR || '',
   intervalMs = toPositiveInt(process.env.UFC_DB_BACKUP_INTERVAL_MS, 6 * 60 * 60 * 1000),
   retentionDays = toPositiveInt(process.env.UFC_DB_BACKUP_RETENTION_DAYS, 14),
+  verifyBackup = isFeatureEnabled(process.env.UFC_DB_BACKUP_VERIFY_RESTORE, true),
   logger = console,
 } = {}) {
   if (!enabled) {
@@ -200,6 +227,7 @@ export function startUfcDbReliabilityLoop({
         dbPath,
         backupDir,
         retentionDays,
+        verifyBackup,
       });
       if (!backupResult.ok) {
         logger.error(`[ufc-db] backup failed (${trigger})`, JSON.stringify(backupResult));
@@ -230,4 +258,3 @@ export function startUfcDbReliabilityLoop({
     },
   };
 }
-
