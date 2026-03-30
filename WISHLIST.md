@@ -1136,3 +1136,54 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
      - Decision abierta: confirmar orden de consumo (free-first vs paid-first) como politica oficial.
    - **Prioridad:** media.
    - **Estado:** pendiente.
+
+36. **Edicion/correccion de ingestas ya registradas (fix de errores de carga)**
+   - **Objetivo de negocio/UX:** permitir corregir rapidamente errores de parseo o porciones sin friccion, manteniendo confianza en el historial nutricional diario.
+   - **Problema observado (ejemplo real):**
+     - En carga por texto/foto, el bot puede inferir un item o cantidad distinta a la real.
+     - Hoy el usuario no tiene un flujo guiado y seguro para editar lo ya cargado; queda obligado a compensar manualmente en mensajes posteriores.
+   - **Comportamiento deseado para el usuario final:**
+     - El usuario puede ver ingestas recientes del dia con `intake_id`.
+     - Puede corregir item puntual con lenguaje simple:
+       - `editar intake_id 123 cantidad 0.5`
+       - `editar intake_id 123 item papas fritas chicas`
+       - `eliminar intake_id 123`
+     - Luego de editar/eliminar, el bot devuelve confirmacion + totales recalculados (`Hoy`, `Rolling 7d`, `Rolling 14d`, `Estado`).
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Nuevo modulo guiado en Nutrition: `Corregir ingesta`.
+     - `IntakeEditParser` deterministico para detectar:
+       - `edit` (`intake_id`, campos permitidos),
+       - `delete` (`intake_id`),
+       - `undo` ultimo cambio.
+     - Persistencia:
+       - mantener `nutrition_intakes` como fuente activa.
+       - agregar `nutrition_intake_audit_log` append-only con:
+         - `id`, `telegram_user_id`, `intake_id`, `action` (`update|delete|undo`),
+         - `before_json`, `after_json`, `reason`, `source_message_id`, `created_at`.
+     - Guardrails:
+       - solo permitir editar filas del mismo `telegram_user_id`.
+       - campos editables acotados (`food_item`, `quantity_value`, `quantity_unit`, `kcal/prote/carbos/grasas`, `local_date`, `local_time`).
+       - validacion estricta de no negativos y formatos temporales.
+       - idempotencia por `operation_type + source_message_id`.
+     - Estados sugeridos:
+       - `awaiting_intake_edit_target`
+       - `awaiting_intake_edit_confirmation`
+       - `intake_edit_applied`
+       - `intake_edit_rejected`.
+   - **Criterios de aceptacion verificables:**
+     - El usuario puede corregir o eliminar una ingesta por `intake_id` desde Telegram sin tocar DB manualmente.
+     - Toda mutacion deja rastro en audit log con before/after.
+     - El bot nunca confirma edicion si el `write` falla.
+     - Totales diarios/rolling quedan consistentes inmediatamente despues de la correccion.
+   - **Pruebas de regresion necesarias:**
+     - Edit de cantidad y macros en `intake_id` valido.
+     - Delete de `intake_id` valido + recalculo de resumen.
+     - Intento de editar `intake_id` de otro usuario -> bloqueado.
+     - Reintento del mismo mensaje -> idempotente (sin doble mutacion).
+     - Undo del ultimo cambio aplicado.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: elegir si `delete` es hard delete o soft delete (`deleted_at`) en `nutrition_intakes`.
+     - Decision abierta: definir hasta cuantas horas/dias hacia atras se puede editar sin confirmacion adicional.
+     - Decision abierta: definir si el flujo requiere confirmacion explicita para `delete`.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
