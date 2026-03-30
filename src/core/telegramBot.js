@@ -361,6 +361,7 @@ const QUICK_ACTION_HINTS = {
     'Formato simple recomendado:',
     '- `13:30 pollo con arroz + ensalada`',
     '- `mate con 2 tostadas con queso`',
+    'También podés mandar foto de la comida: si hay buena claridad la registro; si no, te pido confirmación.',
     'Si no aclarás fecha/hora, uso ahora en tu timezone.',
   ].join('\n'),
   nutrition_log_weighin: [

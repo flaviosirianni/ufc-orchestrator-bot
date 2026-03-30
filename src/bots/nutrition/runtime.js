@@ -60,6 +60,7 @@ const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const CREDIT_ENFORCE = String(process.env.CREDIT_ENFORCE ?? 'true').toLowerCase() !== 'false';
 const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
+const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
 
 function parseModelCandidates(raw = '') {
   return String(raw || '')
@@ -415,21 +416,35 @@ function formatQuantityText(value = null, unit = '') {
   return normalizedUnit || 'porcion';
 }
 
-function formatIntakeDetailLine(row = {}, { includeTime = false } = {}) {
+function normalizeConfidenceLabel(value = '', fallback = 'media') {
+  const normalized = normalizeText(value);
+  if (normalized === 'alta' || normalized === 'media' || normalized === 'baja') {
+    return normalized;
+  }
+  if (normalized === 'high') return 'alta';
+  if (normalized === 'medium') return 'media';
+  if (normalized === 'low') return 'baja';
+  return fallback;
+}
+
+function formatIntakeDetailLine(row = {}, { includeTime = false, includeConfidence = false } = {}) {
   const food = String(row?.foodItem || '').trim() || 'item';
   const quantity = formatQuantityText(row?.quantityValue, row?.quantityUnit);
   const kcal = formatNumberCompact(row?.caloriesKcal);
   const protein = formatNumberCompact(row?.proteinG);
   const carbs = formatNumberCompact(row?.carbsG);
   const fat = formatNumberCompact(row?.fatG);
+  const confidence = normalizeConfidenceLabel(row?.confidence, 'media');
   const prefix = includeTime && row?.localTime ? `${row.localTime} | ` : '';
-  return `- ${prefix}${food} (${quantity}) | ${kcal} kcal | P ${protein} g | C ${carbs} g | G ${fat} g`;
+  const confidenceSuffix = includeConfidence ? ` | Conf: ${confidence}` : '';
+  return `- ${prefix}${food} (${quantity}) | ${kcal} kcal | P ${protein} g | C ${carbs} g | G ${fat} g${confidenceSuffix}`;
 }
 
 function buildIntakeDetailsBlock({
   title = '🧾 Detalle registrado',
   rows = [],
   includeTime = false,
+  includeConfidence = false,
   chronological = false,
   emptyLine = '- (sin datos)',
 } = {}) {
@@ -440,7 +455,7 @@ function buildIntakeDetailsBlock({
   const ordered = chronological ? [...rows].reverse() : rows;
   return [
     title,
-    ...ordered.map((row) => formatIntakeDetailLine(row, { includeTime })),
+    ...ordered.map((row) => formatIntakeDetailLine(row, { includeTime, includeConfidence })),
   ];
 }
 
@@ -1050,6 +1065,7 @@ function buildParsedIntakeFromStructured({
   structured = {},
   catalogRows = [],
   userDefaultRows = [],
+  inferenceSource = 'text',
 } = {}) {
   const temporal = resolveTemporalFromStructured({
     rawMessage,
@@ -1090,9 +1106,10 @@ function buildParsedIntakeFromStructured({
           proteinG: estimatedTotals.proteinG,
           carbsG: estimatedTotals.carbsG,
           fatG: estimatedTotals.fatG,
-          confidence: String(structuredItem?.confidence || 'baja').trim() || 'baja',
+          confidence: normalizeConfidenceLabel(structuredItem?.confidence, 'baja'),
           source: 'estimacion_gpt',
           brandOrNotes: String(structuredItem?.brand || '').trim() || null,
+          inferenceSource,
         });
         continue;
       }
@@ -1117,12 +1134,13 @@ function buildParsedIntakeFromStructured({
       proteinG: roundMacro((Number(entry.proteinG) || 0) * factor),
       carbsG: roundMacro((Number(entry.carbsG) || 0) * factor),
       fatG: roundMacro((Number(entry.fatG) || 0) * factor),
-      confidence: 'media',
+      confidence: normalizeConfidenceLabel(structuredItem?.confidence, 'media'),
       source: entry.source || 'base_estandar',
       brandOrNotes: entry.brand || null,
       catalogItemId: Number(entry.id) || null,
       inputAlias: String(structuredItem?.foodName || '').trim() || null,
       matchedPreferenceAlias: resolved?.matchedPreferenceAlias || null,
+      inferenceSource,
     });
   }
 
@@ -1321,12 +1339,151 @@ async function extractNutritionLabelFromImage({
   };
 }
 
+async function inferMealIntakeFromImage({
+  openai,
+  modelCandidates = [],
+  inputItems = [],
+  userMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const instructions = [
+    'Sos un parser visual de ingestas para nutricion.',
+    'Debes analizar foto(s) de comida y devolver JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action":"meal_log_ready|meal_needs_confirmation|nutrition_label|not_food|unclear_image",',
+    '  "overall_confidence":"alta|media|baja",',
+    '  "temporal":{"local_date":"YYYY-MM-DD|null","local_time":"HH:MM|null"},',
+    '  "items":[{"catalog_id":number|null,"food_name":"string","brand":"string","quantity_value":number|string|null,"quantity_unit":"string","confidence":"alta|media|baja","estimated_totals":{"calories_kcal":number,"protein_g":number,"carbs_g":number,"fat_g":number}|null}],',
+    '  "confirmation_question":"string",',
+    '  "should_request_label_photo":true|false,',
+    '  "note":"string"',
+    '}',
+    'Reglas:',
+    '- Si la imagen principal es una tabla nutricional/etiqueta: action=nutrition_label.',
+    '- Si es comida/plato y podés inferir item(s) + porciones razonables: action=meal_log_ready.',
+    '- Si hay comida pero duda material (item o porción): action=meal_needs_confirmation.',
+    '- En meal_needs_confirmation, igual devolvé tu mejor inferencia en items + confirmation_question breve.',
+    '- Solo usar not_food si no hay comida registrable.',
+    '- Solo usar unclear_image si la imagen está demasiado borrosa o incompleta.',
+    '- En cada item, incluir estimated_totals para kcal/prote/carbos/grasas si no hay catalog_id exacto.',
+    '- Si el alimento parece de paquete sin certeza de etiqueta, should_request_label_photo=true.',
+    '- No inventes catalog_id.',
+    '- Nunca devuelvas texto fuera del JSON.',
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `Timezone usuario: ${userTimeZone}\nTexto opcional del usuario: ${
+              String(userMessage || '').trim() || '(vacio)'
+            }`,
+          },
+          ...inputItems,
+        ],
+      },
+    ],
+  });
+
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  const rawItems = Array.isArray(json.items) ? json.items : [];
+
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || '').trim() || 'unclear_image',
+    overallConfidence: normalizeConfidenceLabel(json.overall_confidence, 'baja'),
+    temporal: {
+      localDate: String(json?.temporal?.local_date || '').trim(),
+      localTime: String(json?.temporal?.local_time || '').trim(),
+    },
+    confirmationQuestion: String(json.confirmation_question || '').trim(),
+    shouldRequestLabelPhoto: Boolean(json.should_request_label_photo),
+    note: String(json.note || '').trim(),
+    items: rawItems
+      .map((item) => ({
+        catalogId: Number(item?.catalog_id),
+        foodName: String(item?.food_name || '').trim(),
+        brand: String(item?.brand || '').trim(),
+        quantityValue: parseFlexibleNumber(item?.quantity_value),
+        quantityUnit: String(item?.quantity_unit || '').trim(),
+        confidence: normalizeConfidenceLabel(item?.confidence, 'media'),
+        estimatedTotals: item?.estimated_totals
+          ? {
+              caloriesKcal: Number(item?.estimated_totals?.calories_kcal),
+              proteinG: Number(item?.estimated_totals?.protein_g),
+              carbsG: Number(item?.estimated_totals?.carbs_g),
+              fatG: Number(item?.estimated_totals?.fat_g),
+            }
+          : null,
+      }))
+      .filter((item) => item.foodName || Number.isFinite(item.catalogId)),
+  };
+}
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function isImageDraftConfirmIntent(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return (
+    /^(si|sí|ok|dale|confirmo|confirmado)\b/.test(normalized) ||
+    /\b(registra|registrar|anota|anotalo|carga|cargalo)\b.*\b(eso|asi|así)\b/.test(normalized)
+  );
+}
+
+function isImageDraftCancelIntent(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(cancela|cancelar|descarta|descartar|no registrar|no cargues|no anotes)\b/.test(
+    normalized
+  );
+}
+
+function getPendingImageIntakeDraft(draftsByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return null;
+  const draft = draftsByUser.get(key) || null;
+  if (!draft) return null;
+  if (Number(draft.expiresAt || 0) <= Date.now()) {
+    draftsByUser.delete(key);
+    return null;
+  }
+  return draft;
+}
+
+function setPendingImageIntakeDraft(draftsByUser, userId = '', draft = {}) {
+  const key = String(userId || '').trim();
+  if (!key || !draft || typeof draft !== 'object') return;
+  draftsByUser.set(key, {
+    ...draft,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + IMAGE_INTAKE_DRAFT_TTL_MS,
+  });
+}
+
+function consumePendingImageIntakeDraft(draftsByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return null;
+  const draft = getPendingImageIntakeDraft(draftsByUser, key);
+  if (!draft) return null;
+  draftsByUser.delete(key);
+  return draft;
 }
 
 function looksLikeSummaryQuestion(text = '') {
@@ -1512,6 +1669,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   );
   const promptSnippet = loadPromptFile(manifest);
   const chatIdByUser = new Map();
+  const pendingImageIntakeDraftByUser = new Map();
   const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
   const defaultBackupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : '';
   const nutritionDbReliability = startNutritionDbReliabilityLoop({
@@ -1871,8 +2029,79 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           shouldCharge = true;
         }
       } else {
-        const shouldTryLabelExtraction = hasMedia && (!cleanMessage || looksLikeLabelIntent(cleanMessage));
-        if (shouldTryLabelExtraction) {
+        const catalogCandidates = cleanMessage
+          ? findFoodCatalogCandidates(cleanMessage, { limit: 60 })
+          : [];
+        const defaultRowsRaw = listNutritionUserProductDefaults(userId, { limit: 30 });
+        const defaultRowsAsCatalog = mapDefaultRowsToPreferredCatalogRows(defaultRowsRaw);
+        const userDefaultMatches = cleanMessage
+          ? findNutritionUserPreferredCatalogEntries(userId, cleanMessage, { limit: 40 })
+          : [];
+        const userDefaultRows = mergeCatalogRows(userDefaultMatches, defaultRowsAsCatalog);
+        const catalogFallbackRows = listFoodCatalogEntries().slice(0, 160);
+        const catalogRowsForParsing = mergeCatalogRows(
+          userDefaultRows,
+          mergeCatalogRows(catalogCandidates, catalogFallbackRows)
+        );
+        const catalogRowsForNormalization = catalogRowsForParsing.length
+          ? catalogRowsForParsing
+          : getFoodCatalogPreview({ limit: 60 });
+
+        let parsed = null;
+        let lexicalParsed = null;
+        let modelStructured = null;
+        let modelNormalization = null;
+        let shouldRequestLabelPhotoHint = false;
+        let includeConfidenceInReply = false;
+
+        if (!hasMedia && cleanMessage) {
+          const pendingDraft = getPendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId);
+          if (pendingDraft && isImageDraftCancelIntent(cleanMessage)) {
+            consumePendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId);
+            return 'Perfecto, descarté la inferencia anterior. Mandame otra foto o texto y lo registro.';
+          }
+          if (pendingDraft && isImageDraftConfirmIntent(cleanMessage)) {
+            const consumedDraft = consumePendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId);
+            if (consumedDraft?.parsed?.ok) {
+              parsed = consumedDraft.parsed;
+              shouldRequestLabelPhotoHint = Boolean(consumedDraft.shouldRequestLabelPhotoHint);
+              includeConfidenceInReply = true;
+            }
+          }
+        }
+
+        let imageMealResult = null;
+        if (!parsed && hasMedia) {
+          try {
+            imageMealResult = await inferMealIntakeFromImage({
+              openai,
+              modelCandidates: smartModelCandidates,
+              inputItems,
+              userMessage: cleanMessage,
+              userTimeZone,
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, imageMealResult.usage);
+            if (imageMealResult.usage) {
+              addNutritionUsageRecord(userId, {
+                guidedAction: 'log_intake_image_parser',
+                model: imageMealResult.model,
+                inputTokens: imageMealResult.usage.inputTokens,
+                outputTokens: imageMealResult.usage.outputTokens,
+                totalTokens: imageMealResult.usage.totalTokens,
+                reasoningTokens: imageMealResult.usage.reasoningTokens,
+                cachedTokens: imageMealResult.usage.cachedTokens,
+                rawUsage: imageMealResult.usage.rawUsage,
+              });
+            }
+          } catch (imageMealError) {
+            console.error('[nutrition-runtime] meal image parser failed', imageMealError);
+          }
+        }
+
+        const shouldTryLabelExtraction =
+          hasMedia &&
+          (looksLikeLabelIntent(cleanMessage) || imageMealResult?.action === 'nutrition_label');
+        if (!parsed && shouldTryLabelExtraction) {
           try {
             const labelResult = await extractNutritionLabelFromImage({
               openai,
@@ -1936,56 +2165,86 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
                   .filter(Boolean)
                   .join('\n');
               }
-            } else if (!cleanMessage) {
-              if (labelResult.action === 'not_nutrition_label') {
-                return [
-                  'No detecté una tabla nutricional clara en la imagen.',
-                  'Si querés cargar un producto de paquete, mandá foto de la etiqueta completa (tabla + porción).',
-                  'Si querés registrar una comida ahora, mandala en texto: `hora + lo ingerido`.',
-                ].join('\n');
-              }
+            } else if (!cleanMessage && imageMealResult?.action === 'nutrition_label') {
               return [
-                'No pude leer bien la tabla nutricional.',
-                'Mandá una foto más nítida y frontal de la etiqueta (porción, kcal, proteínas, carbos, grasas).',
+                'No pude leer completa la tabla nutricional.',
+                'Mandá foto frontal y nítida donde se vea porción + kcal + proteínas + carbos + grasas.',
               ].join('\n');
             }
           } catch (labelError) {
             console.error('[nutrition-runtime] label extraction failed', labelError);
-            if (!cleanMessage) {
+            if (!cleanMessage && imageMealResult?.action === 'nutrition_label') {
               return [
-                'No pude procesar la imagen ahora mismo.',
-                'Si querés cargar producto, reenviá foto de etiqueta; si querés registrar comida, mandala en texto.',
+                'No pude procesar la etiqueta ahora mismo.',
+                'Reintentá con una foto más nítida y frontal.',
               ].join('\n');
             }
           }
         }
 
-        let parsed = parseIntakePayload({
-          rawMessage: cleanMessage,
-          userTimeZone,
-        });
-        const lexicalParsed = parsed;
+        if (
+          !parsed &&
+          imageMealResult &&
+          (imageMealResult.action === 'meal_log_ready' || imageMealResult.action === 'meal_needs_confirmation') &&
+          imageMealResult.items?.length
+        ) {
+          const parsedFromImage = buildParsedIntakeFromStructured({
+            userId,
+            rawMessage: cleanMessage,
+            userTimeZone,
+            structured: {
+              temporal: imageMealResult.temporal,
+              items: imageMealResult.items,
+            },
+            catalogRows: catalogRowsForParsing,
+            userDefaultRows,
+            inferenceSource: 'image',
+          });
 
-        const catalogCandidates = cleanMessage
-          ? findFoodCatalogCandidates(cleanMessage, { limit: 60 })
-          : [];
-        const defaultRowsRaw = listNutritionUserProductDefaults(userId, { limit: 30 });
-        const defaultRowsAsCatalog = mapDefaultRowsToPreferredCatalogRows(defaultRowsRaw);
-        const userDefaultMatches = cleanMessage
-          ? findNutritionUserPreferredCatalogEntries(userId, cleanMessage, { limit: 40 })
-          : [];
-        const userDefaultRows = mergeCatalogRows(userDefaultMatches, defaultRowsAsCatalog);
-        const catalogFallbackRows = listFoodCatalogEntries().slice(0, 160);
-        const catalogRowsForParsing = mergeCatalogRows(
-          userDefaultRows,
-          mergeCatalogRows(catalogCandidates, catalogFallbackRows)
-        );
-        const catalogRowsForNormalization = catalogRowsForParsing.length
-          ? catalogRowsForParsing
-          : getFoodCatalogPreview({ limit: 60 });
+          if (parsedFromImage.ok) {
+            shouldRequestLabelPhotoHint = Boolean(imageMealResult.shouldRequestLabelPhoto);
+            includeConfidenceInReply = true;
+            if (
+              imageMealResult.action === 'meal_needs_confirmation' ||
+              imageMealResult.overallConfidence === 'baja'
+            ) {
+              setPendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId, {
+                parsed: parsedFromImage,
+                shouldRequestLabelPhotoHint,
+              });
+              return [
+                '👀 Esto es lo que inferí de la foto (sin registrar todavía):',
+                ...buildIntakeDetailsBlock({
+                  title: '🧾 Posible registro',
+                  rows: parsedFromImage.items,
+                  includeTime: false,
+                  includeConfidence: true,
+                  chronological: false,
+                }),
+                imageMealResult.confirmationQuestion || '¿Está correcto para registrarlo?',
+                'Respondé `sí` para registrarlo tal cual, o corregime en texto (ej: `22:10 hamburguesa + papas fritas`).',
+              ].join('\n');
+            }
+            parsed = parsedFromImage;
+          }
+        }
 
-        let modelStructured = null;
-        if (cleanMessage) {
+        if (!parsed && hasMedia && !cleanMessage && imageMealResult?.action === 'not_food') {
+          return [
+            'No detecté una comida registrable en la foto.',
+            'Si querés, mandame otra foto más clara o texto simple: `hora + lo ingerido`.',
+          ].join('\n');
+        }
+
+        if (!parsed) {
+          parsed = parseIntakePayload({
+            rawMessage: cleanMessage,
+            userTimeZone,
+          });
+          lexicalParsed = parsed;
+        }
+
+        if (!parsed?.ok && cleanMessage) {
           try {
             modelStructured = await parseStructuredIntakeWithModel({
               openai,
@@ -2013,7 +2272,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           }
         }
 
-        if (modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
+        if (!parsed?.ok && modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
           const parsedFromStructured = buildParsedIntakeFromStructured({
             userId,
             rawMessage: cleanMessage,
@@ -2021,14 +2280,14 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             structured: modelStructured,
             catalogRows: catalogRowsForParsing,
             userDefaultRows,
+            inferenceSource: 'text_structured',
           });
-          if (parsedFromStructured.ok || !parsed.ok) {
+          if (parsedFromStructured.ok || !parsed?.ok) {
             parsed = parsedFromStructured;
           }
         }
 
-        let modelNormalization = null;
-        if (cleanMessage) {
+        if (!parsed?.ok && cleanMessage) {
           try {
             modelNormalization = await normalizeIntakeWithModel({
               openai,
@@ -2055,7 +2314,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           }
         }
 
-        if (!parsed.ok && modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
+        if (!parsed?.ok && modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
           const parsedFromModel = parseIntakePayload({
             rawMessage: modelNormalization.normalizedText,
             userTimeZone,
@@ -2065,10 +2324,14 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           }
         }
 
-        if (!parsed.ok) {
+        if (modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto) {
+          shouldRequestLabelPhotoHint = true;
+        }
+
+        if (!parsed?.ok) {
           if (
             modelStructured?.action === 'ask_label_photo' ||
-            (modelStructured?.shouldRequestLabelPhoto && !lexicalParsed.ok)
+            (modelStructured?.shouldRequestLabelPhoto && !lexicalParsed?.ok)
           ) {
             return [
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
@@ -2091,12 +2354,18 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           if (modelNormalization?.action === 'ask_clarification' && modelNormalization.clarificationQuestion) {
             return [modelNormalization.clarificationQuestion, buildPhotoHintLine()].join('\n');
           }
-          if (parsed.error === 'partial_resolution' && parsed.unresolvedItems?.length) {
+          if (parsed?.error === 'partial_resolution' && parsed.unresolvedItems?.length) {
             return [
               'Necesito aclarar algunos items antes de registrar.',
               `No pude interpretar: ${parsed.unresolvedItems.join(', ')}`,
               'Mandalo en formato simple por item: `hora alimento cantidad`.',
               buildPhotoHintLine(),
+            ].join('\n');
+          }
+          if (hasMedia && !cleanMessage) {
+            return [
+              'No pude inferir la comida con suficiente claridad.',
+              'Si querés, mandame otra foto más nítida o texto simple: `hora + lo ingerido`.',
             ].join('\n');
           }
           return [
@@ -2126,6 +2395,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         if (!intakeWrite?.ok) {
           return formatWriteFailureReply('log_intake', intakeWrite?.error || 'db_write_failed');
         }
+        pendingImageIntakeDraftByUser.delete(userId);
 
         for (const parsedItem of Array.isArray(parsed.items) ? parsed.items : []) {
           const catalogItemId = Number(parsedItem?.catalogItemId);
@@ -2181,13 +2451,16 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             title: '🧾 Detalle registrado',
             rows: parsed.items,
             includeTime: false,
+            includeConfidence:
+              includeConfidenceInReply ||
+              parsed.items.some((item) => String(item?.inferenceSource || '') === 'image'),
             chronological: false,
           }),
           formatMacroLine('📊 Hoy: ', summary.today),
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
           `🎯 Estado: ${status}`,
-          modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto
+          shouldRequestLabelPhotoHint
             ? '📦 Si es un producto de paquete, mandame foto de la etiqueta nutricional y lo agrego a INFO_NUTRICIONAL.'
             : null,
           formatIdempotencyNotice(intakeWrite.idempotencyStatus),
