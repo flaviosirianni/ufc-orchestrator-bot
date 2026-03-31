@@ -27,7 +27,6 @@ const CALLBACK_DEDUP_MAX_KEYS_PER_CHAT = Number(
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
-const BOT_ALLOWED_TELEGRAM_USER_IDS = process.env.BOT_ALLOWED_TELEGRAM_USER_IDS || '';
 const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
 const GUIDED_MENU_IDS = new Set(['default', 'ufc_default', 'ufc_v1', 'nutrition_v1']);
 const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
@@ -466,15 +465,6 @@ function toPositiveInt(value, fallback = 0) {
     return Number(fallback) || 0;
   }
   return Math.round(parsed);
-}
-
-function parseAllowedUserIds(raw = '') {
-  return new Set(
-    String(raw || '')
-      .split(',')
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-  );
 }
 
 export function normalizeGuidedMenuId(value = '') {
@@ -1100,14 +1090,6 @@ export function startTelegramBot(router, options = {}) {
     CALLBACK_DEDUP_MAX_KEYS_PER_CHAT
   );
   const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : Date.now;
-  const allowedUserIds =
-    options.allowedTelegramUserIds instanceof Set
-      ? options.allowedTelegramUserIds
-      : parseAllowedUserIds(
-          Array.isArray(options.allowedTelegramUserIds)
-            ? options.allowedTelegramUserIds.join(',')
-            : String(options.allowedTelegramUserIds || BOT_ALLOWED_TELEGRAM_USER_IDS)
-        );
   const defaultGuidedAction = getDefaultGuidedAction({
     guidedMenuId,
     guidedLedgerEnabled,
@@ -1257,19 +1239,6 @@ export function startTelegramBot(router, options = {}) {
     };
   }
 
-  function isUserAllowed(userId) {
-    const normalizedUserId = String(userId || '').trim();
-    if (!normalizedUserId) return false;
-    if (!allowedUserIds.size) return true;
-    return allowedUserIds.has(normalizedUserId);
-  }
-
-  async function sendAccessDenied(chatId) {
-    return sendBotMessage(
-      chatId,
-      '🔒 Esta instancia está en QA privado. Tu usuario no está habilitado todavía.'
-    );
-  }
 
   async function sendBotMessage(
     chatId,
@@ -1441,12 +1410,6 @@ export function startTelegramBot(router, options = {}) {
 
   async function processSingleMessage(msg) {
     const chatId = msg.chat.id;
-    const fromUserId = msg?.from?.id ? String(msg.from.id) : '';
-    if (!isUserAllowed(fromUserId)) {
-      await sendAccessDenied(chatId);
-      return;
-    }
-
     let userMessage = msg.text || msg.caption || '';
 
     const inputItems = [];
@@ -1593,11 +1556,6 @@ export function startTelegramBot(router, options = {}) {
 
     const first = messages[0];
     const chatId = first.chat.id;
-    const fromUserId = first?.from?.id ? String(first.from.id) : '';
-    if (!isUserAllowed(fromUserId)) {
-      await sendAccessDenied(chatId);
-      return;
-    }
     const inputItems = [];
     const textParts = [];
     const mediaStats = { imageCount: 0, audioSeconds: 0 };
@@ -1696,10 +1654,6 @@ export function startTelegramBot(router, options = {}) {
       return;
     }
     const safeUserId = query?.from?.id ? String(query.from.id) : '';
-    if (!isUserAllowed(safeUserId)) {
-      await sendAccessDenied(chatId);
-      return;
-    }
 
     if (
       shouldSkipDuplicateCallback({

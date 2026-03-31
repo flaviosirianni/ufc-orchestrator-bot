@@ -493,32 +493,6 @@ export async function runTelegramBotTests() {
     assert.match(out.text, /resumen/i);
   });
 
-  tests.push(async () => {
-    const fakeBot = new FakeTelegramBot();
-    const router = createRouterSpy();
-
-    startTelegramBot(router, {
-      botInstance: fakeBot,
-      interactionMode: 'guided_strict',
-      guidedMenuId: 'nutrition_v1',
-      guidedLedgerEnabled: false,
-      allowedTelegramUserIds: ['999'],
-      guidedQuotesTextFallback: true,
-      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
-    });
-
-    await fakeBot.emit(
-      'message',
-      createBaseMessage({
-        text: '13:00 pollo con arroz',
-        userId: 200,
-      })
-    );
-
-    assert.equal(router.calls.length, 0);
-    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
-    assert.match(out.text, /qa privado/i);
-  });
 
   tests.push(async () => {
     const fakeBot = new FakeTelegramBot();
