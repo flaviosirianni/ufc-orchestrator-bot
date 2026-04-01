@@ -191,3 +191,53 @@ function _buildStats(row, prefix) {
 function _parseBonuses(raw) {
   try { return JSON.parse(raw); } catch { return []; }
 }
+
+// ---------------------------------------------------------------------------
+// Upcoming fights
+// ---------------------------------------------------------------------------
+
+/**
+ * getUpcomingFights({ eventName, limit })
+ *
+ * Returns scheduled (not yet fought) fights from the upcoming_fights table.
+ * Optionally filter by event name substring.
+ *
+ * @returns {{ fights: object[] } | { ok: false, error: string }}
+ */
+export function getUpcomingFights({ eventName, limit = 50 } = {}) {
+  if (!db) {
+    return {
+      ok: false,
+      error: 'ufc_stats.db no disponible. Configurá UFC_STATS_DB_PATH y ejecutá el scraper.',
+    };
+  }
+
+  const n = Math.min(Math.max(1, Number(limit) || 50), 200);
+
+  let rows;
+  if (eventName && typeof eventName === 'string' && eventName.trim()) {
+    const like = `%${eventName.trim()}%`;
+    rows = db
+      .prepare(
+        `SELECT * FROM upcoming_fights
+         WHERE event_name LIKE ?
+         ORDER BY event_date ASC, card_order ASC
+         LIMIT ?`
+      )
+      .all(like, n);
+  } else {
+    rows = db
+      .prepare(
+        `SELECT * FROM upcoming_fights
+         ORDER BY event_date ASC, card_order ASC
+         LIMIT ?`
+      )
+      .all(n);
+  }
+
+  if (rows.length === 0) {
+    return { ok: false, error: 'No se encontraron peleas programadas en upcoming_fights.' };
+  }
+
+  return { fights: rows };
+}

@@ -136,6 +136,27 @@ const FUNCTION_TOOLS = [
   },
   {
     type: 'function',
+    name: 'get_upcoming_fights',
+    description:
+      'Lista las peleas programadas (futuras) desde ufcstats.com: evento, fecha, peleadores y categoría de peso. Úsalo para conocer el fight card de próximos eventos o buscar quién pelea cuándo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        event_name: {
+          type: 'string',
+          description: 'Filtrar por nombre de evento (substring). Opcional.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Máximo de peleas a retornar (default 50).',
+        },
+      },
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'get_user_profile',
     description:
       'Lee el perfil de usuario guardado en memoria conversacional (bankroll, unidad, perfil de riesgo, notas, apuestas previas).',
@@ -8581,6 +8602,16 @@ export function createBettingWizard({
             fighterName: args.fighter_name,
             limit: args.limit,
             includeRounds: args.include_rounds,
+          });
+        }
+
+        case 'get_upcoming_fights': {
+          if (!ufcStats?.getUpcomingFights) {
+            return { ok: false, error: 'ufcStatsTool no disponible. Verificá UFC_STATS_DB_PATH.' };
+          }
+          return ufcStats.getUpcomingFights({
+            eventName: args.event_name,
+            limit: args.limit,
           });
         }
 
