@@ -3,6 +3,7 @@ import { startTelegramBot } from '../../core/telegramBot.js';
 import { createRouterChain } from '../../core/routerChain.js';
 import * as sheetOps from '../../tools/sheetOpsTool.js';
 import * as fightsScalper from '../../tools/fightsScalperTool.js';
+import * as ufcStats from '../../tools/ufcStatsTool.js';
 import * as webIntel from '../../tools/webIntelTool.js';
 import { createOddsApiTool } from '../../tools/oddsApiTool.js';
 import { createBettingWizard } from '../../agents/bettingWizard.js';
@@ -152,6 +153,8 @@ export async function bootstrapBot({ manifest } = {}) {
     },
   });
 
+  ufcStats.initUfcStatsTool({ dbPath: process.env.UFC_STATS_DB_PATH });
+
   fightsScalper.configureFightHistoryStore({
     getCacheSnapshot: getFightHistoryCacheSnapshot,
     upsertCacheSnapshot: upsertFightHistoryCacheSnapshot,
@@ -164,6 +167,7 @@ export async function bootstrapBot({ manifest } = {}) {
   const bettingWizard = createBettingWizard({
     sheetOps,
     fightsScalper,
+    ufcStats,
     webIntel,
     conversationStore,
     userStore: {

@@ -110,6 +110,32 @@ const FUNCTION_TOOLS = [
   },
   {
     type: 'function',
+    name: 'get_fighter_detailed_stats',
+    description:
+      'Obtiene estadísticas detalladas de peleas desde ufcstats.com: strikes significativos, takedowns, control time, knockdowns y desglose por round. Úsalo para análisis cuantitativo del estilo de pelea de un peleador (volumen, precisión, actividad en clinch/suelo, etc.).',
+    parameters: {
+      type: 'object',
+      properties: {
+        fighter_name: {
+          type: 'string',
+          description: 'Nombre del peleador a consultar.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Últimas N peleas a retornar (default 8, max 20).',
+        },
+        include_rounds: {
+          type: 'boolean',
+          description: 'Si true, incluye desglose estadístico por round.',
+        },
+      },
+      required: ['fighter_name'],
+      additionalProperties: false,
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'get_user_profile',
     description:
       'Lee el perfil de usuario guardado en memoria conversacional (bankroll, unidad, perfil de riesgo, notas, apuestas previas).',
@@ -5775,6 +5801,7 @@ async function runResponsesWithTools({
 
 export function createBettingWizard({
   fightsScalper,
+  ufcStats,
   conversationStore,
   userStore,
   client: providedClient,
@@ -8544,6 +8571,17 @@ export function createBettingWizard({
             historyToolResult.latestFightDate || null;
 
           return historyToolResult;
+        }
+
+        case 'get_fighter_detailed_stats': {
+          if (!ufcStats?.getFighterStats) {
+            return { ok: false, error: 'ufcStatsTool no disponible. Verificá UFC_STATS_DB_PATH.' };
+          }
+          return ufcStats.getFighterStats({
+            fighterName: args.fighter_name,
+            limit: args.limit,
+            includeRounds: args.include_rounds,
+          });
         }
 
         case 'get_user_profile': {
