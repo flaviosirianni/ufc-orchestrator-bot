@@ -510,6 +510,30 @@ export function ensureNutritionSchema() {
     });
   }
 
+  // Migrations: add columns that may not exist in older DBs
+  const profileMigrations = [
+    ['edad', 'INTEGER'],
+    ['sexo', 'TEXT'],
+    ['altura_cm', 'REAL'],
+    ['peso_actual_kg', 'REAL'],
+    ['nivel_actividad', 'TEXT'],
+    ['tipo_entrenamiento', 'TEXT'],
+    ['frecuencia_entrenamiento', 'TEXT'],
+    ['alergias_intolerancias', 'TEXT'],
+    ['condicion_salud', 'TEXT'],
+    ['medicacion_relevante', 'TEXT'],
+    ['dificultad_principal', 'TEXT'],
+    ['meta_8_12_semanas', 'TEXT'],
+    ['onboarding_complete', 'INTEGER DEFAULT 0'],
+  ];
+  for (const [col, colType] of profileMigrations) {
+    try {
+      db.exec(`ALTER TABLE nutrition_profiles ADD COLUMN ${col} ${colType}`);
+    } catch {
+      // column already exists
+    }
+  }
+
   initialized = true;
 }
 
@@ -527,6 +551,19 @@ export function getNutritionProfile(userId = '') {
         target_protein_g AS targetProteinG,
         notes,
         restrictions,
+        edad,
+        sexo,
+        altura_cm AS alturaCm,
+        peso_actual_kg AS pesoActualKg,
+        nivel_actividad AS nivelActividad,
+        tipo_entrenamiento AS tipoEntrenamiento,
+        frecuencia_entrenamiento AS frecuenciaEntrenamiento,
+        alergias_intolerancias AS alergiasIntolerancias,
+        condicion_salud AS condicionSalud,
+        medicacion_relevante AS medicacionRelevante,
+        dificultad_principal AS dificultadPrincipal,
+        meta_8_12_semanas AS meta8a12semanas,
+        onboarding_complete AS onboardingComplete,
         created_at AS createdAt,
         updated_at AS updatedAt
       FROM nutrition_profiles
@@ -546,16 +583,37 @@ export function upsertNutritionProfile(userId = '', updates = {}, options = {}) 
 
   const existing = getNutritionProfile(normalizedUserId);
   const nowIso = new Date().toISOString();
+
+  function toStrOrNull(val, fallback = null) {
+    const s = String(val ?? fallback ?? '').trim();
+    return s || null;
+  }
+
   const payload = {
     userId: normalizedUserId,
-    timezone: String(updates.timezone ?? existing?.timezone ?? '').trim() || null,
-    mainGoal: String(updates.mainGoal ?? existing?.mainGoal ?? '').trim() || null,
+    timezone: toStrOrNull(updates.timezone, existing?.timezone),
+    mainGoal: toStrOrNull(updates.mainGoal, existing?.mainGoal),
     targetCaloriesKcal: toNumberOrNull(
       updates.targetCaloriesKcal ?? existing?.targetCaloriesKcal ?? null
     ),
     targetProteinG: toNumberOrNull(updates.targetProteinG ?? existing?.targetProteinG ?? null),
-    notes: String(updates.notes ?? existing?.notes ?? '').trim() || null,
-    restrictions: String(updates.restrictions ?? existing?.restrictions ?? '').trim() || null,
+    notes: toStrOrNull(updates.notes, existing?.notes),
+    restrictions: toStrOrNull(updates.restrictions, existing?.restrictions),
+    edad: updates.edad !== undefined ? (Number.isFinite(Number(updates.edad)) ? Number(updates.edad) : null) : (existing?.edad ?? null),
+    sexo: toStrOrNull(updates.sexo, existing?.sexo),
+    alturaCm: toNumberOrNull(updates.alturaCm ?? existing?.alturaCm ?? null),
+    pesoActualKg: toNumberOrNull(updates.pesoActualKg ?? existing?.pesoActualKg ?? null),
+    nivelActividad: toStrOrNull(updates.nivelActividad, existing?.nivelActividad),
+    tipoEntrenamiento: toStrOrNull(updates.tipoEntrenamiento, existing?.tipoEntrenamiento),
+    frecuenciaEntrenamiento: toStrOrNull(updates.frecuenciaEntrenamiento, existing?.frecuenciaEntrenamiento),
+    alergiasIntolerancias: toStrOrNull(updates.alergiasIntolerancias, existing?.alergiasIntolerancias),
+    condicionSalud: toStrOrNull(updates.condicionSalud, existing?.condicionSalud),
+    medicacionRelevante: toStrOrNull(updates.medicacionRelevante, existing?.medicacionRelevante),
+    dificultadPrincipal: toStrOrNull(updates.dificultadPrincipal, existing?.dificultadPrincipal),
+    meta8a12semanas: toStrOrNull(updates.meta8a12semanas, existing?.meta8a12semanas),
+    onboardingComplete: updates.onboardingComplete !== undefined
+      ? (Number(updates.onboardingComplete) || 0)
+      : (existing?.onboardingComplete ?? 0),
     createdAt: existing?.createdAt || nowIso,
     updatedAt: nowIso,
   };
@@ -574,10 +632,18 @@ export function upsertNutritionProfile(userId = '', updates = {}, options = {}) 
           `
         INSERT INTO nutrition_profiles (
           telegram_user_id, timezone, main_goal, target_calories_kcal, target_protein_g,
-          notes, restrictions, created_at, updated_at
+          notes, restrictions,
+          edad, sexo, altura_cm, peso_actual_kg, nivel_actividad, tipo_entrenamiento,
+          frecuencia_entrenamiento, alergias_intolerancias, condicion_salud, medicacion_relevante,
+          dificultad_principal, meta_8_12_semanas, onboarding_complete,
+          created_at, updated_at
         ) VALUES (
           @userId, @timezone, @mainGoal, @targetCaloriesKcal, @targetProteinG,
-          @notes, @restrictions, @createdAt, @updatedAt
+          @notes, @restrictions,
+          @edad, @sexo, @alturaCm, @pesoActualKg, @nivelActividad, @tipoEntrenamiento,
+          @frecuenciaEntrenamiento, @alergiasIntolerancias, @condicionSalud, @medicacionRelevante,
+          @dificultadPrincipal, @meta8a12semanas, @onboardingComplete,
+          @createdAt, @updatedAt
         )
         ON CONFLICT(telegram_user_id) DO UPDATE SET
           timezone = excluded.timezone,
@@ -586,6 +652,19 @@ export function upsertNutritionProfile(userId = '', updates = {}, options = {}) 
           target_protein_g = excluded.target_protein_g,
           notes = excluded.notes,
           restrictions = excluded.restrictions,
+          edad = excluded.edad,
+          sexo = excluded.sexo,
+          altura_cm = excluded.altura_cm,
+          peso_actual_kg = excluded.peso_actual_kg,
+          nivel_actividad = excluded.nivel_actividad,
+          tipo_entrenamiento = excluded.tipo_entrenamiento,
+          frecuencia_entrenamiento = excluded.frecuencia_entrenamiento,
+          alergias_intolerancias = excluded.alergias_intolerancias,
+          condicion_salud = excluded.condicion_salud,
+          medicacion_relevante = excluded.medicacion_relevante,
+          dificultad_principal = excluded.dificultad_principal,
+          meta_8_12_semanas = excluded.meta_8_12_semanas,
+          onboarding_complete = excluded.onboarding_complete,
           updated_at = excluded.updated_at
       `
         )
@@ -1596,4 +1675,77 @@ export function calculateProfileStatus(profile = {}, totals = {}) {
 
 export function toCatalogNormalizedToken(value = '') {
   return normalizeToken(value);
+}
+
+export function getTodayNutritionIntakes(userId = '', localDate = '', { limit = 30 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedDate = String(localDate || '').trim();
+  if (!normalizedUserId || !normalizedDate) return [];
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      id,
+      local_time AS localTime,
+      food_item AS foodItem,
+      quantity_value AS quantityValue,
+      quantity_unit AS quantityUnit,
+      calories_kcal AS caloriesKcal,
+      protein_g AS proteinG
+    FROM nutrition_intakes
+    WHERE telegram_user_id = ? AND local_date = ?
+    ORDER BY logged_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, normalizedDate, Math.max(1, Number(limit) || 30));
+}
+
+export function deleteNutritionIntake(userId = '', intakeId = null) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const id = Number(intakeId);
+  if (!normalizedUserId || !Number.isFinite(id) || id <= 0) {
+    return { ok: false, error: 'invalid_params' };
+  }
+  const result = getDb()
+    .prepare(`DELETE FROM nutrition_intakes WHERE id = ? AND telegram_user_id = ?`)
+    .run(id, normalizedUserId);
+  return { ok: true, deleted: result.changes > 0 };
+}
+
+export function getTodayNutritionWeighins(userId = '', localDate = '', { limit = 10 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const normalizedDate = String(localDate || '').trim();
+  if (!normalizedUserId || !normalizedDate) return [];
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      id,
+      local_time AS localTime,
+      weight_kg AS weightKg,
+      body_fat_percent AS bodyFatPercent
+    FROM nutrition_weighins
+    WHERE telegram_user_id = ? AND local_date = ?
+    ORDER BY logged_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, normalizedDate, Math.max(1, Number(limit) || 10));
+}
+
+export function deleteNutritionWeighin(userId = '', weighinId = null) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const id = Number(weighinId);
+  if (!normalizedUserId || !Number.isFinite(id) || id <= 0) {
+    return { ok: false, error: 'invalid_params' };
+  }
+  const result = getDb()
+    .prepare(`DELETE FROM nutrition_weighins WHERE id = ? AND telegram_user_id = ?`)
+    .run(id, normalizedUserId);
+  return { ok: true, deleted: result.changes > 0 };
 }

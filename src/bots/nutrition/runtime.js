@@ -41,6 +41,10 @@ import {
   setNutritionUserState,
   upsertFoodCatalogEntry,
   upsertNutritionProfile,
+  getTodayNutritionIntakes,
+  deleteNutritionIntake,
+  getTodayNutritionWeighins,
+  deleteNutritionWeighin,
 } from './nutritionStore.js';
 import { startNutritionDbReliabilityLoop } from './nutritionReliability.js';
 import {
@@ -61,6 +65,30 @@ const CREDIT_ENFORCE = String(process.env.CREDIT_ENFORCE ?? 'true').toLowerCase(
 const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
 const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
+
+const TUTORIAL_CONTENT_MAP = {
+  calorias: { title: 'Calorías: qué son y por qué importan', level: 'basico' },
+  macros: { title: 'Proteínas, carbohidratos y grasas: lo básico', level: 'basico' },
+  armar_plato: { title: 'Cómo armar un plato equilibrado', level: 'basico' },
+  etiquetas: { title: 'Cómo leer etiquetas nutricionales', level: 'basico' },
+  comer_mejor: { title: 'Comer mejor sin contar todo', level: 'basico' },
+  proteina_saciedad: { title: 'Proteína y saciedad: por qué importa y cómo repartirla', level: 'intermedio' },
+  fibra: { title: 'Fibra: la gran olvidada', level: 'intermedio' },
+  hambre_emocional: { title: 'Hambre física vs hambre emocional', level: 'intermedio' },
+  finde_social: { title: 'Fines de semana y situaciones sociales', level: 'intermedio' },
+  alcohol: { title: 'Alcohol y nutrición', level: 'intermedio' },
+  deficit_musculo: { title: 'Déficit calórico sin perder músculo', level: 'avanzado' },
+  recomposicion: { title: 'Recomposición corporal', level: 'avanzado' },
+  retencion_liquido: { title: 'Retención de líquidos: qué es y por qué pasa', level: 'avanzado' },
+  interpretar_peso: { title: 'Cómo interpretar las variaciones de peso en la balanza', level: 'avanzado' },
+  usar_bot: { title: 'Cómo usar el bot de nutrición al máximo', level: 'avanzado' },
+};
+
+const TUTORIAL_LEVEL_TOPICS = {
+  basico: ['calorias', 'macros', 'armar_plato', 'etiquetas', 'comer_mejor'],
+  intermedio: ['proteina_saciedad', 'fibra', 'hambre_emocional', 'finde_social', 'alcohol'],
+  avanzado: ['deficit_musculo', 'recomposicion', 'retencion_liquido', 'interpretar_peso', 'usar_bot'],
+};
 
 function parseModelCandidates(raw = '') {
   return String(raw || '')
@@ -700,6 +728,232 @@ async function createSmartResponse({
     throw lastError;
   }
   throw new Error('No smart model candidates configured');
+}
+
+function looksLikeDeleteIntent(text = '') {
+  const normalized = String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\b(borra|borro|borrar|elimina|eliminar|deshacer|deshace|undo|el ultimo|la ultima|lo ultimo|esa ingesta|esa comida|ese registro|ese pesaje|ese peso|el ultimo registro|la ultima ingesta|el ultimo pesaje)\b/.test(
+    normalized
+  );
+}
+
+async function resolveDeleteTargetWithModel({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  todayRows = [],
+  entityType = 'intake',
+} = {}) {
+  const isIntake = entityType === 'intake';
+  const rowLines = todayRows
+    .map((r) => {
+      if (isIntake) {
+        const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+        return `id=${r.id} | ${r.localTime || '?'} | ${r.foodItem}${qty ? ' ' + qty : ''} | ${Math.round(r.caloriesKcal || 0)} kcal`;
+      }
+      return `id=${r.id} | ${r.localTime || '?'} | ${r.weightKg} kg${r.bodyFatPercent ? ' grasa ' + r.bodyFatPercent + '%' : ''}`;
+    })
+    .join('\n');
+
+  const instructions = [
+    `Sos un asistente que identifica qué ${isIntake ? 'ingesta' : 'pesaje'} quiere borrar el usuario.`,
+    'Recibís el mensaje y la lista de registros de hoy.',
+    'Salida: JSON puro sin markdown.',
+    'Schema: {"action":"delete_single|delete_last|cannot_identify","target_id":number|null,"reason":"string"}',
+    'Reglas:',
+    '- Si dice "el último", "recién", "lo último" → action=delete_last',
+    '- Si identifica un item por nombre, hora o descripción → action=delete_single, target_id=id del match',
+    '- Si es ambiguo o no identifica ninguno → cannot_identify con reason breve',
+    '- target_id debe ser un número entero del campo id de la lista',
+  ].join('\n');
+
+  const inputText = `Mensaje: "${rawMessage}"\n\nRegistros de hoy:\n${rowLines}`;
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: inputText }] }],
+  });
+  const json = extractJsonObject(extractOutputText(smart.response)) || {};
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || 'cannot_identify').trim(),
+    targetId: json.target_id != null ? Number(json.target_id) : null,
+    reason: String(json.reason || '').trim(),
+  };
+}
+
+const ONBOARDING_GOAL_MAP = {
+  bajar_grasa: 'bajar grasa',
+  ganar_musculo: 'ganar músculo',
+  mejorar_habitos: 'mejorar hábitos',
+  comer_mejor: 'comer mejor',
+  mejorar_salud: 'mejorar salud y energía',
+};
+
+async function parseOnboardingTurnWithModel({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  existingProfile = {},
+} = {}) {
+  const instructions = [
+    'Sos el asistente de onboarding de un bot de nutrición.',
+    'Tu tarea: extraer datos del perfil del usuario y guiar el proceso de alta inicial.',
+    'Salida: JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action": "continue|complete|answer_question",',
+    '  "extracted": {',
+    '    "main_goal": string|null,',
+    '    "edad": number|null,',
+    '    "sexo": string|null,',
+    '    "altura_cm": number|null,',
+    '    "peso_actual_kg": number|null,',
+    '    "nivel_actividad": string|null,',
+    '    "tipo_entrenamiento": string|null,',
+    '    "frecuencia_entrenamiento": string|null,',
+    '    "alergias_intolerancias": string|null,',
+    '    "condicion_salud": string|null,',
+    '    "dificultad_principal": string|null,',
+    '    "target_calories_kcal": number|null,',
+    '    "target_protein_g": number|null',
+    '  },',
+    '  "next_question": string,',
+    '  "answer_text": string',
+    '}',
+    'Reglas:',
+    '- Si el mensaje comienza con "goal:" es la selección de objetivo del botón (ej: "goal:bajar_grasa"). Mapeá a main_goal y continuá.',
+    '- action=complete cuando tengas al menos: main_goal + peso_actual_kg + nivel_actividad.',
+    '- Si falta info importante, usar action=continue y hacer máximo 2 preguntas en next_question. Tono amigable y conciso.',
+    '- Si el usuario hace una pregunta nutricional en lugar de dar datos: action=answer_question, answer_text=respuesta breve (max 3 líneas), next_question=retomá donde estabas.',
+    '- En extracted, solo incluir campos que el usuario mencionó en este turno (null para el resto, NO sobreescribir con null).',
+    '- sexo: usar "masculino" o "femenino" o lo que el usuario diga.',
+    '- nivel_actividad: normalizar a sedentario/poco_activo/moderadamente_activo/muy_activo.',
+  ].join('\n');
+
+  const profileSummary = {
+    main_goal: existingProfile?.mainGoal || null,
+    edad: existingProfile?.edad || null,
+    peso_actual_kg: existingProfile?.pesoActualKg || null,
+    nivel_actividad: existingProfile?.nivelActividad || null,
+    altura_cm: existingProfile?.alturaCm || null,
+    alergias_intolerancias: existingProfile?.alergiasIntolerancias || null,
+  };
+
+  const inputText = `Perfil acumulado hasta ahora: ${JSON.stringify(profileSummary)}\n\nMensaje del usuario: ${rawMessage}`;
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: inputText }] }],
+  });
+  const json = extractJsonObject(extractOutputText(smart.response)) || {};
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: String(json.action || 'continue').trim(),
+    extracted: json.extracted || {},
+    nextQuestion: String(json.next_question || '').trim(),
+    answerText: String(json.answer_text || '').trim(),
+  };
+}
+
+function formatOnboardingSummary(profile = {}) {
+  const lines = ['✅ Perfil inicial guardado.'];
+  if (profile.mainGoal) lines.push(`- Objetivo: ${profile.mainGoal}`);
+  const bodyParts = [];
+  if (profile.pesoActualKg) bodyParts.push(`Peso: ${profile.pesoActualKg} kg`);
+  if (profile.alturaCm) bodyParts.push(`Altura: ${profile.alturaCm} cm`);
+  if (profile.edad) bodyParts.push(`Edad: ${profile.edad}`);
+  if (bodyParts.length) lines.push(`- ${bodyParts.join(' | ')}`);
+  if (profile.nivelActividad) lines.push(`- Actividad: ${profile.nivelActividad}`);
+  if (profile.alergiasIntolerancias) lines.push(`- Restricciones: ${profile.alergiasIntolerancias}`);
+  const targets = [];
+  if (profile.targetCaloriesKcal) targets.push(`${Math.round(profile.targetCaloriesKcal)} kcal`);
+  if (profile.targetProteinG) targets.push(`${Math.round(profile.targetProteinG)} g proteína`);
+  if (targets.length) lines.push(`- Target: ${targets.join(' | ')}`);
+  else lines.push('- (Podés configurar tu target con "target 2200 kcal" en Perfil/objetivos)');
+  return lines.join('\n');
+}
+
+function suggestTutorialsForGoal(mainGoal = '') {
+  const goal = String(mainGoal || '').toLowerCase();
+  let topics = [];
+  if (goal.includes('grasa') || goal.includes('bajar') || goal.includes('deficit')) {
+    topics = ['Calorías y déficit', 'Proteína y saciedad', 'Cómo interpretar el peso en la balanza'];
+  } else if (goal.includes('músculo') || goal.includes('musculo') || goal.includes('volumen') || goal.includes('ganar')) {
+    topics = ['Proteína: cuánto y cómo distribuirla', 'Recomposición corporal', 'Cómo armar un plato equilibrado'];
+  } else {
+    topics = ['Qué son las calorías', 'Cómo armar un plato equilibrado', 'Comer mejor sin contar todo'];
+  }
+  return [
+    '',
+    '📚 Te recomiendo empezar por estos tutoriales:',
+    ...topics.map((t) => `- ${t}`),
+    'Encontrás todos en el módulo Aprendizaje.',
+  ].join('\n');
+}
+
+function buildTutorialLevelMenu(level = '') {
+  const topics = TUTORIAL_LEVEL_TOPICS[level] || [];
+  if (!topics.length) {
+    return 'Elegí un nivel de tutoriales: Básico, Intermedio o Avanzado.';
+  }
+  const levelLabel = { basico: 'Básico', intermedio: 'Intermedio', avanzado: 'Avanzado' }[level] || level;
+  const lines = [`📚 Tutoriales — Nivel ${levelLabel}:`];
+  for (const slug of topics) {
+    const meta = TUTORIAL_CONTENT_MAP[slug];
+    if (meta) lines.push(`- ${meta.title}`);
+  }
+  lines.push('');
+  lines.push('Usá los botones para abrir cada tema, o escribí tu pregunta directamente.');
+  return lines.join('\n');
+}
+
+async function generateTutorialContentWithModel({
+  openai,
+  modelCandidates = [],
+  title = '',
+  userProfile = {},
+} = {}) {
+  const profileHint = [
+    userProfile?.mainGoal ? `objetivo: ${userProfile.mainGoal}` : null,
+    userProfile?.nivelActividad ? `actividad: ${userProfile.nivelActividad}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+
+  const instructions = [
+    'Sos un educador nutricional conciso para un bot de Telegram.',
+    'Explicá el tema en 5-8 líneas. Luego agregá 2-3 tips prácticos con guión.',
+    'Tono: claro, sin tecnicismos innecesarios, directo.',
+    'No uses markdown pesado. No diagnósticos ni prescripciones médicas.',
+    profileHint ? `Perfil del usuario: ${profileHint}. Si es relevante, personalizá levemente.` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: `Tema: ${title}` }] }],
+  });
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    content: extractOutputText(smart.response) || '',
+  };
 }
 
 async function normalizeIntakeWithModel({
@@ -1770,8 +2024,101 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         }
       }
 
-      const profile = getNutritionProfile(userId) || {};
+      const existingProfileRaw = getNutritionProfile(userId); // null if brand new user
+      const profile = existingProfileRaw || {};
       const userTimeZone = String(profile?.timezone || DEFAULT_USER_TIMEZONE).trim();
+
+      // ── ONBOARDING GATE ──────────────────────────────────────────────────────
+      const isOnboarding =
+        guidedAction !== 'view_credits' &&
+        (!existingProfileRaw || Number(existingProfileRaw.onboardingComplete) !== 1);
+
+      if (isOnboarding) {
+        if (!existingProfileRaw) {
+          // First ever message: create stub + send welcome with goal buttons
+          upsertNutritionProfile(
+            userId,
+            { timezone: DEFAULT_USER_TIMEZONE, onboardingComplete: 0 },
+            { idempotency: { sourceMessageId, operationType: 'onboarding_init' } }
+          );
+          return {
+            text: [
+              '👋 Bienvenido/a a tu asistente de nutrición.',
+              'Para darte recomendaciones útiles, contame un poco de vos.',
+              '¿Cuál es tu objetivo principal?',
+              '(También podés escribirlo con tus palabras o hacerme cualquier pregunta.)',
+            ].join('\n'),
+            replyMarkup: {
+              inline_keyboard: [
+                [{ text: 'Bajar grasa', callback_data: 'qa:nutrition_goal:bajar_grasa' }],
+                [{ text: 'Ganar músculo', callback_data: 'qa:nutrition_goal:ganar_musculo' }],
+                [{ text: 'Mejorar hábitos / ansiedad', callback_data: 'qa:nutrition_goal:mejorar_habitos' }],
+                [{ text: 'Comer mejor sin dieta', callback_data: 'qa:nutrition_goal:comer_mejor' }],
+                [{ text: 'Mejorar salud y energía', callback_data: 'qa:nutrition_goal:mejorar_salud' }],
+              ],
+            },
+          };
+        }
+
+        // Onboarding in progress: parse turn and accumulate fields
+        if (!cleanMessage) {
+          return '¿Seguimos con tu perfil? Contame tu objetivo, peso, o cualquier pregunta que tengas.';
+        }
+
+        const onboardingResult = await parseOnboardingTurnWithModel({
+          openai,
+          modelCandidates: smartModelCandidates,
+          rawMessage: cleanMessage,
+          existingProfile: existingProfileRaw,
+        });
+
+        // Map extracted snake_case to camelCase for upsert
+        const extracted = onboardingResult.extracted || {};
+        const profileUpdates = {};
+        if (extracted.main_goal != null) profileUpdates.mainGoal = String(extracted.main_goal).trim();
+        if (extracted.edad != null) profileUpdates.edad = Number(extracted.edad);
+        if (extracted.sexo != null) profileUpdates.sexo = String(extracted.sexo).trim();
+        if (extracted.altura_cm != null) profileUpdates.alturaCm = Number(extracted.altura_cm);
+        if (extracted.peso_actual_kg != null) profileUpdates.pesoActualKg = Number(extracted.peso_actual_kg);
+        if (extracted.nivel_actividad != null) profileUpdates.nivelActividad = String(extracted.nivel_actividad).trim();
+        if (extracted.tipo_entrenamiento != null) profileUpdates.tipoEntrenamiento = String(extracted.tipo_entrenamiento).trim();
+        if (extracted.frecuencia_entrenamiento != null) profileUpdates.frecuenciaEntrenamiento = String(extracted.frecuencia_entrenamiento).trim();
+        if (extracted.alergias_intolerancias != null) profileUpdates.alergiasIntolerancias = String(extracted.alergias_intolerancias).trim();
+        if (extracted.condicion_salud != null) profileUpdates.condicionSalud = String(extracted.condicion_salud).trim();
+        if (extracted.dificultad_principal != null) profileUpdates.dificultadPrincipal = String(extracted.dificultad_principal).trim();
+        if (extracted.target_calories_kcal != null) profileUpdates.targetCaloriesKcal = Number(extracted.target_calories_kcal);
+        if (extracted.target_protein_g != null) profileUpdates.targetProteinG = Number(extracted.target_protein_g);
+
+        if (Object.keys(profileUpdates).length > 0) {
+          upsertNutritionProfile(userId, profileUpdates, {
+            idempotency: { sourceMessageId, operationType: 'onboarding_turn' },
+          });
+        }
+
+        if (onboardingResult.action === 'answer_question') {
+          const reply = [onboardingResult.answerText, onboardingResult.nextQuestion]
+            .filter(Boolean)
+            .join('\n\n');
+          return reply || 'Puedo ayudarte con eso. ¿Continuamos con tu perfil?';
+        }
+
+        if (onboardingResult.action === 'complete') {
+          upsertNutritionProfile(userId, { onboardingComplete: 1 }, {
+            idempotency: { sourceMessageId: sourceMessageId + '_complete', operationType: 'onboarding_complete' },
+          });
+          const finalProfile = getNutritionProfile(userId) || {};
+          return [
+            formatOnboardingSummary(finalProfile),
+            suggestTutorialsForGoal(finalProfile.mainGoal),
+            '',
+            '¡Listo! Ya podés usar todos los módulos: Registrar ingesta, Pesaje, Resumen y Aprendizaje.',
+          ].join('\n');
+        }
+
+        return onboardingResult.nextQuestion || '¿Podés contarme un poco más sobre vos?';
+      }
+      // ── END ONBOARDING GATE ──────────────────────────────────────────────────
+
       let replyText = '';
       let shouldCharge = false;
       let usageSnapshot = null;
@@ -1927,6 +2274,44 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             'Mandame texto con el peso: `81.4 kg` (y opcionales si querés).',
           ].join('\n');
         }
+
+        if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
+          const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+          const todayRows = getTodayNutritionWeighins(userId, temporal.localDate, { limit: 10 });
+          if (!todayRows.length) {
+            return 'No tenés pesajes registrados hoy para eliminar.';
+          }
+          const deleteResult = await resolveDeleteTargetWithModel({
+            openai, modelCandidates: smartModelCandidates,
+            rawMessage: cleanMessage, todayRows, entityType: 'weighin',
+          });
+          usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
+          if (deleteResult.action === 'cannot_identify') {
+            const list = todayRows
+              .slice(0, 5)
+              .map((r) => `- ${r.localTime || '?'} → ${r.weightKg} kg`)
+              .join('\n');
+            return `No identifiqué cuál borrar. Pesajes de hoy:\n${list}\nDecime cuál: "borrá el de las 08:00" o "borrá el último".`;
+          }
+          const targetId =
+            deleteResult.action === 'delete_last'
+              ? Number(todayRows[0]?.id)
+              : Number(deleteResult.targetId);
+          if (!targetId) {
+            return 'No pude identificar el pesaje. Intentá con más detalle.';
+          }
+          const deleted = deleteNutritionWeighin(userId, targetId);
+          if (!deleted?.ok || !deleted.deleted) {
+            return '❌ No pude eliminar ese pesaje. Puede que ya no exista.';
+          }
+          const latest = getLatestNutritionWeighin(userId);
+          replyText = [
+            '✅ Pesaje eliminado.',
+            latest ? `⚖️ Último pesaje registrado: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})` : 'Sin pesajes previos registrados.',
+          ].join('\n');
+          shouldCharge = true;
+        } else {
+
         const parsed = parseWeighinPayload({
           rawMessage: cleanMessage,
           userTimeZone,
@@ -1969,7 +2354,43 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           .filter(Boolean)
           .join('\n');
         shouldCharge = true;
+        } // end else (not delete intent)
       } else if (guidedAction === 'learning_chat') {
+        // Tutorial menu navigation (no LLM cost)
+        if (cleanMessage.startsWith('tutorial:menu_')) {
+          const level = cleanMessage.replace('tutorial:menu_', '');
+          if (level === 'niveles') {
+            replyText = '📚 Elegí un nivel de tutoriales:';
+            shouldCharge = false;
+          } else {
+            replyText = buildTutorialLevelMenu(level);
+            shouldCharge = false;
+          }
+        // Tutorial content (LLM)
+        } else if (cleanMessage.startsWith('tutorial:') && !cleanMessage.startsWith('tutorial:menu_')) {
+          const slug = cleanMessage.replace('tutorial:', '');
+          const tutorialMeta = TUTORIAL_CONTENT_MAP[slug];
+          if (tutorialMeta) {
+            const tutorialResult = await generateTutorialContentWithModel({
+              openai,
+              modelCandidates: smartModelCandidates,
+              title: tutorialMeta.title,
+              userProfile: profile,
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, tutorialResult.usage);
+            replyText = [
+              `📖 ${tutorialMeta.title}`,
+              '',
+              tutorialResult.content || 'No pude generar el contenido ahora. Reintentá.',
+              '',
+              'Podés seguir preguntando sobre este tema o elegir otro tutorial.',
+            ].join('\n');
+            shouldCharge = true;
+          } else {
+            replyText = 'No encontré ese tutorial. Elegí uno de los botones disponibles.';
+            shouldCharge = false;
+          }
+        } else {
         const dbFirstReply = resolveDbFirstLearningReply({
           cleanMessage,
           userId,
@@ -2028,7 +2449,51 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           });
           shouldCharge = true;
         }
+        } // end else (not tutorial)
       } else {
+        // log_intake handler
+        if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
+          const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+          const todayRows = getTodayNutritionIntakes(userId, temporal.localDate, { limit: 20 });
+          if (!todayRows.length) {
+            return 'No tenés ingestas registradas hoy para eliminar.';
+          }
+          const deleteResult = await resolveDeleteTargetWithModel({
+            openai, modelCandidates: smartModelCandidates,
+            rawMessage: cleanMessage, todayRows, entityType: 'intake',
+          });
+          usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
+          if (deleteResult.action === 'cannot_identify') {
+            const list = todayRows
+              .slice(0, 8)
+              .map((r) => {
+                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                return `- ${r.localTime || '?'} → ${r.foodItem}${qty ? ' ' + qty : ''}`;
+              })
+              .join('\n');
+            return `No identifiqué cuál borrar. Ingestas de hoy:\n${list}\nDecime cuál: "borrá el pollo de las 13:30" o "borrá la última".`;
+          }
+          const targetId =
+            deleteResult.action === 'delete_last'
+              ? Number(todayRows[0]?.id)
+              : Number(deleteResult.targetId);
+          if (!targetId) {
+            return 'No pude identificar el registro. Intentá con más detalle.';
+          }
+          const deleted = deleteNutritionIntake(userId, targetId);
+          if (!deleted?.ok || !deleted.deleted) {
+            return '❌ No pude eliminar ese registro. Puede que ya no exista.';
+          }
+          const summary = getNutritionSummary(userId, temporal.localDate);
+          const status = calculateProfileStatus(profile, summary.today);
+          replyText = [
+            '✅ Registro eliminado.',
+            formatMacroLine('📊 Hoy actualizado: ', summary.today),
+            `🎯 Estado vs objetivo: ${status}`,
+          ].join('\n');
+          shouldCharge = true;
+        } else {
+
         const catalogCandidates = cleanMessage
           ? findFoodCatalogCandidates(cleanMessage, { limit: 60 })
           : [];
@@ -2468,6 +2933,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           .filter(Boolean)
           .join('\n');
         shouldCharge = true;
+        } // end else (not delete intent)
       }
 
       if (CREDIT_ENFORCE && estimatedCost > 0 && shouldCharge) {

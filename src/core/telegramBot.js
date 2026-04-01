@@ -101,6 +101,42 @@ const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
   [{ text: '🆘 Ayuda', callback_data: 'qa:help' }],
 ];
 
+const NUTRITION_TUTORIAL_LEVEL_ROWS = [
+  [
+    { text: '🟢 Básico', callback_data: 'qa:nutrition_tutorial:menu_basico' },
+    { text: '🟡 Intermedio', callback_data: 'qa:nutrition_tutorial:menu_intermedio' },
+    { text: '🔴 Avanzado', callback_data: 'qa:nutrition_tutorial:menu_avanzado' },
+  ],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_TUTORIAL_BASICO_ROWS = [
+  [{ text: 'Calorías: qué son y por qué importan', callback_data: 'qa:nutrition_tutorial:calorias' }],
+  [{ text: 'Proteínas, carbos y grasas', callback_data: 'qa:nutrition_tutorial:macros' }],
+  [{ text: 'Cómo armar un plato equilibrado', callback_data: 'qa:nutrition_tutorial:armar_plato' }],
+  [{ text: 'Cómo leer etiquetas nutricionales', callback_data: 'qa:nutrition_tutorial:etiquetas' }],
+  [{ text: 'Comer mejor sin contar todo', callback_data: 'qa:nutrition_tutorial:comer_mejor' }],
+  [{ text: '⬅ Niveles', callback_data: 'qa:nutrition_tutorial:menu_niveles' }],
+];
+
+const NUTRITION_TUTORIAL_INTERMEDIO_ROWS = [
+  [{ text: 'Proteína y saciedad', callback_data: 'qa:nutrition_tutorial:proteina_saciedad' }],
+  [{ text: 'Fibra: la gran olvidada', callback_data: 'qa:nutrition_tutorial:fibra' }],
+  [{ text: 'Hambre física vs emocional', callback_data: 'qa:nutrition_tutorial:hambre_emocional' }],
+  [{ text: 'Fines de semana y situaciones sociales', callback_data: 'qa:nutrition_tutorial:finde_social' }],
+  [{ text: 'Alcohol y nutrición', callback_data: 'qa:nutrition_tutorial:alcohol' }],
+  [{ text: '⬅ Niveles', callback_data: 'qa:nutrition_tutorial:menu_niveles' }],
+];
+
+const NUTRITION_TUTORIAL_AVANZADO_ROWS = [
+  [{ text: 'Déficit calórico sin perder músculo', callback_data: 'qa:nutrition_tutorial:deficit_musculo' }],
+  [{ text: 'Recomposición corporal', callback_data: 'qa:nutrition_tutorial:recomposicion' }],
+  [{ text: 'Retención de líquidos', callback_data: 'qa:nutrition_tutorial:retencion_liquido' }],
+  [{ text: 'Cómo interpretar el peso en la balanza', callback_data: 'qa:nutrition_tutorial:interpretar_peso' }],
+  [{ text: 'Cómo usar el bot al máximo', callback_data: 'qa:nutrition_tutorial:usar_bot' }],
+  [{ text: '⬅ Niveles', callback_data: 'qa:nutrition_tutorial:menu_niveles' }],
+];
+
 const BETS_MENU_ROWS = [
   [
     { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
@@ -393,8 +429,11 @@ const QUICK_ACTION_HINTS = {
   ].join('\n'),
   nutrition_learning: [
     '🎓 Modo Aprendizaje activo',
-    'Acá sí podés chatear libre sobre nutrición, objetivos y conceptos.',
-    'No voy a registrar ingestas/pesajes desde este modulo salvo instrucción explícita de cambio.',
+    'Podés chatear libre o elegir un tutorial:',
+    '- Básico: calorías, macros, armar un plato, etiquetas',
+    '- Intermedio: proteína, fibra, hambre emocional, fines de semana',
+    '- Avanzado: déficit, recomposición, interpretar el peso',
+    'Elegí un nivel con los botones o escribí tu pregunta.',
   ].join('\n'),
   nutrition_reencauce: [
     '📌 Modo guiado Nutricion activo.',
@@ -515,6 +554,8 @@ export function isGuidedCallbackAllowed(
   if (allowed.has(value)) {
     return true;
   }
+  if (/^qa:nutrition_goal:[a-z_]+$/.test(value)) return true;
+  if (/^qa:nutrition_tutorial:[a-z0-9_]+$/.test(value)) return true;
   return /^qa:topup_pack:\d+$/i.test(value);
 }
 
@@ -1399,7 +1440,11 @@ export function startTelegramBot(router, options = {}) {
         },
       });
 
-      await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
+      if (reply && typeof reply === 'object' && reply.text) {
+        await sendBotMessage(chatId, reply.text, { replyMarkupOverride: reply.replyMarkup || null });
+      } else {
+        await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
+      }
     } finally {
       if (typingTimer) {
         clearInterval(typingTimer);
@@ -1722,7 +1767,7 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_learning') {
           setGuidedAction(chatId, 'learning_chat');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
-            menuScope: 'main',
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
           });
           return;
         }
@@ -1739,6 +1784,64 @@ export function startTelegramBot(router, options = {}) {
           });
           return;
         }
+      }
+
+      if (data.startsWith('qa:nutrition_goal:') && guidedMenuId === 'nutrition_v1') {
+        const slug = data.replace('qa:nutrition_goal:', '');
+        const currentGuidedAction = getGuidedAction(chatId) || defaultGuidedAction;
+        const routed = await routeSyntheticAction(query, `goal:${slug}`, {
+          guidedAction: currentGuidedAction,
+          inputType: 'text_intake',
+        });
+        if (routed && typeof routed === 'object' && routed.text) {
+          await sendBotMessage(chatId, routed.text, { replyMarkupOverride: routed.replyMarkup || null });
+        } else if (routed) {
+          await sendBotMessage(chatId, routed, { menuScope: 'main' });
+        }
+        return;
+      }
+
+      if (data.startsWith('qa:nutrition_tutorial:') && guidedMenuId === 'nutrition_v1') {
+        const slug = data.replace('qa:nutrition_tutorial:', '');
+        setGuidedAction(chatId, 'learning_chat');
+
+        // "Volver a niveles" — show level selector directly without LLM call
+        if (slug === 'menu_niveles') {
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
+          });
+          return;
+        }
+
+        // Level submenus — show topic list with proper buttons
+        if (slug === 'menu_basico') {
+          await sendBotMessage(chatId, '📚 Tutoriales — Nivel Básico:', {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_BASICO_ROWS },
+          });
+          return;
+        }
+        if (slug === 'menu_intermedio') {
+          await sendBotMessage(chatId, '📚 Tutoriales — Nivel Intermedio:', {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_INTERMEDIO_ROWS },
+          });
+          return;
+        }
+        if (slug === 'menu_avanzado') {
+          await sendBotMessage(chatId, '📚 Tutoriales — Nivel Avanzado:', {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_AVANZADO_ROWS },
+          });
+          return;
+        }
+
+        // Actual tutorial content — route to learning_chat handler
+        const tutorialReply = await routeSyntheticAction(query, `tutorial:${slug}`, {
+          guidedAction: 'learning_chat',
+          inputType: 'text_freechat',
+        });
+        if (tutorialReply) {
+          await sendBotMessage(chatId, tutorialReply, { menuScope: 'main' });
+        }
+        return;
       }
 
       if (data === 'menu:ledger') {
