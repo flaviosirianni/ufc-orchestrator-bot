@@ -103,6 +103,8 @@ const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
 const NUTRITION_REGISTRO_ROWS = [
   [{ text: '🍽 Registrar ingesta', callback_data: 'qa:nutrition_log_intake' }],
   [{ text: '⚖️ Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' }],
+  [{ text: '🛠️ Modificar/Borrar Ingesta', callback_data: 'qa:nutrition_modify_delete_intake' }],
+  [{ text: '🛠️ Modificar/Borrar Pesaje', callback_data: 'qa:nutrition_modify_delete_weighin' }],
   [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
@@ -439,6 +441,20 @@ const QUICK_ACTION_HINTS = {
     '- `81.4 kg`',
     '- `hoy 08:15 81.4 kg grasa 18.2% agua 56%`',
   ].join('\n'),
+  nutrition_modify_delete_intake: [
+    '🛠️ Modificar/Borrar ingesta',
+    'Para borrar una ingesta, escribi:',
+    '- `borra la ultima ingesta`',
+    '- `elimina la granola de las 13:40`',
+    'Para modificar una ingesta: primero borrala y despues registra la version correcta.',
+  ].join('\n'),
+  nutrition_modify_delete_weighin: [
+    '🛠️ Modificar/Borrar pesaje',
+    'Para borrar un pesaje, escribi:',
+    '- `borra el ultimo pesaje`',
+    '- `elimina el pesaje de las 08:15`',
+    'Para modificar un pesaje: primero borralo y despues registra el peso correcto.',
+  ].join('\n'),
   nutrition_update_profile: [
     '🧭 Perfil / objetivos',
     'Podés pasar uno o varios campos en el mismo mensaje.',
@@ -516,6 +532,8 @@ const NUTRITION_GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:nutrition_aprendizaje',
   'qa:nutrition_log_intake',
   'qa:nutrition_log_weighin',
+  'qa:nutrition_modify_delete_intake',
+  'qa:nutrition_modify_delete_weighin',
   'qa:nutrition_view_profile',
   'qa:nutrition_update_profile',
   'qa:nutrition_view_summary',
@@ -1823,6 +1841,22 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_log_weighin') {
           setGuidedAction(chatId, 'log_weighin');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_weighin, {
+            menuScope: 'nutrition_registro',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_modify_delete_intake') {
+          setGuidedAction(chatId, 'log_intake');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_modify_delete_intake, {
+            menuScope: 'nutrition_registro',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_modify_delete_weighin') {
+          setGuidedAction(chatId, 'log_weighin');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_modify_delete_weighin, {
             menuScope: 'nutrition_registro',
           });
           return;
