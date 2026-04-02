@@ -2133,8 +2133,26 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       const userTimeZone = String(profile?.timezone || DEFAULT_USER_TIMEZONE).trim();
 
       // ── ONBOARDING GATE ──────────────────────────────────────────────────────
+      // Auto-complete onboarding for users who had a profile before this feature
+      // (they have mainGoal or targetCaloriesKcal set but onboarding_complete=0)
+      if (
+        existingProfileRaw &&
+        Number(existingProfileRaw.onboardingComplete) !== 1 &&
+        (existingProfileRaw.mainGoal || existingProfileRaw.targetCaloriesKcal)
+      ) {
+        upsertNutritionProfile(userId, { onboardingComplete: 1 }, {
+          idempotency: { sourceMessageId: 'auto_complete_' + userId, operationType: 'onboarding_auto_complete' },
+        });
+        existingProfileRaw.onboardingComplete = 1;
+      }
+
+      // Only gate truly new users (no profile at all) or those mid-onboarding
+      // Never block functional guidedActions (log_intake, log_weighin, view_summary, etc.)
+      const FUNCTIONAL_GUIDED_ACTIONS = new Set([
+        'log_intake', 'log_weighin', 'view_summary', 'view_profile', 'learning_chat', 'view_credits', 'view_analysis',
+      ]);
       const isOnboarding =
-        guidedAction !== 'view_credits' &&
+        !FUNCTIONAL_GUIDED_ACTIONS.has(guidedAction) &&
         (!existingProfileRaw || Number(existingProfileRaw.onboardingComplete) !== 1);
 
       if (isOnboarding) {
