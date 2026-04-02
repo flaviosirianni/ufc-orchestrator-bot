@@ -972,10 +972,6 @@ function buildCreditsQuickActionRows({
 } = {}) {
   if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
     return [
-      [
-        { text: '📋 Registro', callback_data: 'menu:nutrition_registro' },
-        { text: '📊 Estadísticas', callback_data: 'menu:nutrition_estadisticas' },
-      ],
       [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
     ];
   }
