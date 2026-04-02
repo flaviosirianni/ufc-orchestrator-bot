@@ -1173,13 +1173,28 @@ function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
     } else if (normalizedNameHint.includes(preferenceAlias) || preferenceAlias.includes(normalizedNameHint)) {
       score += 25;
     }
+    const scoreBeforeUsageBoost = score;
     const usageCount = Number(entry?.preferenceUsageCount ?? entry?.usageCount);
-    if (Number.isFinite(usageCount) && usageCount > 0) {
-      score += Math.min(20, usageCount);
+    // Usage should only bias among already-relevant candidates.
+    // Prevent unrelated defaults with high usage from hijacking new items.
+    if (
+      scoreBeforeUsageBoost >= 40 &&
+      Number.isFinite(usageCount) &&
+      usageCount > 0
+    ) {
+      score += Math.min(10, usageCount);
     }
   }
 
   return score;
+}
+
+export function __testResolveCatalogEntryFromStructuredItem(
+  item = {},
+  catalogRows = [],
+  options = {}
+) {
+  return resolveCatalogEntryFromStructuredItem(item, catalogRows, options);
 }
 
 function mergeCatalogRows(primary = [], fallback = []) {
@@ -1358,7 +1373,14 @@ function resolveCatalogEntryFromStructuredItem(
   if (Number.isFinite(numericId) && numericId > 0) {
     const byId = catalogRows.find((row) => Number(row?.id) === numericId);
     if (byId) {
-      return { entry: byId, matchedPreferenceAlias: null };
+      const idHint = String(item?.foodName || '').trim();
+      if (!idHint) {
+        return { entry: byId, matchedPreferenceAlias: null };
+      }
+      const idScore = scoreCatalogCandidate(byId, idHint, item?.brand || '');
+      if (idScore >= 30) {
+        return { entry: byId, matchedPreferenceAlias: null };
+      }
     }
   }
 

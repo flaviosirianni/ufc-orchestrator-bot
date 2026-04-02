@@ -3,6 +3,7 @@ import { getDb } from '../src/core/sqliteStore.js';
 import {
   addNutritionIntakes,
   addNutritionWeighin,
+  bumpNutritionUserProductDefaultUsage,
   findNutritionUserPreferredCatalogEntries,
   ensureNutritionSchema,
   findFoodCatalogCandidates,
@@ -12,6 +13,7 @@ import {
   setNutritionUserProductDefault,
   upsertFoodCatalogEntry,
 } from '../src/bots/nutrition/nutritionStore.js';
+import { __testResolveCatalogEntryFromStructuredItem } from '../src/bots/nutrition/runtime.js';
 import {
   parseIntakePayload,
   parseWeighinPayload,
@@ -30,6 +32,9 @@ function cleanupUserData(userId = '') {
     .prepare('DELETE FROM nutrition_operation_receipts WHERE telegram_user_id = ?')
     .run(normalizedUserId);
   db.prepare('DELETE FROM nutrition_usage_records WHERE telegram_user_id = ?').run(normalizedUserId);
+  db
+    .prepare('DELETE FROM nutrition_user_product_defaults WHERE telegram_user_id = ?')
+    .run(normalizedUserId);
 }
 
 export async function runNutritionDomainTests() {
@@ -310,6 +315,93 @@ export async function runNutritionDomainTests() {
   const removedDefault = removeNutritionUserProductDefault(userId, preferredAlias);
   assert.equal(removedDefault.ok, true);
   assert.equal(removedDefault.deleted, true);
+
+  const highUsageCremaName = `crema de mani natural qa ${Date.now()}`;
+  const highUsageCrema = upsertFoodCatalogEntry({
+    productName: highUsageCremaName,
+    brand: 'QA',
+    portionG: 15,
+    caloriesKcal: 90,
+    proteinG: 3.5,
+    carbsG: 2.5,
+    fatG: 7.5,
+    source: 'manual',
+  });
+  assert.equal(highUsageCrema.ok, true);
+  const highUsageCremaRows = findFoodCatalogCandidates(highUsageCremaName, { limit: 10 }).filter(
+    (row) => row.productName === highUsageCremaName && row.brand === 'QA'
+  );
+  assert.equal(highUsageCremaRows.length >= 1, true);
+  const highUsageCremaId = Number(highUsageCremaRows[0].id);
+
+  const noisyAlias = 'desayuno fijo';
+  const mappedCremaDefault = setNutritionUserProductDefault(userId, {
+    alias: noisyAlias,
+    catalogItemId: highUsageCremaId,
+    source: 'test',
+  });
+  assert.equal(mappedCremaDefault.ok, true);
+  for (let i = 0; i < 30; i += 1) {
+    bumpNutritionUserProductDefaultUsage(userId, noisyAlias);
+  }
+
+  const defaultsForUser = listNutritionUserProductDefaults(userId, { limit: 20 });
+  const defaultRowsAsCatalog = defaultsForUser.map((row) => ({
+    id: Number(row.catalogItemId),
+    productName: String(row.productName || ''),
+    brand: String(row.brand || ''),
+    normalizedName: String(row.productName || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' '),
+    normalizedBrand: String(row.brand || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' '),
+    portionG: Number(row.portionG),
+    caloriesKcal: Number(row.caloriesKcal),
+    proteinG: Number(row.proteinG),
+    carbsG: Number(row.carbsG),
+    fatG: Number(row.fatG),
+    source: String(row.source || ''),
+    preferenceAlias: String(row.aliasLabel || ''),
+    preferenceUsageCount: Number(row.usageCount || 0),
+  }));
+
+  const wrongOverride = __testResolveCatalogEntryFromStructuredItem(
+    {
+      foodName: 'granola natural sin azucar',
+      brand: '',
+      quantityValue: 1,
+      quantityUnit: 'taza',
+    },
+    defaultRowsAsCatalog,
+    {
+      userId,
+      userDefaultRows: defaultRowsAsCatalog,
+    }
+  );
+  assert.equal(wrongOverride.entry, null);
+
+  const wrongCatalogIdOverride = __testResolveCatalogEntryFromStructuredItem(
+    {
+      catalogId: highUsageCremaId,
+      foodName: 'granola natural sin azucar',
+      brand: '',
+      quantityValue: 1,
+      quantityUnit: 'taza',
+    },
+    defaultRowsAsCatalog,
+    {
+      userId,
+      userDefaultRows: defaultRowsAsCatalog,
+    }
+  );
+  assert.equal(wrongCatalogIdOverride.entry, null);
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',
