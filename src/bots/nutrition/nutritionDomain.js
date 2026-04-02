@@ -556,6 +556,7 @@ export function resolveNutritionModuleFromAction(guidedAction = '') {
   if (action === 'view_summary') return 'resumen';
   if (action === 'learning_chat') return 'aprendizaje';
   if (action === 'view_credits') return 'creditos';
+  if (action === 'view_analysis') return 'aprendizaje';
   return 'ingesta';
 }
 

@@ -1677,6 +1677,29 @@ export function toCatalogNormalizedToken(value = '') {
   return normalizeToken(value);
 }
 
+export function listRecentNutritionWeighins(userId = '', { limit = 14 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  return getDb()
+    .prepare(
+      `
+    SELECT
+      id,
+      local_date AS localDate,
+      local_time AS localTime,
+      weight_kg AS weightKg,
+      body_fat_percent AS bodyFatPercent,
+      muscle_mass_kg AS muscleMassKg
+    FROM nutrition_weighins
+    WHERE telegram_user_id = ?
+    ORDER BY logged_at DESC, id DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, Math.max(1, Number(limit) || 14));
+}
+
 export function getTodayNutritionIntakes(userId = '', localDate = '', { limit = 30 } = {}) {
   ensureNutritionSchema();
   const normalizedUserId = String(userId || '').trim();

@@ -45,6 +45,7 @@ import {
   deleteNutritionIntake,
   getTodayNutritionWeighins,
   deleteNutritionWeighin,
+  listRecentNutritionWeighins,
 } from './nutritionStore.js';
 import { startNutritionDbReliabilityLoop } from './nutritionReliability.js';
 import {
@@ -947,6 +948,109 @@ async function generateTutorialContentWithModel({
     modelCandidates,
     instructions,
     input: [{ role: 'user', content: [{ type: 'input_text', text: `Tema: ${title}` }] }],
+  });
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    content: extractOutputText(smart.response) || '',
+  };
+}
+
+async function performPersonalizedAnalysisWithModel({
+  openai,
+  modelCandidates = [],
+  profile = {},
+  summary = {},
+  recentIntakes = [],
+  weighinHistory = [],
+  userMessage = '',
+} = {}) {
+  const profileLines = [
+    profile.mainGoal ? `Objetivo: ${profile.mainGoal}` : null,
+    profile.edad ? `Edad: ${profile.edad}` : null,
+    profile.sexo ? `Sexo: ${profile.sexo}` : null,
+    profile.alturaCm ? `Altura: ${profile.alturaCm} cm` : null,
+    profile.pesoActualKg ? `Peso registrado en perfil: ${profile.pesoActualKg} kg` : null,
+    profile.nivelActividad ? `Actividad: ${profile.nivelActividad}` : null,
+    profile.tipoEntrenamiento ? `Entrenamiento: ${profile.tipoEntrenamiento}` : null,
+    profile.frecuenciaEntrenamiento ? `Frecuencia: ${profile.frecuenciaEntrenamiento}` : null,
+    profile.alergiasIntolerancias ? `Restricciones: ${profile.alergiasIntolerancias}` : null,
+    profile.condicionSalud ? `Condición de salud: ${profile.condicionSalud}` : null,
+    profile.dificultadPrincipal ? `Principal dificultad: ${profile.dificultadPrincipal}` : null,
+    profile.targetCaloriesKcal ? `Target kcal: ${profile.targetCaloriesKcal}` : null,
+    profile.targetProteinG ? `Target proteína: ${profile.targetProteinG} g` : null,
+  ].filter(Boolean).join('\n');
+
+  const todayLine = summary.today
+    ? `Hoy: ${Math.round(summary.today.caloriesKcal || 0)} kcal | P ${Math.round(summary.today.proteinG || 0)}g | C ${Math.round(summary.today.carbsG || 0)}g | G ${Math.round(summary.today.fatG || 0)}g`
+    : 'Sin datos de hoy';
+  const rolling7Line = summary.rolling7d
+    ? `Prom 7d: ${Math.round(summary.rolling7d.caloriesKcal || 0)} kcal | P ${Math.round(summary.rolling7d.proteinG || 0)}g`
+    : null;
+  const rolling14Line = summary.rolling14d
+    ? `Prom 14d: ${Math.round(summary.rolling14d.caloriesKcal || 0)} kcal | P ${Math.round(summary.rolling14d.proteinG || 0)}g`
+    : null;
+
+  const intakesPreview = recentIntakes
+    .slice(0, 20)
+    .map((r) => `  ${r.localDate} ${r.localTime || ''} ${r.foodItem} | ${Math.round(r.caloriesKcal || 0)} kcal | P ${Math.round(r.proteinG || 0)}g`)
+    .join('\n');
+
+  const weighinPreview = weighinHistory
+    .slice(0, 7)
+    .map((w) => `  ${w.localDate}: ${w.weightKg} kg${w.bodyFatPercent ? ` | grasa ${w.bodyFatPercent}%` : ''}`)
+    .join('\n');
+
+  const contextBlock = [
+    '=== PERFIL ===',
+    profileLines || '(sin perfil completo)',
+    '',
+    '=== RESUMEN NUTRICIONAL ===',
+    todayLine,
+    rolling7Line,
+    rolling14Line,
+    '',
+    '=== ÚLTIMAS INGESTAS ===',
+    intakesPreview || '(sin ingestas recientes)',
+    '',
+    '=== HISTORIAL DE PESO ===',
+    weighinPreview || '(sin pesajes registrados)',
+  ].filter(Boolean).join('\n');
+
+  const isFollowUp = Boolean(userMessage && !userMessage.startsWith('__analysis__'));
+
+  const instructions = [
+    'Sos un nutricionista con formación universitaria y experiencia clínica.',
+    'Tu tarea: hacer un análisis personalizado del usuario en base a su perfil y datos de seguimiento.',
+    '',
+    'Si es el análisis inicial (sin mensaje del usuario):',
+    '- Empezá con 1-2 líneas de contexto general del usuario.',
+    '- Identificá 2-3 puntos fuertes concretos (con datos).',
+    '- Identificá 2-3 áreas de mejora prioritarias (con datos).',
+    '- Terminá con 1-2 recomendaciones accionables para la próxima semana.',
+    '- Extensión: 15-20 líneas. Tono: profesional pero cercano. Sin diagnósticos médicos.',
+    '',
+    'Si es una pregunta de seguimiento del usuario:',
+    '- Respondé específicamente la consulta usando los datos del contexto.',
+    '- Máximo 8 líneas. Directo y útil.',
+    '',
+    'Reglas generales:',
+    '- Usá los datos reales disponibles. Si hay pocos datos, decilo brevemente y dale igual valor.',
+    '- No inventes datos ni estimes sin base.',
+    '- No diagnosticues ni prescribas medicación.',
+    '- Responde en español.',
+  ].join('\n');
+
+  const userInput = isFollowUp
+    ? `${contextBlock}\n\n=== PREGUNTA DEL USUARIO ===\n${userMessage}`
+    : contextBlock;
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: userInput }] }],
   });
   return {
     ok: true,
@@ -2250,22 +2354,136 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         shouldCharge = true;
         }
       } else if (guidedAction === 'view_summary') {
-        const temporal = resolveTemporalContext({
-          rawMessage: cleanMessage || 'hoy',
-          userTimeZone,
-        });
+        // ── Synthetic sub-actions from stats submenu ─────────────────────
+        if (cleanMessage === '__view_profile__') {
+          const lines = ['📋 Tu perfil actual:'];
+          if (profile.mainGoal) lines.push(`- Objetivo: ${profile.mainGoal}`);
+          if (profile.edad) lines.push(`- Edad: ${profile.edad}`);
+          if (profile.sexo) lines.push(`- Sexo: ${profile.sexo}`);
+          if (profile.alturaCm) lines.push(`- Altura: ${profile.alturaCm} cm`);
+          if (profile.pesoActualKg) lines.push(`- Peso (perfil): ${profile.pesoActualKg} kg`);
+          if (profile.nivelActividad) lines.push(`- Actividad: ${profile.nivelActividad}`);
+          if (profile.tipoEntrenamiento) lines.push(`- Entrenamiento: ${profile.tipoEntrenamiento}`);
+          if (profile.frecuenciaEntrenamiento) lines.push(`- Frecuencia: ${profile.frecuenciaEntrenamiento}`);
+          if (profile.alergiasIntolerancias) lines.push(`- Restricciones: ${profile.alergiasIntolerancias}`);
+          if (profile.condicionSalud) lines.push(`- Salud: ${profile.condicionSalud}`);
+          if (profile.dificultadPrincipal) lines.push(`- Principal dificultad: ${profile.dificultadPrincipal}`);
+          if (profile.targetCaloriesKcal) lines.push(`- Target: ${profile.targetCaloriesKcal} kcal`);
+          if (profile.targetProteinG) lines.push(`- Proteína target: ${profile.targetProteinG} g`);
+          if (profile.timezone) lines.push(`- Timezone: ${profile.timezone}`);
+          if (profile.restrictions) lines.push(`- Restricciones (campo anterior): ${profile.restrictions}`);
+          if (lines.length === 1) lines.push('(perfil vacío — usá Actualizar perfil/objetivos para completarlo)');
+          replyText = lines.join('\n');
+          shouldCharge = false;
+        } else if (cleanMessage === '__history__:yesterday') {
+          const temporal = resolveTemporalContext({ rawMessage: 'ayer', userTimeZone });
+          const byDate = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 30 });
+          const summary = getNutritionSummary(userId, temporal.localDate);
+          const status = calculateProfileStatus(profile, summary.today);
+          if (byDate.length) {
+            replyText = [
+              `📅 Ingestas del ${temporal.localDate}:`,
+              ...byDate.slice(0, 15).map((r) => {
+                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                return `- ${r.localTime || ''} ${r.foodItem}${qty ? ' ' + qty : ''} | ${Math.round(r.caloriesKcal || 0)} kcal`;
+              }),
+              byDate.length > 15 ? `... y ${byDate.length - 15} más` : null,
+              '',
+              formatMacroLine('Total ayer: ', summary.today),
+              `Estado: ${status}`,
+            ].filter((x) => x !== null).join('\n');
+          } else {
+            replyText = `No encontré ingestas registradas para el ${temporal.localDate}.`;
+          }
+          shouldCharge = false;
+        } else if (cleanMessage === '__history__:weight') {
+          const weighins = listRecentNutritionWeighins(userId, { limit: 10 });
+          if (weighins.length) {
+            replyText = [
+              '⚖️ Historial de peso (últimos registros):',
+              ...weighins.map((w) =>
+                `- ${w.localDate}: ${w.weightKg} kg${w.bodyFatPercent ? ` | grasa ${w.bodyFatPercent}%` : ''}${w.muscleMassKg ? ` | músculo ${w.muscleMassKg} kg` : ''}`
+              ),
+            ].join('\n');
+          } else {
+            replyText = '⚖️ No hay pesajes registrados todavía.';
+          }
+          shouldCharge = false;
+        } else if (cleanMessage === '__history__:weekly_trend') {
+          const temporal = resolveTemporalContext({ rawMessage: 'hoy', userTimeZone });
+          const summary = getNutritionSummary(userId, temporal.localDate);
+          const lines = ['📈 Tendencia semanal:'];
+          if (summary.rolling7d?.caloriesKcal) {
+            lines.push(`- Prom 7d: ${Math.round(summary.rolling7d.caloriesKcal)} kcal | P ${Math.round(summary.rolling7d.proteinG || 0)}g | C ${Math.round(summary.rolling7d.carbsG || 0)}g | G ${Math.round(summary.rolling7d.fatG || 0)}g`);
+          }
+          if (summary.rolling14d?.caloriesKcal) {
+            lines.push(`- Prom 14d: ${Math.round(summary.rolling14d.caloriesKcal)} kcal | P ${Math.round(summary.rolling14d.proteinG || 0)}g`);
+          }
+          if (profile.targetCaloriesKcal) {
+            const ratio7 = summary.rolling7d?.caloriesKcal
+              ? Math.round((summary.rolling7d.caloriesKcal / profile.targetCaloriesKcal) * 100)
+              : null;
+            if (ratio7 !== null) lines.push(`- Vs target kcal: ${ratio7}%`);
+          }
+          if (profile.targetProteinG) {
+            const proteinRatio = summary.rolling7d?.proteinG
+              ? Math.round((summary.rolling7d.proteinG / profile.targetProteinG) * 100)
+              : null;
+            if (proteinRatio !== null) lines.push(`- Vs target proteína: ${proteinRatio}%`);
+          }
+          const weighins = listRecentNutritionWeighins(userId, { limit: 7 });
+          if (weighins.length >= 2) {
+            const first = weighins[weighins.length - 1];
+            const last = weighins[0];
+            const delta = Number(last.weightKg) - Number(first.weightKg);
+            lines.push(`- Peso: ${first.weightKg} kg → ${last.weightKg} kg (${delta >= 0 ? '+' : ''}${delta.toFixed(1)} kg en ${weighins.length} registros)`);
+          }
+          if (lines.length === 1) lines.push('(pocos datos todavía — seguí registrando para ver tendencias)');
+          replyText = lines.join('\n');
+          shouldCharge = false;
+        } else {
+          // Normal summary
+          const temporal = resolveTemporalContext({
+            rawMessage: cleanMessage || 'hoy',
+            userTimeZone,
+          });
+          const summary = getNutritionSummary(userId, temporal.localDate);
+          const status = calculateProfileStatus(profile, summary.today);
+          const latestWeighin = getLatestNutritionWeighin(userId);
+          const todayIntakes = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 80 });
+          replyText = formatSummaryReply({
+            localDate: temporal.localDate,
+            localTime: temporal.localTime,
+            summary,
+            status,
+            latestWeighin,
+            todayIntakes,
+          });
+          shouldCharge = true;
+        }
+      } else if (guidedAction === 'view_analysis') {
+        // ── Análisis personalizado ────────────────────────────────────────
+        const temporal = resolveTemporalContext({ rawMessage: 'hoy', userTimeZone });
         const summary = getNutritionSummary(userId, temporal.localDate);
-        const status = calculateProfileStatus(profile, summary.today);
-        const latestWeighin = getLatestNutritionWeighin(userId);
-        const todayIntakes = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 80 });
-        replyText = formatSummaryReply({
-          localDate: temporal.localDate,
-          localTime: temporal.localTime,
+        const recentIntakes = listRecentNutritionIntakes(userId, { limit: 30 });
+        const weighinHistory = listRecentNutritionWeighins(userId, { limit: 14 });
+        const isStart = cleanMessage === '__analysis__:start' || !cleanMessage;
+
+        const analysisResult = await performPersonalizedAnalysisWithModel({
+          openai,
+          modelCandidates: smartModelCandidates,
+          profile,
           summary,
-          status,
-          latestWeighin,
-          todayIntakes,
+          recentIntakes,
+          weighinHistory,
+          userMessage: isStart ? '' : cleanMessage,
         });
+        usageSnapshot = mergeUsageSnapshots(usageSnapshot, analysisResult.usage);
+        replyText = [
+          isStart ? '🔬 Análisis personalizado:' : null,
+          analysisResult.content || 'No pude generar el análisis ahora. Reintentá en un momento.',
+          isStart ? '\nPodés hacerme preguntas sobre el análisis.' : null,
+        ].filter(Boolean).join('\n');
         shouldCharge = true;
       } else if (guidedAction === 'log_weighin') {
         if (hasMedia && !cleanMessage) {

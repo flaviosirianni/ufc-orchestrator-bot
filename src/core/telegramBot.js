@@ -87,18 +87,47 @@ const GUIDED_LEDGER_MENU_ROWS = [
 
 const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
   [
-    { text: '🍽 Registrar ingesta', callback_data: 'qa:nutrition_log_intake' },
-    { text: '⚖️ Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' },
+    { text: '📋 Registro', callback_data: 'menu:nutrition_registro' },
+    { text: '🧭 Perfil / Objetivos', callback_data: 'menu:nutrition_perfil' },
   ],
   [
-    { text: '🧭 Perfil/objetivos', callback_data: 'qa:nutrition_update_profile' },
-    { text: '📊 Resumen', callback_data: 'qa:nutrition_view_summary' },
+    { text: '📊 Estadísticas', callback_data: 'menu:nutrition_estadisticas' },
+    { text: '🎓 Aprendizaje', callback_data: 'menu:nutrition_aprendizaje' },
   ],
   [
-    { text: '🎓 Aprendizaje', callback_data: 'qa:nutrition_learning' },
-    { text: '💳 Creditos', callback_data: 'qa:view_credits' },
+    { text: '💳 Créditos', callback_data: 'qa:view_credits' },
+    { text: '🆘 Ayuda', callback_data: 'qa:help' },
   ],
-  [{ text: '🆘 Ayuda', callback_data: 'qa:help' }],
+];
+
+const NUTRITION_REGISTRO_ROWS = [
+  [{ text: '🍽 Registrar ingesta', callback_data: 'qa:nutrition_log_intake' }],
+  [{ text: '⚖️ Registrar pesaje', callback_data: 'qa:nutrition_log_weighin' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_PERFIL_ROWS = [
+  [{ text: '📋 Ver perfil completo', callback_data: 'qa:nutrition_view_profile' }],
+  [{ text: '✏️ Actualizar perfil / objetivos', callback_data: 'qa:nutrition_update_profile' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_ESTADISTICAS_ROWS = [
+  [
+    { text: '📊 Resumen de hoy', callback_data: 'qa:nutrition_view_summary' },
+    { text: '📅 Ingestas de ayer', callback_data: 'qa:nutrition_history_yesterday' },
+  ],
+  [
+    { text: '⚖️ Historial de peso', callback_data: 'qa:nutrition_weight_history' },
+    { text: '📈 Tendencia semanal', callback_data: 'qa:nutrition_weekly_trend' },
+  ],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_APRENDIZAJE_ROWS = [
+  [{ text: '📚 Tutoriales', callback_data: 'qa:nutrition_tutorials' }],
+  [{ text: '🔬 Análisis personalizado', callback_data: 'qa:nutrition_analysis' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
 const NUTRITION_TUTORIAL_LEVEL_ROWS = [
@@ -389,13 +418,11 @@ const QUICK_ACTION_HINTS = {
     'Fuera de `Aprendizaje`, el bot no toma chat ambiguo: te reencauza al modulo activo.',
   ].join('\n'),
   nutrition_welcome: [
-    '🥗 Menu principal (Nutricion V1)',
-    'Elegí un modulo:',
-    '- `Registrar ingesta`',
-    '- `Registrar pesaje`',
-    '- `Perfil/objetivos`',
-    '- `Resumen`',
-    '- `Aprendizaje`',
+    '🥗 Menú principal',
+    '- 📋 Registro — ingesta y pesaje',
+    '- 🧭 Perfil / Objetivos',
+    '- 📊 Estadísticas — resumen, historial',
+    '- 🎓 Aprendizaje — tutoriales y análisis',
   ].join('\n'),
   nutrition_log_intake: [
     '🍽 Registrar ingesta',
@@ -456,7 +483,10 @@ const QUICK_ACTION_HINTS = {
   ].join('\n'),
 };
 
-const MENU_SCOPES = new Set(['main', 'ledger', 'bets', 'event', 'config']);
+const MENU_SCOPES = new Set([
+  'main', 'ledger', 'bets', 'event', 'config',
+  'nutrition_registro', 'nutrition_perfil', 'nutrition_estadisticas', 'nutrition_aprendizaje',
+]);
 const GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:main',
   'menu:ledger',
@@ -480,11 +510,21 @@ const GUIDED_ALLOWED_CALLBACKS_MINIMAL = new Set([
 
 const NUTRITION_GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:main',
+  'menu:nutrition_registro',
+  'menu:nutrition_perfil',
+  'menu:nutrition_estadisticas',
+  'menu:nutrition_aprendizaje',
   'qa:nutrition_log_intake',
   'qa:nutrition_log_weighin',
+  'qa:nutrition_view_profile',
   'qa:nutrition_update_profile',
   'qa:nutrition_view_summary',
+  'qa:nutrition_history_yesterday',
+  'qa:nutrition_weight_history',
+  'qa:nutrition_weekly_trend',
   'qa:nutrition_learning',
+  'qa:nutrition_tutorials',
+  'qa:nutrition_analysis',
   'qa:help',
   'qa:view_credits',
   'qa:topup_credits',
@@ -667,18 +707,17 @@ function resolveNutritionGuidedMessageDecision({
 
   if (guidedAction === 'learning_chat') {
     if (hasMedia) {
-      return {
-        action: 'route',
-        guidedAction: 'learning_chat',
-        inputType: 'image_learning',
-      };
+      return { action: 'route', guidedAction: 'learning_chat', inputType: 'image_learning' };
     }
     if (normalizedText) {
-      return {
-        action: 'route',
-        guidedAction: 'learning_chat',
-        inputType: 'text_freechat',
-      };
+      return { action: 'route', guidedAction: 'learning_chat', inputType: 'text_freechat' };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  if (guidedAction === 'view_analysis') {
+    if (normalizedText) {
+      return { action: 'route', guidedAction: 'view_analysis', inputType: 'text_freechat' };
     }
     return { action: 'block', guidedAction: null, inputType: null };
   }
@@ -934,10 +973,10 @@ function buildCreditsQuickActionRows({
   if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
     return [
       [
-        { text: '🍽 Ingesta', callback_data: 'qa:nutrition_log_intake' },
-        { text: '📊 Resumen', callback_data: 'qa:nutrition_view_summary' },
+        { text: '📋 Registro', callback_data: 'menu:nutrition_registro' },
+        { text: '📊 Estadísticas', callback_data: 'menu:nutrition_estadisticas' },
       ],
-      [{ text: '🎓 Aprendizaje', callback_data: 'qa:nutrition_learning' }],
+      [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
     ];
   }
 
@@ -1244,9 +1283,11 @@ export function startTelegramBot(router, options = {}) {
   function buildQuickActionsMarkup(scope = 'main') {
     if (isGuidedStrictInteractionMode(interactionMode)) {
       if (guidedMenuId === 'nutrition_v1') {
-        return {
-          inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS,
-        };
+        if (scope === 'nutrition_registro') return { inline_keyboard: NUTRITION_REGISTRO_ROWS };
+        if (scope === 'nutrition_perfil') return { inline_keyboard: NUTRITION_PERFIL_ROWS };
+        if (scope === 'nutrition_estadisticas') return { inline_keyboard: NUTRITION_ESTADISTICAS_ROWS };
+        if (scope === 'nutrition_aprendizaje') return { inline_keyboard: NUTRITION_APRENDIZAJE_ROWS };
+        return { inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS };
       }
       if (scope === 'ledger' && guidedLedgerEnabled) {
         return {
@@ -1742,16 +1783,70 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (guidedMenuId === 'nutrition_v1') {
+        // ── Main menu navigation ────────────────────────────────────────────
+        if (data === 'menu:nutrition_registro') {
+          setGuidedAction(chatId, 'log_intake');
+          await sendBotMessage(chatId, '📋 Registro\n¿Qué querés registrar?', {
+            menuScope: 'nutrition_registro',
+          });
+          return;
+        }
+
+        if (data === 'menu:nutrition_perfil') {
+          setGuidedAction(chatId, 'update_profile');
+          await sendBotMessage(chatId, '🧭 Perfil / Objetivos', {
+            menuScope: 'nutrition_perfil',
+          });
+          return;
+        }
+
+        if (data === 'menu:nutrition_estadisticas') {
+          setGuidedAction(chatId, 'view_summary');
+          const routed = await routeSyntheticAction(
+            query,
+            'mostrame mi resumen nutricional de hoy con rolling 7d y 14d',
+            { guidedAction: 'view_summary', inputType: 'synthetic' }
+          );
+          await sendBotMessage(chatId, routed || 'No pude calcular el resumen ahora mismo.', {
+            menuScope: 'nutrition_estadisticas',
+          });
+          return;
+        }
+
+        if (data === 'menu:nutrition_aprendizaje') {
+          setGuidedAction(chatId, 'learning_chat');
+          await sendBotMessage(chatId, '🎓 Aprendizaje\n¿Qué querés hacer?', {
+            menuScope: 'nutrition_aprendizaje',
+          });
+          return;
+        }
+
+        // ── Registro submenu ────────────────────────────────────────────────
         if (data === 'qa:nutrition_log_intake') {
           setGuidedAction(chatId, 'log_intake');
-          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_intake, { menuScope: 'main' });
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_intake, {
+            menuScope: 'nutrition_registro',
+          });
           return;
         }
 
         if (data === 'qa:nutrition_log_weighin') {
           setGuidedAction(chatId, 'log_weighin');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_weighin, {
-            menuScope: 'main',
+            menuScope: 'nutrition_registro',
+          });
+          return;
+        }
+
+        // ── Perfil submenu ─────────────────────────────────────────────────
+        if (data === 'qa:nutrition_view_profile') {
+          setGuidedAction(chatId, 'view_summary');
+          const profileReply = await routeSyntheticAction(query, '__view_profile__', {
+            guidedAction: 'view_summary',
+            inputType: 'synthetic',
+          });
+          await sendBotMessage(chatId, profileReply || 'No pude leer tu perfil ahora mismo.', {
+            menuScope: 'nutrition_perfil',
           });
           return;
         }
@@ -1759,19 +1854,12 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_update_profile') {
           setGuidedAction(chatId, 'update_profile');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_update_profile, {
-            menuScope: 'main',
+            menuScope: 'nutrition_perfil',
           });
           return;
         }
 
-        if (data === 'qa:nutrition_learning') {
-          setGuidedAction(chatId, 'learning_chat');
-          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
-            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
-          });
-          return;
-        }
-
+        // ── Estadísticas submenu ───────────────────────────────────────────
         if (data === 'qa:nutrition_view_summary') {
           setGuidedAction(chatId, 'view_summary');
           const routed = await routeSyntheticAction(
@@ -1780,7 +1868,73 @@ export function startTelegramBot(router, options = {}) {
             { guidedAction: 'view_summary', inputType: 'synthetic' }
           );
           await sendBotMessage(chatId, routed || 'No pude calcular el resumen ahora mismo.', {
-            menuScope: 'main',
+            menuScope: 'nutrition_estadisticas',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_history_yesterday') {
+          setGuidedAction(chatId, 'view_summary');
+          const routed = await routeSyntheticAction(query, '__history__:yesterday', {
+            guidedAction: 'view_summary',
+            inputType: 'synthetic',
+          });
+          await sendBotMessage(chatId, routed || 'No encontré ingestas de ayer.', {
+            menuScope: 'nutrition_estadisticas',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_weight_history') {
+          setGuidedAction(chatId, 'view_summary');
+          const routed = await routeSyntheticAction(query, '__history__:weight', {
+            guidedAction: 'view_summary',
+            inputType: 'synthetic',
+          });
+          await sendBotMessage(chatId, routed || 'No encontré pesajes registrados.', {
+            menuScope: 'nutrition_estadisticas',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_weekly_trend') {
+          setGuidedAction(chatId, 'view_summary');
+          const routed = await routeSyntheticAction(query, '__history__:weekly_trend', {
+            guidedAction: 'view_summary',
+            inputType: 'synthetic',
+          });
+          await sendBotMessage(chatId, routed || 'No pude calcular la tendencia semanal.', {
+            menuScope: 'nutrition_estadisticas',
+          });
+          return;
+        }
+
+        // ── Aprendizaje submenu ────────────────────────────────────────────
+        if (data === 'qa:nutrition_tutorials') {
+          setGuidedAction(chatId, 'learning_chat');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_analysis') {
+          setGuidedAction(chatId, 'view_analysis');
+          const analysisReply = await routeSyntheticAction(query, '__analysis__:start', {
+            guidedAction: 'view_analysis',
+            inputType: 'synthetic',
+          });
+          await sendBotMessage(chatId, analysisReply || 'No pude generar el análisis ahora mismo.', {
+            menuScope: 'nutrition_aprendizaje',
+          });
+          return;
+        }
+
+        // ── Legacy: nutrition_learning (kept for back-compat) ─────────────
+        if (data === 'qa:nutrition_learning') {
+          setGuidedAction(chatId, 'learning_chat');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
+            replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
           });
           return;
         }
@@ -1805,15 +1959,12 @@ export function startTelegramBot(router, options = {}) {
         const slug = data.replace('qa:nutrition_tutorial:', '');
         setGuidedAction(chatId, 'learning_chat');
 
-        // "Volver a niveles" — show level selector directly without LLM call
         if (slug === 'menu_niveles') {
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_learning, {
             replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_LEVEL_ROWS },
           });
           return;
         }
-
-        // Level submenus — show topic list with proper buttons
         if (slug === 'menu_basico') {
           await sendBotMessage(chatId, '📚 Tutoriales — Nivel Básico:', {
             replyMarkupOverride: { inline_keyboard: NUTRITION_TUTORIAL_BASICO_ROWS },
@@ -1833,13 +1984,12 @@ export function startTelegramBot(router, options = {}) {
           return;
         }
 
-        // Actual tutorial content — route to learning_chat handler
         const tutorialReply = await routeSyntheticAction(query, `tutorial:${slug}`, {
           guidedAction: 'learning_chat',
           inputType: 'text_freechat',
         });
         if (tutorialReply) {
-          await sendBotMessage(chatId, tutorialReply, { menuScope: 'main' });
+          await sendBotMessage(chatId, tutorialReply, { menuScope: 'nutrition_aprendizaje' });
         }
         return;
       }
