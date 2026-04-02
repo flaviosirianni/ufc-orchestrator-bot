@@ -174,7 +174,7 @@ function detectDateHint(message = '', todayIsoDate = '') {
 
 function detectTimeHint(message = '', fallbackTime = '') {
   const text = String(message || '');
-  const hhmm = text.match(/\b([01]?\d|2[0-3])[:h.]([0-5]\d)\b/i);
+  const hhmm = text.match(/\b([01]?\d|2[0-3])[:h.]([0-5]\d)\s*(?:hs?|h)?\b/i);
   if (hhmm) {
     const hour = Number(hhmm[1]);
     const minute = Number(hhmm[2]);

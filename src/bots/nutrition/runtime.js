@@ -1135,6 +1135,113 @@ function normalizeCatalogToken(value = '') {
     .replace(/\s+/g, ' ');
 }
 
+const NUTRITION_MATCH_STOPWORDS = new Set([
+  'a',
+  'al',
+  'con',
+  'de',
+  'del',
+  'el',
+  'en',
+  'hs',
+  'h',
+  'ingesta',
+  'la',
+  'las',
+  'lo',
+  'los',
+  'por',
+  'registra',
+  'registrame',
+  'registrar',
+  'registra',
+  'suma',
+  'sumae',
+  'taza',
+  'tazon',
+  'porcion',
+  'porciones',
+  'unidad',
+  'unidades',
+  'cucharada',
+  'cucharadas',
+  'natural',
+  'sin',
+  'azucar',
+  'hoy',
+  'ayer',
+  'manana',
+  'desayuno',
+  'almuerzo',
+  'merienda',
+  'cena',
+]);
+
+function tokenizeForIntakeMatch(value = '') {
+  const normalized = normalizeCatalogToken(value)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return [];
+  return normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      if (token.length > 4 && token.endsWith('es')) return token.slice(0, -2);
+      if (token.length > 3 && token.endsWith('s')) return token.slice(0, -1);
+      return token;
+    })
+    .filter((token) => token.length >= 3 && !NUTRITION_MATCH_STOPWORDS.has(token));
+}
+
+function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {}) {
+  const messageTokens = new Set(tokenizeForIntakeMatch(rawMessage));
+  if (!messageTokens.size) return true;
+  if (!Array.isArray(parsedItems) || !parsedItems.length) return false;
+
+  for (const item of parsedItems) {
+    const itemText = String(item?.inputAlias || item?.foodItem || '').trim();
+    const itemTokens = tokenizeForIntakeMatch(itemText);
+    if (!itemTokens.length) continue;
+    const hasOverlap = itemTokens.some((token) => messageTokens.has(token));
+    if (!hasOverlap) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function enforceExplicitTemporalFromRawMessage({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  parsed = null,
+} = {}) {
+  if (!parsed || !parsed.temporal) return parsed;
+  const rawTemporal = resolveTemporalContext({
+    rawMessage,
+    userTimeZone,
+  });
+  if (rawTemporal.usedRuntimeNow) {
+    return parsed;
+  }
+  const parsedTemporal = parsed.temporal || {};
+  if (!parsedTemporal.usedRuntimeNow) {
+    return parsed;
+  }
+  return {
+    ...parsed,
+    temporal: {
+      ...parsedTemporal,
+      localDate: rawTemporal.localDate,
+      localTime: rawTemporal.localTime,
+      loggedAt: rawTemporal.loggedAt,
+      timeZone: rawTemporal.timeZone,
+      usedRuntimeNow: false,
+    },
+  };
+}
+
 function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
   const normalizedNameHint = normalizeCatalogToken(nameHint);
   if (!normalizedNameHint) return 0;
@@ -1195,6 +1302,22 @@ export function __testResolveCatalogEntryFromStructuredItem(
   options = {}
 ) {
   return resolveCatalogEntryFromStructuredItem(item, catalogRows, options);
+}
+
+export function __testParsedItemsAlignWithUserInput(rawMessage = '', parsedItems = []) {
+  return parsedItemsAlignWithUserInput({ rawMessage, parsedItems });
+}
+
+export function __testEnforceExplicitTemporalFromRawMessage({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  parsed = null,
+} = {}) {
+  return enforceExplicitTemporalFromRawMessage({
+    rawMessage,
+    userTimeZone,
+    parsed,
+  });
 }
 
 function mergeCatalogRows(primary = [], fallback = []) {
@@ -3043,7 +3166,11 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             userTimeZone,
           });
           if (parsedFromModel.ok) {
-            parsed = parsedFromModel;
+            parsed = enforceExplicitTemporalFromRawMessage({
+              rawMessage: cleanMessage,
+              userTimeZone,
+              parsed: parsedFromModel,
+            });
           }
         }
 
@@ -3096,6 +3223,25 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             'Formato recomendado: `13:30 200g pollo + 150g arroz`.',
             buildPhotoHintLine(),
           ].join('\n');
+        }
+
+        const usedModelFallback =
+          Boolean(cleanMessage) &&
+          !lexicalParsed?.ok &&
+          (modelStructured?.ok || modelNormalization?.ok);
+        if (usedModelFallback) {
+          const alignedWithUserInput = parsedItemsAlignWithUserInput({
+            rawMessage: cleanMessage,
+            parsedItems: parsed.items,
+          });
+          if (!alignedWithUserInput) {
+            return [
+              'Necesito confirmar esa ingesta para no registrar algo distinto a lo que escribiste.',
+              'Decimelo en formato directo por item, por ejemplo:',
+              '`13:40 1 taza granola natural`',
+              'Si querés, también podés mandar foto de etiqueta para guardarlo exacto.',
+            ].join('\n');
+          }
         }
 
         const intakeWrite = addNutritionIntakes(

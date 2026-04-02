@@ -19,6 +19,10 @@ import {
   parseWeighinPayload,
   resolveTemporalContext,
 } from '../src/bots/nutrition/nutritionDomain.js';
+import {
+  __testEnforceExplicitTemporalFromRawMessage,
+  __testParsedItemsAlignWithUserInput,
+} from '../src/bots/nutrition/runtime.js';
 
 function cleanupUserData(userId = '') {
   const db = getDb();
@@ -402,6 +406,50 @@ export async function runNutritionDomainTests() {
     }
   );
   assert.equal(wrongCatalogIdOverride.entry, null);
+
+  const mismatchAlignment = __testParsedItemsAlignWithUserInput(
+    'registra 1 taza de granola natural a las 13:40hs',
+    [
+      {
+        foodItem: 'Crema de maní natural',
+        inputAlias: 'crema de mani natural',
+      },
+    ]
+  );
+  assert.equal(mismatchAlignment, false);
+
+  const correctAlignment = __testParsedItemsAlignWithUserInput(
+    'registra 1 taza de granola natural a las 13:40hs',
+    [
+      {
+        foodItem: 'Granola natural',
+        inputAlias: 'granola natural',
+      },
+    ]
+  );
+  assert.equal(correctAlignment, true);
+
+  const temporalOverride = __testEnforceExplicitTemporalFromRawMessage({
+    rawMessage: 'registra 1 taza de granola natural a las 13:40hs',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    parsed: {
+      ok: true,
+      temporal: {
+        localDate: '2026-04-02',
+        localTime: '14:56',
+        loggedAt: '2026-04-02T17:56:00.000Z',
+        timeZone: 'America/Argentina/Buenos_Aires',
+        usedRuntimeNow: true,
+      },
+      items: [
+        {
+          foodItem: 'Granola natural',
+        },
+      ],
+    },
+  });
+  assert.equal(temporalOverride?.temporal?.localTime, '13:40');
+  assert.equal(temporalOverride?.temporal?.usedRuntimeNow, false);
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',
