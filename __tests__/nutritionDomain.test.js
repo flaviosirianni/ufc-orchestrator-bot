@@ -8,6 +8,8 @@ import {
   ensureNutritionSchema,
   findFoodCatalogCandidates,
   getNutritionSummary,
+  listNutritionIntakesByDate,
+  listNutritionUserCatalogUsage,
   listNutritionUserProductDefaults,
   removeNutritionUserProductDefault,
   setNutritionUserProductDefault,
@@ -22,6 +24,7 @@ import {
 import {
   __testEnforceExplicitTemporalFromRawMessage,
   __testParsedItemsAlignWithUserInput,
+  __testResolveTemporalFromStructured,
 } from '../src/bots/nutrition/runtime.js';
 
 function cleanupUserData(userId = '') {
@@ -152,6 +155,20 @@ export async function runNutritionDomainTests() {
     rawInput: '100g arroz cocido',
     items: intakeDay2.items,
   });
+
+  const persistedRows = listNutritionIntakesByDate(userId, '2026-03-21', { limit: 5 });
+  assert.equal(persistedRows.length >= 1, true);
+  assert.equal(Number.isFinite(Number(persistedRows[0].catalogItemId)), true);
+  assert.equal(persistedRows[0].resolutionMode, 'catalog');
+  assert.equal(persistedRows[0].matchConfidence, 'media');
+  assert.equal(String(persistedRows[0].inputAlias || '').includes('arroz'), true);
+
+  const usageRows = listNutritionUserCatalogUsage(userId, { limit: 10 });
+  assert.equal(usageRows.length >= 1, true);
+  assert.equal(
+    usageRows.some((row) => String(row.productName || '').toLowerCase() === 'arroz cocido'),
+    true
+  );
 
   const summary = getNutritionSummary(userId, '2026-03-21');
   assert.equal(summary.today.caloriesKcal, 130);
@@ -418,6 +435,19 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(mismatchAlignment, false);
 
+  const aliasAlignedButCatalogMismatch = __testParsedItemsAlignWithUserInput(
+    'anotame 1 shake de prote con agua',
+    [
+      {
+        foodItem: 'Block chocolate con leche con mani',
+        inputAlias: 'shake de prote con agua',
+        catalogItemId: 123,
+        resolutionMode: 'catalog',
+      },
+    ]
+  );
+  assert.equal(aliasAlignedButCatalogMismatch, false);
+
   const correctAlignment = __testParsedItemsAlignWithUserInput(
     'registra 1 taza de granola natural a las 13:40hs',
     [
@@ -450,6 +480,17 @@ export async function runNutritionDomainTests() {
   });
   assert.equal(temporalOverride?.temporal?.localTime, '13:40');
   assert.equal(temporalOverride?.temporal?.usedRuntimeNow, false);
+
+  const structuredTemporalOverride = __testResolveTemporalFromStructured({
+    rawMessage: '2026-04-01 registra 1 taza de granola natural a las 13:40hs',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    temporal: {
+      localDate: '2026-04-02',
+      localTime: '14:56',
+    },
+  });
+  assert.equal(structuredTemporalOverride.localDate, '2026-04-01');
+  assert.equal(structuredTemporalOverride.localTime, '13:40');
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',

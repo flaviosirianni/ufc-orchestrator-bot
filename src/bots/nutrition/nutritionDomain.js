@@ -366,6 +366,8 @@ export function resolveTemporalContext({
     localTime: timeHint.localTime || nowLocal.localTime,
     loggedAt,
     strippedMessage: stripTemporalTokens(rawMessage, [dateHint.matchedToken, timeHint.matchedToken]),
+    hadExplicitDate: Boolean(dateHint.matchedToken),
+    hadExplicitTime: Boolean(timeHint.matchedToken),
     usedRuntimeNow: !dateHint.matchedToken && !timeHint.matchedToken,
   };
 }
@@ -414,6 +416,10 @@ export function parseIntakePayload({
       confidence: 'media',
       source: entry.source || 'base_estandar',
       brandOrNotes: entry.brand || null,
+      catalogItemId: Number(entry.id) || null,
+      inputAlias: quantity.nameHint || chunk,
+      resolutionMode: 'catalog',
+      matchConfidence: 'media',
     });
   }
 

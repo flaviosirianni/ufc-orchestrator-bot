@@ -216,6 +216,21 @@ function isNonNegativeFinite(value) {
   return Number.isFinite(Number(value)) && Number(value) >= 0;
 }
 
+function normalizeResolutionMode(value = '', { fallback = '' } = {}) {
+  const normalized = normalizeToken(value);
+  if (normalized === 'catalog' || normalized === 'estimate') return normalized;
+  return fallback;
+}
+
+function normalizeMatchConfidence(value = '', { fallback = '' } = {}) {
+  const normalized = normalizeToken(value);
+  if (normalized === 'alta' || normalized === 'media' || normalized === 'baja') return normalized;
+  if (normalized === 'high') return 'alta';
+  if (normalized === 'medium') return 'media';
+  if (normalized === 'low') return 'baja';
+  return fallback;
+}
+
 function withOperationReceipt({
   userId = '',
   operationType = '',
@@ -359,6 +374,10 @@ export function ensureNutritionSchema() {
       fat_g REAL NOT NULL,
       confidence TEXT,
       source TEXT,
+      catalog_item_id INTEGER,
+      input_alias TEXT,
+      resolution_mode TEXT,
+      match_confidence TEXT,
       raw_input TEXT,
       created_at TEXT NOT NULL
     );
@@ -532,6 +551,28 @@ export function ensureNutritionSchema() {
     } catch {
       // column already exists
     }
+  }
+
+  const intakeMigrations = [
+    ['catalog_item_id', 'INTEGER'],
+    ['input_alias', 'TEXT'],
+    ['resolution_mode', 'TEXT'],
+    ['match_confidence', 'TEXT'],
+  ];
+  for (const [col, colType] of intakeMigrations) {
+    try {
+      db.exec(`ALTER TABLE nutrition_intakes ADD COLUMN ${col} ${colType}`);
+    } catch {
+      // column already exists
+    }
+  }
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_nutrition_intakes_user_catalog_logged
+        ON nutrition_intakes (telegram_user_id, catalog_item_id, logged_at DESC)
+    `);
+  } catch {
+    // best effort for older sqlite states
   }
 
   initialized = true;
@@ -1178,6 +1219,17 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
       fatG,
       confidence: String(row?.confidence || 'media').trim() || 'media',
       source: String(row?.source || 'base_estandar').trim() || 'base_estandar',
+      catalogItemId: Number.isFinite(Number(row?.catalogItemId)) ? Number(row?.catalogItemId) : null,
+      inputAlias: String(row?.inputAlias || '').trim() || null,
+      resolutionMode: normalizeResolutionMode(row?.resolutionMode, {
+        fallback:
+          Number.isFinite(Number(row?.catalogItemId)) && Number(row?.catalogItemId) > 0
+            ? 'catalog'
+            : normalizeSourceForEstimate(String(row?.source || '')) || 'catalog',
+      }),
+      matchConfidence: normalizeMatchConfidence(row?.matchConfidence || row?.confidence, {
+        fallback: normalizeMatchConfidence(row?.confidence, { fallback: 'media' }),
+      }),
     });
   }
 
@@ -1185,11 +1237,11 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
     INSERT INTO nutrition_intakes (
       telegram_user_id, logged_at, local_date, local_time, timezone, meal_type, food_item,
       quantity_value, quantity_unit, brand_or_notes, calories_kcal, protein_g, carbs_g, fat_g,
-      confidence, source, raw_input, created_at
+      confidence, source, catalog_item_id, input_alias, resolution_mode, match_confidence, raw_input, created_at
     ) VALUES (
       @userId, @loggedAt, @localDate, @localTime, @timezone, @mealType, @foodItem,
       @quantityValue, @quantityUnit, @brandOrNotes, @caloriesKcal, @proteinG, @carbsG, @fatG,
-      @confidence, @source, @rawInput, @createdAt
+      @confidence, @source, @catalogItemId, @inputAlias, @resolutionMode, @matchConfidence, @rawInput, @createdAt
     )
   `);
 
@@ -1213,6 +1265,20 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
         fatG: row.fatG,
         confidence: String(row.confidence || 'media').trim() || 'media',
         source: String(row.source || 'base_estandar').trim() || 'base_estandar',
+        catalogItemId:
+          Number.isFinite(Number(row.catalogItemId)) && Number(row.catalogItemId) > 0
+            ? Number(row.catalogItemId)
+            : null,
+        inputAlias: String(row.inputAlias || '').trim() || null,
+        resolutionMode: normalizeResolutionMode(row.resolutionMode, {
+          fallback:
+            Number.isFinite(Number(row.catalogItemId)) && Number(row.catalogItemId) > 0
+              ? 'catalog'
+              : normalizeSourceForEstimate(String(row.source || '')) || 'catalog',
+        }),
+        matchConfidence: normalizeMatchConfidence(row.matchConfidence || row.confidence, {
+          fallback: 'media',
+        }),
         rawInput: String(payload.rawInput || '').trim() || null,
         createdAt: new Date().toISOString(),
       });
@@ -1550,6 +1616,11 @@ export function listNutritionIntakesByDate(userId = '', localDate = '', { limit 
       protein_g AS proteinG,
       carbs_g AS carbsG,
       fat_g AS fatG,
+      catalog_item_id AS catalogItemId,
+      input_alias AS inputAlias,
+      resolution_mode AS resolutionMode,
+      match_confidence AS matchConfidence,
+      confidence,
       source
     FROM nutrition_intakes
     WHERE telegram_user_id = ? AND local_date = ?
@@ -1580,6 +1651,11 @@ export function listRecentNutritionIntakes(userId = '', { limit = 20 } = {}) {
       protein_g AS proteinG,
       carbs_g AS carbsG,
       fat_g AS fatG,
+      catalog_item_id AS catalogItemId,
+      input_alias AS inputAlias,
+      resolution_mode AS resolutionMode,
+      match_confidence AS matchConfidence,
+      confidence,
       source
     FROM nutrition_intakes
     WHERE telegram_user_id = ?
@@ -1716,6 +1792,13 @@ export function getTodayNutritionIntakes(userId = '', localDate = '', { limit = 
       quantity_unit AS quantityUnit,
       calories_kcal AS caloriesKcal,
       protein_g AS proteinG
+      ,
+      catalog_item_id AS catalogItemId,
+      input_alias AS inputAlias,
+      resolution_mode AS resolutionMode,
+      match_confidence AS matchConfidence,
+      confidence,
+      source
     FROM nutrition_intakes
     WHERE telegram_user_id = ? AND local_date = ?
     ORDER BY logged_at DESC, id DESC
@@ -1723,6 +1806,73 @@ export function getTodayNutritionIntakes(userId = '', localDate = '', { limit = 
   `
     )
     .all(normalizedUserId, normalizedDate, Math.max(1, Number(limit) || 30));
+}
+
+function normalizeSourceForEstimate(source = '') {
+  const normalizedSource = normalizeToken(source);
+  if (normalizedSource === 'estimacion gpt' || normalizedSource === 'estimacion_gpt') {
+    return 'estimate';
+  }
+  return '';
+}
+
+export function listNutritionUserCatalogUsage(userId = '', { limit = 25 } = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+
+  const rows = getDb()
+    .prepare(
+      `
+    SELECT
+      i.catalog_item_id AS catalogItemId,
+      c.product_name AS productName,
+      c.brand,
+      c.normalized_name AS normalizedName,
+      c.normalized_brand AS normalizedBrand,
+      c.portion_g AS portionG,
+      c.calories_kcal AS caloriesKcal,
+      c.protein_g AS proteinG,
+      c.carbs_g AS carbsG,
+      c.fat_g AS fatG,
+      c.source,
+      MAX(i.logged_at) AS lastLoggedAt,
+      COUNT(*) AS usageCount,
+      MAX(
+        CASE
+          WHEN i.input_alias IS NOT NULL AND TRIM(i.input_alias) <> '' THEN i.input_alias
+          ELSE ''
+        END
+      ) AS lastInputAlias
+    FROM nutrition_intakes i
+    JOIN nutrition_food_catalog c ON c.id = i.catalog_item_id
+    WHERE i.telegram_user_id = ?
+      AND i.catalog_item_id IS NOT NULL
+    GROUP BY i.catalog_item_id
+    ORDER BY usageCount DESC, lastLoggedAt DESC
+    LIMIT ?
+  `
+    )
+    .all(normalizedUserId, Math.max(1, Number(limit) || 25));
+
+  return rows.map((row) => ({
+    id: Number(row?.catalogItemId) || null,
+    catalogItemId: Number(row?.catalogItemId) || null,
+    productName: String(row?.productName || '').trim(),
+    brand: String(row?.brand || '').trim(),
+    normalizedName: String(row?.normalizedName || '').trim(),
+    normalizedBrand: String(row?.normalizedBrand || '').trim(),
+    portionG: toNumberOrNull(row?.portionG),
+    caloriesKcal: toNumberOrNull(row?.caloriesKcal),
+    proteinG: toNumberOrNull(row?.proteinG),
+    carbsG: toNumberOrNull(row?.carbsG),
+    fatG: toNumberOrNull(row?.fatG),
+    source: String(row?.source || '').trim(),
+    preferenceAlias: String(row?.lastInputAlias || '').trim() || '',
+    preferenceUsageCount: Number(row?.usageCount || 0),
+    usageCount: Number(row?.usageCount || 0),
+    lastLoggedAt: String(row?.lastLoggedAt || '').trim(),
+  }));
 }
 
 export function deleteNutritionIntake(userId = '', intakeId = null) {

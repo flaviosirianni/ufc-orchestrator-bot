@@ -28,6 +28,7 @@ import {
   findFoodCatalogCandidates,
   getFoodCatalogPreview,
   getLatestNutritionWeighin,
+  listNutritionUserCatalogUsage,
   listFoodCatalogEntries,
   listNutritionUserProductDefaults,
   listNutritionIntakesByDate,
@@ -57,8 +58,8 @@ import {
   resolveTemporalContext,
 } from './nutritionDomain.js';
 
-const DEFAULT_MODEL = process.env.BOT_MODEL || process.env.BETTING_MODEL || 'gpt-4.1-mini';
-const DEFAULT_SMART_MODELS = 'gpt-5.4,gpt-5.2,gpt-4.1-mini';
+const DEFAULT_MODEL = process.env.BOT_MODEL || process.env.BETTING_MODEL || 'gpt-5.4-mini';
+const DEFAULT_SMART_MODELS = 'gpt-5.4,gpt-5.4-mini,gpt-5.2,gpt-4.1-mini';
 const DEFAULT_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
@@ -1195,17 +1196,52 @@ function tokenizeForIntakeMatch(value = '') {
     .filter((token) => token.length >= 3 && !NUTRITION_MATCH_STOPWORDS.has(token));
 }
 
+function hasApproxTokenOverlap(itemTokens = [], messageTokens = []) {
+  if (!Array.isArray(itemTokens) || !itemTokens.length) return false;
+  if (!Array.isArray(messageTokens) || !messageTokens.length) return false;
+
+  for (const itemToken of itemTokens) {
+    for (const messageToken of messageTokens) {
+      if (itemToken === messageToken) return true;
+      if (
+        itemToken.length >= 4 &&
+        messageToken.length >= 4 &&
+        (itemToken.startsWith(messageToken) || messageToken.startsWith(itemToken))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {}) {
-  const messageTokens = new Set(tokenizeForIntakeMatch(rawMessage));
-  if (!messageTokens.size) return true;
+  const messageTokens = tokenizeForIntakeMatch(rawMessage);
+  if (!messageTokens.length) return true;
   if (!Array.isArray(parsedItems) || !parsedItems.length) return false;
 
   for (const item of parsedItems) {
-    const itemText = String(item?.inputAlias || item?.foodItem || '').trim();
-    const itemTokens = tokenizeForIntakeMatch(itemText);
-    if (!itemTokens.length) continue;
-    const hasOverlap = itemTokens.some((token) => messageTokens.has(token));
-    if (!hasOverlap) {
+    const aliasTokens = tokenizeForIntakeMatch(String(item?.inputAlias || '').trim());
+    const resolvedTokens = tokenizeForIntakeMatch(String(item?.foodItem || '').trim());
+    const aliasOverlap = hasApproxTokenOverlap(aliasTokens, messageTokens);
+    const resolvedOverlap = hasApproxTokenOverlap(resolvedTokens, messageTokens);
+    const hasCatalogResolution =
+      Number.isFinite(Number(item?.catalogItemId)) && Number(item?.catalogItemId) > 0
+        ? true
+        : normalizeCatalogToken(item?.resolutionMode || '') === 'catalog';
+
+    if (hasCatalogResolution) {
+      if (aliasTokens.length && !aliasOverlap) return false;
+      if (resolvedTokens.length && !resolvedOverlap) return false;
+      if (!aliasTokens.length && !resolvedTokens.length) return false;
+      continue;
+    }
+
+    if (aliasTokens.length) {
+      if (!aliasOverlap) return false;
+      continue;
+    }
+    if (resolvedTokens.length && !resolvedOverlap) {
       return false;
     }
   }
@@ -1240,6 +1276,62 @@ function enforceExplicitTemporalFromRawMessage({
       usedRuntimeNow: false,
     },
   };
+}
+
+function buildIntakeSemanticMismatchReply() {
+  return [
+    'Necesito confirmar esa ingesta para no registrar algo distinto a lo que escribiste.',
+    'Decimelo en formato directo por item, por ejemplo:',
+    '`13:40 1 taza granola natural`',
+    'Si querés, también podés mandar foto de etiqueta para guardarlo exacto.',
+  ].join('\n');
+}
+
+function itemUsesEstimatedResolution(item = {}) {
+  const resolutionMode = normalizeCatalogToken(item?.resolutionMode || '');
+  if (resolutionMode === 'estimate') return true;
+  const source = normalizeCatalogToken(item?.source || '');
+  return source === 'estimacion gpt' || source === 'estimacion_gpt';
+}
+
+function parsedHasEstimatedRows(parsed = null) {
+  return Boolean(
+    parsed?.items?.some((item) => itemUsesEstimatedResolution(item))
+  );
+}
+
+function tryRepairParsedFromStructured({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  modelStructured = null,
+  userId = '',
+  catalogRows = [],
+  userDefaultRows = [],
+} = {}) {
+  if (String(modelStructured?.action || '') !== 'log_intake') return null;
+  if (!Array.isArray(modelStructured?.items) || !modelStructured.items.length) return null;
+
+  const rebuilt = buildParsedIntakeFromStructured({
+    userId,
+    rawMessage,
+    userTimeZone,
+    structured: modelStructured,
+    catalogRows,
+    userDefaultRows,
+    inferenceSource: 'text_structured',
+  });
+  if (!rebuilt?.ok) return null;
+  const enforcedTemporal = enforceExplicitTemporalFromRawMessage({
+    rawMessage,
+    userTimeZone,
+    parsed: rebuilt,
+  });
+  const aligned = parsedItemsAlignWithUserInput({
+    rawMessage,
+    parsedItems: enforcedTemporal?.items || [],
+  });
+  if (!aligned) return null;
+  return enforcedTemporal;
 }
 
 function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
@@ -1320,6 +1412,18 @@ export function __testEnforceExplicitTemporalFromRawMessage({
   });
 }
 
+export function __testResolveTemporalFromStructured({
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  temporal = {},
+} = {}) {
+  return resolveTemporalFromStructured({
+    rawMessage,
+    userTimeZone,
+    temporal,
+  });
+}
+
 function mergeCatalogRows(primary = [], fallback = []) {
   const merged = [];
   const seen = new Set();
@@ -1365,7 +1469,7 @@ function formatUserDefaultsForStructuredParser(rows = []) {
   return rows
     .slice(0, 80)
     .map((row) => {
-      const alias = String(row?.aliasLabel || '').trim();
+      const alias = String(row?.aliasLabel || row?.preferenceAlias || '').trim();
       const id = Number(row?.catalogItemId || row?.id);
       const name = String(row?.productName || '').trim();
       const brand = String(row?.brand || '').trim();
@@ -1376,6 +1480,29 @@ function formatUserDefaultsForStructuredParser(rows = []) {
         `name=${name || '-'}`,
         `brand=${brand || '-'}`,
         `usage=${Number.isFinite(usageCount) ? usageCount : 0}`,
+      ].join(' | ');
+    })
+    .join('\n');
+}
+
+function formatUserCatalogHistoryForStructuredParser(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return '(sin historial de productos catalogados)';
+  return rows
+    .slice(0, 80)
+    .map((row) => {
+      const id = Number(row?.catalogItemId || row?.id);
+      const alias = String(row?.preferenceAlias || row?.inputAlias || '').trim();
+      const name = String(row?.productName || '').trim();
+      const brand = String(row?.brand || '').trim();
+      const usageCount = Number(row?.usageCount || row?.preferenceUsageCount || 0);
+      const lastLoggedAt = String(row?.lastLoggedAt || '').trim();
+      return [
+        `catalog_id=${Number.isFinite(id) ? id : '?'}`,
+        `name=${name || '-'}`,
+        `brand=${brand || '-'}`,
+        `alias_reciente=${alias || '-'}`,
+        `usos=${Number.isFinite(usageCount) ? usageCount : 0}`,
+        `ultimo=${lastLoggedAt || '-'}`,
       ].join(' | ');
     })
     .join('\n');
@@ -1542,12 +1669,19 @@ function resolveTemporalFromStructured({
     rawMessage,
     userTimeZone,
   });
-  const localDate = isValidIsoDate(temporal?.localDate)
-    ? String(temporal.localDate).trim()
-    : baseline.localDate;
-  const localTime = isValidHourMinute(temporal?.localTime)
-    ? String(temporal.localTime).trim()
-    : baseline.localTime;
+  const hasExplicitDate = Boolean(baseline?.hadExplicitDate);
+  const hasExplicitTime = Boolean(baseline?.hadExplicitTime);
+
+  const localDate = hasExplicitDate
+    ? baseline.localDate
+    : isValidIsoDate(temporal?.localDate)
+      ? String(temporal.localDate).trim()
+      : baseline.localDate;
+  const localTime = hasExplicitTime
+    ? baseline.localTime
+    : isValidHourMinute(temporal?.localTime)
+      ? String(temporal.localTime).trim()
+      : baseline.localTime;
 
   const explicitTemporal = resolveTemporalContext({
     rawMessage: `${localDate} ${localTime}`,
@@ -1612,6 +1746,9 @@ function buildParsedIntakeFromStructured({
           confidence: normalizeConfidenceLabel(structuredItem?.confidence, 'baja'),
           source: 'estimacion_gpt',
           brandOrNotes: String(structuredItem?.brand || '').trim() || null,
+          inputAlias: String(structuredItem?.foodName || '').trim() || null,
+          resolutionMode: 'estimate',
+          matchConfidence: normalizeConfidenceLabel(structuredItem?.confidence, 'baja'),
           inferenceSource,
         });
         continue;
@@ -1643,6 +1780,8 @@ function buildParsedIntakeFromStructured({
       catalogItemId: Number(entry.id) || null,
       inputAlias: String(structuredItem?.foodName || '').trim() || null,
       matchedPreferenceAlias: resolved?.matchedPreferenceAlias || null,
+      resolutionMode: 'catalog',
+      matchConfidence: normalizeConfidenceLabel(structuredItem?.confidence, 'media'),
       inferenceSource,
     });
   }
@@ -1680,6 +1819,7 @@ async function parseStructuredIntakeWithModel({
   userTimeZone = DEFAULT_USER_TIMEZONE,
   catalogRows = [],
   userDefaultRows = [],
+  userCatalogHistoryRows = [],
 } = {}) {
   const instructions = [
     'Sos un parser de ingestas de nutricion.',
@@ -1694,7 +1834,7 @@ async function parseStructuredIntakeWithModel({
     'Reglas:',
     '- Si es una ingesta registrable: action=log_intake y al menos 1 item.',
     '- Usa catalog_id cuando encuentres producto en el catalogo recibido.',
-    '- Prioriza primero "productos fijos por usuario" (alias personales), luego catalogo general.',
+    '- Prioriza primero "productos fijos por usuario" (alias personales), luego historial de productos consumidos por usuario, y recién después el catalogo general.',
     '- No inventes catalog_id; si no existe, deja null y completa food_name.',
     '- Si hay temporalidad explicita, mapea local_date/local_time; si no, usa null.',
     '- Si no hay match de catálogo pero se entiende el item, estimá macros del item en estimated_totals y confidence media/baja (no bloquear).',
@@ -1718,6 +1858,9 @@ async function parseStructuredIntakeWithModel({
     '',
     'Productos fijos por usuario (alias personales -> catalog_id):',
     formatUserDefaultsForStructuredParser(userDefaultRows),
+    '',
+    'Historial de productos catalogados consumidos por usuario:',
+    formatUserCatalogHistoryForStructuredParser(userCatalogHistoryRows),
     '',
     'Catalogo nutricional (id y macros por porcion):',
     formatCatalogRowsForStructuredParser(catalogRows),
@@ -2880,14 +3023,38 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           : [];
         const defaultRowsRaw = listNutritionUserProductDefaults(userId, { limit: 30 });
         const defaultRowsAsCatalog = mapDefaultRowsToPreferredCatalogRows(defaultRowsRaw);
+        const userCatalogHistoryRows = listNutritionUserCatalogUsage(userId, { limit: 40 });
+        const userCatalogHistoryAsCatalog = userCatalogHistoryRows.map((row) => ({
+          id: Number(row?.catalogItemId || row?.id) || null,
+          productName: String(row?.productName || '').trim(),
+          brand: String(row?.brand || '').trim(),
+          normalizedName: String(row?.normalizedName || '').trim(),
+          normalizedBrand: String(row?.normalizedBrand || '').trim(),
+          portionG: Number(row?.portionG),
+          caloriesKcal: Number(row?.caloriesKcal),
+          proteinG: Number(row?.proteinG),
+          carbsG: Number(row?.carbsG),
+          fatG: Number(row?.fatG),
+          source: String(row?.source || '').trim() || 'catalog_history',
+          preferenceAlias: String(row?.preferenceAlias || '').trim() || '',
+          preferenceUsageCount: Number(row?.preferenceUsageCount || row?.usageCount || 0),
+          usageCount: Number(row?.usageCount || 0),
+          lastLoggedAt: String(row?.lastLoggedAt || '').trim(),
+        }));
         const userDefaultMatches = cleanMessage
           ? findNutritionUserPreferredCatalogEntries(userId, cleanMessage, { limit: 40 })
           : [];
-        const userDefaultRows = mergeCatalogRows(userDefaultMatches, defaultRowsAsCatalog);
+        const userDefaultRows = mergeCatalogRows(
+          userDefaultMatches,
+          mergeCatalogRows(defaultRowsAsCatalog, userCatalogHistoryAsCatalog)
+        );
         const catalogFallbackRows = listFoodCatalogEntries().slice(0, 160);
         const catalogRowsForParsing = mergeCatalogRows(
           userDefaultRows,
-          mergeCatalogRows(catalogCandidates, catalogFallbackRows)
+          mergeCatalogRows(
+            userCatalogHistoryAsCatalog,
+            mergeCatalogRows(catalogCandidates, catalogFallbackRows)
+          )
         );
         const catalogRowsForNormalization = catalogRowsForParsing.length
           ? catalogRowsForParsing
@@ -3082,14 +3249,6 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
-        if (!parsed) {
-          parsed = parseIntakePayload({
-            rawMessage: cleanMessage,
-            userTimeZone,
-          });
-          lexicalParsed = parsed;
-        }
-
         if (!parsed?.ok && cleanMessage) {
           try {
             modelStructured = await parseStructuredIntakeWithModel({
@@ -3099,6 +3258,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               userTimeZone,
               catalogRows: catalogRowsForParsing,
               userDefaultRows,
+              userCatalogHistoryRows,
             });
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, modelStructured.usage);
             if (modelStructured.usage) {
@@ -3128,8 +3288,12 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             userDefaultRows,
             inferenceSource: 'text_structured',
           });
-          if (parsedFromStructured.ok || !parsed?.ok) {
-            parsed = parsedFromStructured;
+          if (parsedFromStructured.ok) {
+            parsed = enforceExplicitTemporalFromRawMessage({
+              rawMessage: cleanMessage,
+              userTimeZone,
+              parsed: parsedFromStructured,
+            });
           }
         }
 
@@ -3171,6 +3335,22 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               userTimeZone,
               parsed: parsedFromModel,
             });
+          }
+        }
+
+        if (!parsed?.ok && cleanMessage) {
+          lexicalParsed = parseIntakePayload({
+            rawMessage: cleanMessage,
+            userTimeZone,
+          });
+          if (lexicalParsed?.ok) {
+            parsed = enforceExplicitTemporalFromRawMessage({
+              rawMessage: cleanMessage,
+              userTimeZone,
+              parsed: lexicalParsed,
+            });
+          } else {
+            parsed = lexicalParsed;
           }
         }
 
@@ -3225,22 +3405,39 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           ].join('\n');
         }
 
-        const usedModelFallback =
-          Boolean(cleanMessage) &&
-          !lexicalParsed?.ok &&
-          (modelStructured?.ok || modelNormalization?.ok);
-        if (usedModelFallback) {
+        if (parsed?.ok && cleanMessage) {
+          parsed = enforceExplicitTemporalFromRawMessage({
+            rawMessage: cleanMessage,
+            userTimeZone,
+            parsed,
+          });
           const alignedWithUserInput = parsedItemsAlignWithUserInput({
             rawMessage: cleanMessage,
-            parsedItems: parsed.items,
+            parsedItems: parsed?.items || [],
           });
           if (!alignedWithUserInput) {
-            return [
-              'Necesito confirmar esa ingesta para no registrar algo distinto a lo que escribiste.',
-              'Decimelo en formato directo por item, por ejemplo:',
-              '`13:40 1 taza granola natural`',
-              'Si querés, también podés mandar foto de etiqueta para guardarlo exacto.',
-            ].join('\n');
+            const repaired = tryRepairParsedFromStructured({
+              rawMessage: cleanMessage,
+              userTimeZone,
+              modelStructured,
+              userId,
+              catalogRows: catalogRowsForParsing,
+              userDefaultRows,
+            });
+            if (repaired?.ok) {
+              parsed = repaired;
+            } else {
+              return buildIntakeSemanticMismatchReply();
+            }
+          }
+        }
+
+        if (parsedHasEstimatedRows(parsed)) {
+          includeConfidenceInReply = true;
+          if (!shouldRequestLabelPhotoHint) {
+            shouldRequestLabelPhotoHint = parsed.items.some((item) =>
+              looksLikePackagedAlias(item?.inputAlias || item?.foodItem)
+            );
           }
         }
 
@@ -3329,6 +3526,9 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
           formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
           `🎯 Estado: ${status}`,
+          parsedHasEstimatedRows(parsed)
+            ? '🧠 Registré al menos un item con valores estimados. Si querés más precisión, mandame foto del frente + tabla nutricional.'
+            : null,
           shouldRequestLabelPhotoHint
             ? '📦 Si es un producto de paquete, mandame foto de la etiqueta nutricional y lo agrego a INFO_NUTRICIONAL.'
             : null,
