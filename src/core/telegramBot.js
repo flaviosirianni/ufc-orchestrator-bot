@@ -1551,14 +1551,8 @@ export function startTelegramBot(router, options = {}) {
         setGuidedAction(chatId, defaultGuidedAction);
       }
       await sendMenu(chatId, 'main');
-      if (isGuidedStrictInteractionMode(interactionMode)) {
-        await sendBotMessage(
-          chatId,
-          guidedMenuId === 'nutrition_v1'
-            ? QUICK_ACTION_HINTS.nutrition_log_intake
-            : QUICK_ACTION_HINTS.analyze_quotes,
-          { menuScope: 'main' }
-        );
+      if (isGuidedStrictInteractionMode(interactionMode) && guidedMenuId !== 'nutrition_v1') {
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
       }
       return;
     }
