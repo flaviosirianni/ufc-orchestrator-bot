@@ -47,42 +47,65 @@ const GUIDED_INPUT_ACTIONS = new Set([
 
 const MAIN_MENU_ROWS = [
   [
-    { text: 'Apuestas', callback_data: 'menu:bets' },
-    { text: 'Evento', callback_data: 'menu:event' },
+    { text: '📚 Apuestas', callback_data: 'menu:bets' },
+    { text: '📰 Evento', callback_data: 'menu:event' },
   ],
   [
-    { text: 'Config', callback_data: 'menu:config' },
-    { text: 'Ayuda', callback_data: 'qa:help' },
+    { text: '⚙️ Configuración', callback_data: 'menu:config' },
+    { text: '🆘 Ayuda', callback_data: 'qa:help' },
   ],
 ];
 
 const GUIDED_MAIN_MENU_ROWS = [
-  [{ text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
   [
-    { text: 'Ledger', callback_data: 'menu:ledger' },
-    { text: 'Creditos', callback_data: 'qa:view_credits' },
+    { text: '📸 Análisis', callback_data: 'menu:ufc_analysis' },
+    { text: '🧾 Ledger', callback_data: 'menu:ufc_ledger' },
   ],
   [
-    { text: 'Ayuda', callback_data: 'qa:help' },
+    { text: '📰 Evento', callback_data: 'menu:ufc_event' },
+    { text: '⚙️ Configuración', callback_data: 'menu:ufc_config' },
+  ],
+  [
+    { text: '💳 Créditos', callback_data: 'qa:view_credits' },
+    { text: '🆘 Ayuda', callback_data: 'qa:help' },
   ],
 ];
 
 const GUIDED_MAIN_MENU_ROWS_MINIMAL = [
-  [{ text: 'Analizar', callback_data: 'qa:analyze_quotes' }],
-  [{ text: 'Creditos', callback_data: 'qa:view_credits' }],
-  [{ text: 'Ayuda', callback_data: 'qa:help' }],
+  [{ text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
+  [{ text: '💳 Créditos', callback_data: 'qa:view_credits' }],
+  [{ text: '🆘 Ayuda', callback_data: 'qa:help' }],
+];
+
+const GUIDED_ANALYSIS_MENU_ROWS = [
+  [{ text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
 const GUIDED_LEDGER_MENU_ROWS = [
   [
-    { text: 'Registrar', callback_data: 'qa:record_bet' },
-    { text: 'Cerrar', callback_data: 'qa:settle_bet' },
+    { text: '📝 Registrar apuesta', callback_data: 'qa:record_bet' },
+    { text: '✅ Cerrar apuesta', callback_data: 'qa:settle_bet' },
   ],
   [
-    { text: 'Pendientes', callback_data: 'qa:list_pending' },
-    { text: 'Historial', callback_data: 'qa:list_history' },
+    { text: '📌 Pendientes', callback_data: 'qa:list_pending' },
+    { text: '🗂 Historial', callback_data: 'qa:list_history' },
   ],
-  [{ text: '⬅ Volver', callback_data: 'menu:main' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const GUIDED_EVENT_MENU_ROWS = [
+  [
+    { text: '📊 Proyecciones', callback_data: 'qa:event_projections' },
+    { text: '📰 Últimas novedades', callback_data: 'qa:latest_news' },
+  ],
+  [{ text: '🔔 Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const GUIDED_CONFIG_MENU_ROWS = [
+  [{ text: '📋 Ver configuración', callback_data: 'qa:view_config' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
 const NUTRITION_GUIDED_MAIN_MENU_ROWS = [
@@ -170,48 +193,48 @@ const NUTRITION_TUTORIAL_AVANZADO_ROWS = [
 
 const BETS_MENU_ROWS = [
   [
-    { text: 'Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-    { text: 'Registrar', callback_data: 'act:bet_record' },
+    { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
+    { text: '📝 Registrar apuesta', callback_data: 'act:bet_record' },
   ],
   [
-    { text: 'Pendientes', callback_data: 'qa:list_pending' },
-    { text: 'Cerrar', callback_data: 'qa:settle_bet' },
+    { text: '📌 Pendientes', callback_data: 'qa:list_pending' },
+    { text: '✅ Cerrar apuesta', callback_data: 'qa:settle_bet' },
   ],
   [
-    { text: 'Corregir', callback_data: 'qa:undo_last' },
-    { text: '⬅ Volver', callback_data: 'menu:main' },
+    { text: '🛠 Corregir último', callback_data: 'qa:undo_last' },
+    { text: '⬅ Volver al menú', callback_data: 'menu:main' },
   ],
 ];
 
 const EVENT_MENU_ROWS = [
   [
-    { text: 'Proyecciones', callback_data: 'qa:event_projections' },
-    { text: 'Ultimas novedades', callback_data: 'qa:latest_news' },
+    { text: '📊 Proyecciones', callback_data: 'qa:event_projections' },
+    { text: '📰 Últimas novedades', callback_data: 'qa:latest_news' },
   ],
   [
-    { text: 'Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
-    { text: '⬅ Volver', callback_data: 'menu:main' },
+    { text: '🔔 Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
+    { text: '⬅ Volver al menú', callback_data: 'menu:main' },
   ],
 ];
 
 const CONFIG_MENU_ROWS = [
   [
-    { text: 'Ver config', callback_data: 'qa:view_config' },
-    { text: 'Unidad', callback_data: 'act:cfg_unit' },
+    { text: '📋 Ver configuración', callback_data: 'qa:view_config' },
+    { text: '🎯 Unidad', callback_data: 'act:cfg_unit' },
   ],
   [
-    { text: 'Riesgo', callback_data: 'act:cfg_risk' },
+    { text: '⚖️ Riesgo', callback_data: 'act:cfg_risk' },
   ],
   [
-    { text: 'Bankroll', callback_data: 'act:cfg_bankroll' },
-    { text: 'Stake/Exposicion', callback_data: 'act:cfg_stake_exposure' },
+    { text: '💰 Bankroll', callback_data: 'act:cfg_bankroll' },
+    { text: '📏 Stake / Exposición', callback_data: 'act:cfg_stake_exposure' },
   ],
   [
-    { text: 'Timezone', callback_data: 'act:cfg_timezone' },
-    { text: 'Creditos', callback_data: 'qa:view_credits' },
+    { text: '🌍 Timezone', callback_data: 'act:cfg_timezone' },
+    { text: '💳 Créditos', callback_data: 'qa:view_credits' },
   ],
   [
-    { text: '⬅ Volver', callback_data: 'menu:main' },
+    { text: '⬅ Volver al menú', callback_data: 'menu:main' },
   ],
 ];
 
@@ -328,9 +351,9 @@ const QUICK_ACTION_HINTS = {
     '🆘 Ayuda de botones',
     '',
     '🏠 Principal',
-    '- `Apuestas`: operaciones de ledger y lectura de cuotas.',
-    '- `Evento`: proyecciones y novedades del próximo evento.',
-    '- `Config`: ajustes de perfil de staking.',
+    '- `📚 Apuestas`: operaciones de ledger y lectura de cuotas.',
+    '- `📰 Evento`: proyecciones y novedades del próximo evento.',
+    '- `⚙️ Configuración`: ajustes de perfil de staking.',
     '',
     '📚 Apuestas',
     '- `Analizar cuotas`: lectura + EV con odds/quotes.',
@@ -340,9 +363,9 @@ const QUICK_ACTION_HINTS = {
     '- `Corregir`: revierte la última mutación sensible.',
     '',
     '⚙️ Config',
-    '- `Ver config`: muestra tus ajustes actuales.',
+    '- `Ver configuración`: muestra tus ajustes actuales.',
     '- `Unidad / Riesgo / Bankroll / Stake-Exposicion / Timezone`: actualizan tu perfil.',
-    '- `Creditos`: muestra saldo y movimientos.',
+    '- `Créditos`: muestra saldo y movimientos.',
     '',
     '🧠 Evento',
     '- `Proyecciones`: lectura actual pelea por pelea + confianza.',
@@ -354,11 +377,13 @@ const QUICK_ACTION_HINTS = {
   help_guided: [
     '🆘 Ayuda (modo guiado estricto)',
     '',
-    'Acciones disponibles:',
-    '- `Analizar cuotas`: analiza screenshot completo o texto estructurado de odds.',
-    '- `Ledger`: registrar/cerrar apuestas y ver pendientes/historial.',
-    '- `Creditos`: saldo + movimientos recientes.',
-    '- `Ayuda`: recordatorio rapido del flujo.',
+    'Módulos:',
+    '- `📸 Análisis`: análisis de cuotas con screenshot completo o texto estructurado.',
+    '- `🧾 Ledger`: registrar/cerrar apuestas y ver pendientes/historial.',
+    '- `📰 Evento`: proyecciones y últimas novedades del próximo evento.',
+    '- `⚙️ Configuración`: ver tu configuración actual.',
+    '- `💳 Créditos`: saldo + movimientos recientes.',
+    '- `🆘 Ayuda`: recordatorio rápido del flujo.',
     '',
     'Que son las quotes:',
     '- Son las cuotas/odds que ves en tu casa de apuestas para una pelea.',
@@ -377,24 +402,24 @@ const QUICK_ACTION_HINTS = {
     'En este modo no uso chat libre para interpretar otras tareas.',
   ].join('\n'),
   guided_welcome: [
-    '📌 Menu principal (modo guiado)',
-    'Elegí una accion:',
-    '- `Analizar cuotas` para EV/stake.',
-    '- `Ledger` para registrar/cerrar y consultar apuestas.',
-    '- `Creditos` para saldo y recarga.',
+    '🥊 Menú principal',
+    '- 📸 Análisis',
+    '- 🧾 Ledger',
+    '- 📰 Evento',
+    '- ⚙️ Configuración',
+    '- 💳 Créditos',
   ].join('\n'),
   guided_welcome_minimal: [
-    '📌 Menu principal (modo guiado)',
-    'Elegí una accion:',
-    '- `Analizar` para la tarea principal de este bot.',
-    '- `Creditos` para saldo y recarga.',
-    '- `Ayuda` para ver formato recomendado de input.',
+    '🥊 Menú principal',
+    '- 📸 Analizar cuotas',
+    '- 💳 Créditos',
+    '- 🆘 Ayuda',
   ].join('\n'),
   guided_reencauce: [
     '📌 Modo guiado activo (quotes = cuotas/odds de tu bookie).',
     'Para una recomendacion accionable, mandame screenshot completo de la pagina de apuestas de esa pelea.',
     'Si no tenes imagen, usa texto estructurado: `evento, pelea, mercado, cuota`.',
-    'Tambien podes usar los botones `Analizar cuotas`, `Ledger`, `Creditos` o `Ayuda`.',
+    'También podés usar los módulos `📸 Análisis`, `🧾 Ledger`, `📰 Evento`, `⚙️ Configuración`, `💳 Créditos` o `🆘 Ayuda`.',
   ].join('\n'),
   guided_reencauce_record_bet: [
     '📌 Modo guiado - Registrar apuesta.',
@@ -500,17 +525,25 @@ const QUICK_ACTION_HINTS = {
 };
 
 const MENU_SCOPES = new Set([
-  'main', 'ledger', 'bets', 'event', 'config',
+  'main', 'ledger', 'ufc_analysis', 'ufc_event', 'ufc_config', 'bets', 'event', 'config',
   'nutrition_registro', 'nutrition_perfil', 'nutrition_estadisticas', 'nutrition_aprendizaje',
 ]);
 const GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:main',
   'menu:ledger',
+  'menu:ufc_analysis',
+  'menu:ufc_ledger',
+  'menu:ufc_event',
+  'menu:ufc_config',
   'qa:analyze_quotes',
   'qa:record_bet',
   'qa:settle_bet',
   'qa:list_pending',
   'qa:list_history',
+  'qa:event_projections',
+  'qa:latest_news',
+  'act:cfg_news_alerts_toggle',
+  'qa:view_config',
   'qa:help',
   'qa:view_credits',
   'qa:topup_credits',
@@ -997,11 +1030,19 @@ function buildCreditsQuickActionRows({
   return guidedLedgerEnabled
     ? [
         [
-          { text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' },
-          { text: '🧾 Ledger', callback_data: 'menu:ledger' },
+          { text: '📸 Análisis', callback_data: 'menu:ufc_analysis' },
+          { text: '🧾 Ledger', callback_data: 'menu:ufc_ledger' },
         ],
+        [
+          { text: '📰 Evento', callback_data: 'menu:ufc_event' },
+          { text: '⚙️ Configuración', callback_data: 'menu:ufc_config' },
+        ],
+        [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
       ]
-    : [[{ text: '📸 Analizar', callback_data: 'qa:analyze_quotes' }]];
+    : [
+        [{ text: '📸 Analizar cuotas', callback_data: 'qa:analyze_quotes' }],
+        [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+      ];
 }
 
 function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
@@ -1042,7 +1083,7 @@ function guidedMenuScopeForAction(guidedAction = '', { guidedMenuId = 'ufc_v1' }
   const action = normalizeGuidedAction(guidedAction, {
     defaultAction: 'analyze_quotes',
   });
-  return action === 'record_bet' || action === 'settle_bet' ? 'ledger' : 'main';
+  return action === 'record_bet' || action === 'settle_bet' ? 'ledger' : 'ufc_analysis';
 }
 
 function pickLargestPhoto(photos = []) {
@@ -1303,9 +1344,24 @@ export function startTelegramBot(router, options = {}) {
         if (scope === 'nutrition_aprendizaje') return { inline_keyboard: NUTRITION_APRENDIZAJE_ROWS };
         return { inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS };
       }
+      if (scope === 'ufc_analysis') {
+        return {
+          inline_keyboard: GUIDED_ANALYSIS_MENU_ROWS,
+        };
+      }
       if (scope === 'ledger' && guidedLedgerEnabled) {
         return {
           inline_keyboard: GUIDED_LEDGER_MENU_ROWS,
+        };
+      }
+      if (scope === 'ufc_event') {
+        return {
+          inline_keyboard: GUIDED_EVENT_MENU_ROWS,
+        };
+      }
+      if (scope === 'ufc_config') {
+        return {
+          inline_keyboard: GUIDED_CONFIG_MENU_ROWS,
         };
       }
       return {
@@ -1402,9 +1458,24 @@ export function startTelegramBot(router, options = {}) {
       if (guidedMenuId === 'nutrition_v1') {
         return sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_welcome, { menuScope: 'main' });
       }
+      if (scope === 'ufc_analysis') {
+        return sendBotMessage(chatId, '📸 Análisis\n¿Qué querés hacer?', {
+          menuScope: 'ufc_analysis',
+        });
+      }
       if (scope === 'ledger' && guidedLedgerEnabled) {
-        return sendBotMessage(chatId, '🧾 Menu Ledger (modo guiado)', {
+        return sendBotMessage(chatId, '🧾 Ledger\n¿Qué querés hacer?', {
           menuScope: 'ledger',
+        });
+      }
+      if (scope === 'ufc_event') {
+        return sendBotMessage(chatId, '📰 Evento\n¿Qué querés consultar?', {
+          menuScope: 'ufc_event',
+        });
+      }
+      if (scope === 'ufc_config') {
+        return sendBotMessage(chatId, '⚙️ Configuración\n¿Qué querés revisar?', {
+          menuScope: 'ufc_config',
         });
       }
       return sendBotMessage(
@@ -1417,15 +1488,15 @@ export function startTelegramBot(router, options = {}) {
     }
 
     if (scope === 'bets') {
-      return sendBotMessage(chatId, '📚 Menu Apuestas', { menuScope: 'bets' });
+      return sendBotMessage(chatId, '📚 Menú Apuestas', { menuScope: 'bets' });
     }
     if (scope === 'event') {
-      return sendBotMessage(chatId, '🧠 Menu Evento', { menuScope: 'event' });
+      return sendBotMessage(chatId, '📰 Menú Evento', { menuScope: 'event' });
     }
     if (scope === 'config') {
-      return sendBotMessage(chatId, '⚙️ Menu Config', { menuScope: 'config' });
+      return sendBotMessage(chatId, '⚙️ Menú Configuración', { menuScope: 'config' });
     }
-    return sendBotMessage(chatId, 'Menu principal', { menuScope: 'main' });
+    return sendBotMessage(chatId, '🥊 Menú principal', { menuScope: 'main' });
   }
 
   async function deliverToRouter({
@@ -1565,9 +1636,6 @@ export function startTelegramBot(router, options = {}) {
         setGuidedAction(chatId, defaultGuidedAction);
       }
       await sendMenu(chatId, 'main');
-      if (isGuidedStrictInteractionMode(interactionMode) && guidedMenuId !== 'nutrition_v1') {
-        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
-      }
       return;
     }
 
@@ -2018,7 +2086,13 @@ export function startTelegramBot(router, options = {}) {
         return;
       }
 
-      if (data === 'menu:ledger') {
+      if (data === 'menu:ufc_analysis') {
+        setGuidedAction(chatId, 'analyze_quotes');
+        await sendMenu(chatId, 'ufc_analysis');
+        return;
+      }
+
+      if (data === 'menu:ufc_ledger' || data === 'menu:ledger') {
         if (!guidedLedgerEnabled) {
           await sendMenu(chatId, 'main');
           return;
@@ -2028,9 +2102,21 @@ export function startTelegramBot(router, options = {}) {
         return;
       }
 
+      if (data === 'menu:ufc_event') {
+        setGuidedAction(chatId, 'analyze_quotes');
+        await sendMenu(chatId, 'ufc_event');
+        return;
+      }
+
+      if (data === 'menu:ufc_config') {
+        setGuidedAction(chatId, 'analyze_quotes');
+        await sendMenu(chatId, 'ufc_config');
+        return;
+      }
+
       if (data === 'qa:analyze_quotes') {
         setGuidedAction(chatId, 'analyze_quotes');
-        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'main' });
+        await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'ufc_analysis' });
         return;
       }
 
@@ -2091,6 +2177,44 @@ export function startTelegramBot(router, options = {}) {
         );
         await sendBotMessage(chatId, routed || 'No pude consultar historial ahora mismo.', {
           menuScope: 'ledger',
+        });
+        return;
+      }
+
+      if (data === 'qa:event_projections') {
+        const routed = await routeSyntheticAction(query, 'mostrame proyecciones para el proximo evento');
+        await sendBotMessage(chatId, routed || 'No pude cargar proyecciones ahora mismo.', {
+          menuScope: 'ufc_event',
+        });
+        return;
+      }
+
+      if (data === 'qa:latest_news') {
+        const routed = await routeSyntheticAction(
+          query,
+          'mostrame ultimas novedades relevantes del proximo evento'
+        );
+        await sendBotMessage(chatId, routed || 'No pude cargar novedades ahora mismo.', {
+          menuScope: 'ufc_event',
+        });
+        return;
+      }
+
+      if (data === 'act:cfg_news_alerts_toggle') {
+        const routed = await routeSyntheticAction(query, 'toggle alertas noticias');
+        await sendBotMessage(chatId, routed || 'No pude actualizar alertas ahora mismo.', {
+          menuScope: 'ufc_event',
+        });
+        return;
+      }
+
+      if (data === 'qa:view_config') {
+        const routed = await routeSyntheticAction(
+          query,
+          'mostrame mi configuracion actual (bankroll, unidad, riesgo, timezone y stake minimo)'
+        );
+        await sendBotMessage(chatId, routed || 'No pude consultar la configuración ahora mismo.', {
+          menuScope: 'ufc_config',
         });
         return;
       }

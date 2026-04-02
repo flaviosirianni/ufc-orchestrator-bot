@@ -380,6 +380,110 @@ export async function runTelegramBotTests() {
     startTelegramBot(router, {
       botInstance: fakeBot,
       interactionMode: 'guided_strict',
+      guidedLedgerEnabled: true,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '/start',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    const keyboard = out.options?.reply_markup?.inline_keyboard || [];
+    const flatCallbacks = keyboard
+      .flat()
+      .map((item) => item.callback_data)
+      .filter(Boolean);
+    assert.ok(flatCallbacks.includes('menu:ufc_analysis'));
+    assert.ok(flatCallbacks.includes('menu:ufc_ledger'));
+    assert.ok(flatCallbacks.includes('menu:ufc_event'));
+    assert.ok(flatCallbacks.includes('menu:ufc_config'));
+    assert.ok(flatCallbacks.includes('qa:view_credits'));
+    assert.ok(flatCallbacks.includes('qa:help'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedLedgerEnabled: true,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'menu:ufc_ledger',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    const keyboard = out.options?.reply_markup?.inline_keyboard || [];
+    const flatCallbacks = keyboard
+      .flat()
+      .map((item) => item.callback_data)
+      .filter(Boolean);
+    assert.ok(flatCallbacks.includes('qa:record_bet'));
+    assert.ok(flatCallbacks.includes('qa:settle_bet'));
+    assert.ok(flatCallbacks.includes('qa:list_pending'));
+    assert.ok(flatCallbacks.includes('qa:list_history'));
+    assert.ok(flatCallbacks.includes('menu:main'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedLedgerEnabled: true,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'menu:ufc_event',
+      })
+    );
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:event_projections',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    const keyboard = out.options?.reply_markup?.inline_keyboard || [];
+    const flatCallbacks = keyboard
+      .flat()
+      .map((item) => item.callback_data)
+      .filter(Boolean);
+    assert.ok(flatCallbacks.includes('qa:event_projections'));
+    assert.ok(flatCallbacks.includes('qa:latest_news'));
+    assert.ok(flatCallbacks.includes('act:cfg_news_alerts_toggle'));
+    assert.ok(flatCallbacks.includes('menu:main'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
       guidedMenuId: 'nutrition_v1',
       guidedLedgerEnabled: false,
       guidedQuotesTextFallback: true,
