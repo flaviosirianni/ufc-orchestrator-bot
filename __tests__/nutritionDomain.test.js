@@ -23,6 +23,7 @@ import {
 } from '../src/bots/nutrition/nutritionDomain.js';
 import {
   __testEnforceExplicitTemporalFromRawMessage,
+  __testNormalizeVisualWeighinPayload,
   __testParsedItemsHaveAnyUserOverlap,
   __testParsedItemsAlignWithUserInput,
   __testResolveTemporalFromStructured,
@@ -128,6 +129,65 @@ export async function runNutritionDomainTests() {
   });
   assert.equal(missingWeighin.ok, false);
   assert.equal(missingWeighin.error, 'missing_weight');
+
+  const visualReady = __testNormalizeVisualWeighinPayload(
+    {
+      action: 'weighin_ready',
+      confidence: 'alta',
+      weight_kg: '82,80',
+      body_fat_percent: '25,2',
+      body_water_percent: '53,2',
+      muscle_mass_kg: '59,1',
+      visceral_fat: '13,0',
+      bmr_kcal: '1768,6',
+      bone_mass_kg: '3,5',
+      temporal: {
+        local_date: '2026-04-03',
+        local_time: '11:57',
+      },
+      note: 'captura balanza',
+    },
+    {
+      rawMessage: 'foto balanza',
+      userTimeZone: 'America/Argentina/Buenos_Aires',
+    }
+  );
+  assert.equal(visualReady.ok, true);
+  assert.equal(visualReady.action, 'weighin_ready');
+  assert.equal(visualReady.weighin.weightKg, 82.8);
+  assert.equal(visualReady.weighin.bodyFatPercent, 25.2);
+  assert.equal(visualReady.weighin.bodyWaterPercent, 53.2);
+  assert.equal(visualReady.weighin.muscleMassKg, 59.1);
+  assert.equal(visualReady.weighin.visceralFat, 13);
+  assert.equal(visualReady.weighin.bmrKcal, 1768.6);
+  assert.equal(visualReady.weighin.boneMassKg, 3.5);
+
+  const visualMissingWeight = __testNormalizeVisualWeighinPayload(
+    {
+      action: 'missing_weight',
+      confidence: 'media',
+      weight_kg: null,
+    },
+    {
+      rawMessage: 'foto borrosa',
+      userTimeZone: 'America/Argentina/Buenos_Aires',
+    }
+  );
+  assert.equal(visualMissingWeight.ok, false);
+  assert.equal(visualMissingWeight.error, 'missing_weight');
+
+  const visualNotWeighin = __testNormalizeVisualWeighinPayload(
+    {
+      action: 'not_weighin',
+      confidence: 'baja',
+    },
+    {
+      rawMessage: 'foto random',
+      userTimeZone: 'America/Argentina/Buenos_Aires',
+    }
+  );
+  assert.equal(visualNotWeighin.ok, false);
+  assert.equal(visualNotWeighin.error, 'not_weighin_image');
 
   const intakeDay1 = parseIntakePayload({
     rawMessage: '2026-03-20 13:30 100g arroz cocido',

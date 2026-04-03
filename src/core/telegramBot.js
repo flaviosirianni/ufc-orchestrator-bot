@@ -436,7 +436,7 @@ const QUICK_ACTION_HINTS = {
     '',
     'Modulos:',
     '- `Registrar ingesta`: texto simple `hora + lo ingerido` (si no ponés hora, uso ahora local).',
-    '- `Registrar pesaje`: `peso_kg` obligatorio; el resto es opcional.',
+    '- `Registrar pesaje`: texto con `peso_kg` o foto/screenshot; si es imagen, siempre pido confirmación antes de guardar.',
     '- `Perfil/objetivos`: objetivo, kcal target, proteina target, timezone, notas y productos fijos por alias.',
     '- `Resumen`: hoy + rolling 7d/14d + estado vs objetivo.',
     '- `Aprendizaje`: unico modulo con chat libre nutricional.',
@@ -461,7 +461,8 @@ const QUICK_ACTION_HINTS = {
   ].join('\n'),
   nutrition_log_weighin: [
     '⚖️ Registrar pesaje',
-    'Mandame al menos el peso en kg.',
+    'Mandame texto (`81.4 kg`) o foto/screenshot de la balanza.',
+    'Si mandás imagen, primero te muestro un borrador con peso y opcionales para confirmar o corregir.',
     'Ejemplos:',
     '- `81.4 kg`',
     '- `hoy 08:15 81.4 kg grasa 18.2% agua 56%`',
@@ -514,8 +515,8 @@ const QUICK_ACTION_HINTS = {
   ].join('\n'),
   nutrition_reencauce_weighin: [
     '📌 Modo guiado - Registrar pesaje.',
-    'Necesito al menos `peso_kg`.',
-    'Ejemplo: `81.4 kg`.',
+    'Mandame `81.4 kg` o foto/screenshot de la balanza.',
+    'Si llega imagen, te pido confirmación antes de guardar.',
   ].join('\n'),
   nutrition_reencauce_profile: [
     '📌 Modo guiado - Perfil/objetivos.',
@@ -746,6 +747,23 @@ function looksLikeStructuredWeighinText(message = '') {
   return hasWeightKeyword && hasWeightValue;
 }
 
+function looksLikeWeighinWorkflowText(message = '') {
+  const text = normalizeText(message);
+  if (!text) return false;
+
+  if (looksLikeStructuredWeighinText(text)) return true;
+  if (/^(si|ok|dale|confirmo|confirmado)\b/.test(text)) return true;
+  if (/^(no|cancelar|cancela|descartar|descarta)\b/.test(text)) return true;
+  if (/\b(registra|registrar|anota|anotalo|carga|cargalo)\b.*\b(eso|asi)\b/.test(text)) {
+    return true;
+  }
+  if (/\b(borra|elimina|eliminar|saca|sacar)\b/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
 function resolveNutritionGuidedMessageDecision({
   cleanMessage = '',
   hasMedia = false,
@@ -781,7 +799,7 @@ function resolveNutritionGuidedMessageDecision({
         inputType: 'image_weighin',
       };
     }
-    if (looksLikeStructuredWeighinText(cleanMessage)) {
+    if (looksLikeWeighinWorkflowText(cleanMessage)) {
       return {
         action: 'route',
         guidedAction: 'log_weighin',

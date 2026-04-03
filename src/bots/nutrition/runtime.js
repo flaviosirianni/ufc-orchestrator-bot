@@ -67,6 +67,7 @@ const CREDIT_ENFORCE = String(process.env.CREDIT_ENFORCE ?? 'true').toLowerCase(
 const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
 const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
+const IMAGE_WEIGHIN_DRAFT_TTL_MS = 20 * 60 * 1000;
 
 const TUTORIAL_CONTENT_MAP = {
   calorias: { title: 'Calorías: qué son y por qué importan', level: 'basico' },
@@ -1444,6 +1445,18 @@ export function __testResolveTemporalFromStructured({
   });
 }
 
+
+export function __testNormalizeVisualWeighinPayload(
+  visualPayload = {},
+  { rawMessage = '', userTimeZone = DEFAULT_USER_TIMEZONE } = {}
+) {
+  return normalizeVisualWeighinPayload({
+    visualPayload,
+    rawMessage,
+    userTimeZone,
+  });
+}
+
 function mergeCatalogRows(primary = [], fallback = []) {
   const merged = [];
   const seen = new Set();
@@ -2098,6 +2111,275 @@ async function inferMealIntakeFromImage({
   };
 }
 
+
+
+function normalizeVisualWeighinAction(value = '') {
+  const normalized = normalizeText(value);
+  if (!normalized) return 'unclear_image';
+  if (
+    ['weighin_ready', 'ready', 'log_weighin', 'weighin_log_ready'].includes(normalized)
+  ) {
+    return 'weighin_ready';
+  }
+  if (
+    ['missing_weight', 'weight_not_visible', 'weight_missing', 'no_weight'].includes(normalized)
+  ) {
+    return 'missing_weight';
+  }
+  if (
+    ['not_weighin', 'not_scale', 'not_weight', 'not_weight_screen'].includes(normalized)
+  ) {
+    return 'not_weighin';
+  }
+  if (['unclear_image', 'unclear', 'blurry'].includes(normalized)) {
+    return 'unclear_image';
+  }
+  return 'unclear_image';
+}
+
+function normalizeVisualWeighinNumber(value, { min = 0, max = null } = {}) {
+  const parsed = parseFlexibleNumber(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < min) return null;
+  if (Number.isFinite(max) && parsed > max) return null;
+  return parsed;
+}
+
+function serializeWeighinRawInput({ temporal = {}, weighin = {} } = {}) {
+  const parts = [];
+  if (isValidIsoDate(temporal?.localDate)) parts.push(String(temporal.localDate).trim());
+  if (isValidHourMinute(temporal?.localTime)) parts.push(String(temporal.localTime).trim());
+  if (Number.isFinite(Number(weighin?.weightKg)) && Number(weighin.weightKg) > 0) {
+    parts.push(`${formatNumberCompact(weighin.weightKg)} kg`);
+  }
+  if (Number.isFinite(Number(weighin?.bodyFatPercent))) {
+    parts.push(`grasa ${formatNumberCompact(weighin.bodyFatPercent)}%`);
+  }
+  if (Number.isFinite(Number(weighin?.bodyWaterPercent))) {
+    parts.push(`agua ${formatNumberCompact(weighin.bodyWaterPercent)}%`);
+  }
+  if (Number.isFinite(Number(weighin?.muscleMassKg))) {
+    parts.push(`musculo ${formatNumberCompact(weighin.muscleMassKg)} kg`);
+  }
+  if (Number.isFinite(Number(weighin?.visceralFat))) {
+    parts.push(`visceral ${formatNumberCompact(weighin.visceralFat)}`);
+  }
+  if (Number.isFinite(Number(weighin?.bmrKcal))) {
+    parts.push(`bmr ${formatNumberCompact(weighin.bmrKcal)}`);
+  }
+  if (Number.isFinite(Number(weighin?.boneMassKg))) {
+    parts.push(`hueso ${formatNumberCompact(weighin.boneMassKg)} kg`);
+  }
+  return parts.join(' ').trim();
+}
+
+function normalizeVisualWeighinPayload({
+  visualPayload = {},
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const action = normalizeVisualWeighinAction(visualPayload?.action);
+  const confidence = normalizeConfidenceLabel(
+    visualPayload?.confidence || visualPayload?.overall_confidence,
+    'media'
+  );
+
+  if (action === 'not_weighin') {
+    return {
+      ok: false,
+      action,
+      confidence,
+      error: 'not_weighin_image',
+    };
+  }
+
+  if (action === 'unclear_image') {
+    return {
+      ok: false,
+      action,
+      confidence,
+      error: 'unclear_image',
+    };
+  }
+
+  const temporal = resolveTemporalFromStructured({
+    rawMessage,
+    userTimeZone,
+    temporal: {
+      localDate: String(visualPayload?.temporal?.local_date || '').trim(),
+      localTime: String(visualPayload?.temporal?.local_time || '').trim(),
+    },
+  });
+
+  const weighin = {
+    weightKg: normalizeVisualWeighinNumber(visualPayload?.weight_kg, { min: 1, max: 500 }),
+    bodyFatPercent: normalizeVisualWeighinNumber(visualPayload?.body_fat_percent, {
+      min: 0,
+      max: 100,
+    }),
+    bodyWaterPercent: normalizeVisualWeighinNumber(visualPayload?.body_water_percent, {
+      min: 0,
+      max: 100,
+    }),
+    muscleMassKg: normalizeVisualWeighinNumber(visualPayload?.muscle_mass_kg, {
+      min: 0,
+      max: 200,
+    }),
+    visceralFat: normalizeVisualWeighinNumber(visualPayload?.visceral_fat, {
+      min: 0,
+      max: 100,
+    }),
+    bmrKcal: normalizeVisualWeighinNumber(visualPayload?.bmr_kcal, { min: 0, max: 10000 }),
+    boneMassKg: normalizeVisualWeighinNumber(visualPayload?.bone_mass_kg, { min: 0, max: 30 }),
+    notes: String(visualPayload?.note || '').trim(),
+  };
+
+  if (!Number.isFinite(weighin.weightKg) || weighin.weightKg <= 0) {
+    return {
+      ok: false,
+      action: 'missing_weight',
+      confidence,
+      error: 'missing_weight',
+      temporal,
+      weighin,
+    };
+  }
+
+  return {
+    ok: true,
+    action: 'weighin_ready',
+    confidence,
+    temporal,
+    weighin,
+    rawInput: serializeWeighinRawInput({ temporal, weighin }),
+  };
+}
+
+async function inferWeighinFromImage({
+  openai,
+  modelCandidates = [],
+  inputItems = [],
+  userMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const instructions = [
+    'Sos un parser visual de pesajes para nutricion.',
+    'Analiza screenshot/foto de balanza corporal y devolve JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action":"weighin_ready|missing_weight|unclear_image|not_weighin",',
+    '  "confidence":"alta|media|baja",',
+    '  "weight_kg":number|null,',
+    '  "body_fat_percent":number|null,',
+    '  "body_water_percent":number|null,',
+    '  "muscle_mass_kg":number|null,',
+    '  "visceral_fat":number|null,',
+    '  "bmr_kcal":number|null,',
+    '  "bone_mass_kg":number|null,',
+    '  "temporal":{"local_date":"YYYY-MM-DD|null","local_time":"HH:MM|null"},',
+    '  "note":"string"',
+    '}',
+    'Reglas:',
+    '- Si no es pantalla/foto de balanza corporal: action=not_weighin.',
+    '- Si es balanza pero no se puede leer peso en kg: action=missing_weight.',
+    '- Si la imagen es ilegible/borrosa: action=unclear_image.',
+    '- Solo usar weighin_ready cuando el peso sea legible.',
+    '- Campos opcionales: devolver null si no se ven.',
+    '- Aceptar decimales con coma o punto.',
+    '- No inventar valores.',
+    '- Nunca devuelvas texto fuera del JSON.',
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `Timezone usuario: ${userTimeZone}
+Texto opcional del usuario: ${
+              String(userMessage || '').trim() || '(vacio)'
+            }`,
+          },
+          ...inputItems,
+        ],
+      },
+    ],
+  });
+
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  const normalized = normalizeVisualWeighinPayload({
+    visualPayload: json,
+    rawMessage: String(userMessage || '').trim(),
+    userTimeZone,
+  });
+
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: normalized.action,
+    confidence: normalized.confidence,
+    parsed: normalized.ok
+      ? {
+          ok: true,
+          temporal: normalized.temporal,
+          weighin: normalized.weighin,
+        }
+      : null,
+    rawInput: normalized.rawInput || '',
+    error: normalized.ok ? '' : normalized.error,
+  };
+}
+
+function formatWeighinOptionalLines(weighin = {}) {
+  const lines = [];
+  if (Number.isFinite(Number(weighin?.bodyFatPercent))) {
+    lines.push(`- Grasa corporal: ${formatNumberCompact(weighin.bodyFatPercent)}%`);
+  }
+  if (Number.isFinite(Number(weighin?.bodyWaterPercent))) {
+    lines.push(`- Agua corporal: ${formatNumberCompact(weighin.bodyWaterPercent)}%`);
+  }
+  if (Number.isFinite(Number(weighin?.muscleMassKg))) {
+    lines.push(`- Masa muscular: ${formatNumberCompact(weighin.muscleMassKg)} kg`);
+  }
+  if (Number.isFinite(Number(weighin?.visceralFat))) {
+    lines.push(`- Grasa visceral: ${formatNumberCompact(weighin.visceralFat)}`);
+  }
+  if (Number.isFinite(Number(weighin?.bmrKcal))) {
+    lines.push(`- BMR: ${formatNumberCompact(weighin.bmrKcal)} kcal`);
+  }
+  if (Number.isFinite(Number(weighin?.boneMassKg))) {
+    lines.push(`- Masa osea: ${formatNumberCompact(weighin.boneMassKg)} kg`);
+  }
+  return lines;
+}
+
+function buildWeighinDraftReply({ parsed = null, confidence = 'media' } = {}) {
+  if (!parsed?.ok) {
+    return [
+      'No pude leer el peso de la imagen.',
+      'Mandame otra foto más nítida o texto `81.4 kg`.',
+    ].join('\n');
+  }
+
+  const optionalLines = formatWeighinOptionalLines(parsed.weighin);
+  return [
+    '👀 Esto es lo que inferí del pesaje (sin registrar todavía):',
+    `- Fecha: ${parsed.temporal.localDate}`,
+    `- Hora: ${parsed.temporal.localTime}`,
+    `- Peso: ${formatNumberCompact(parsed.weighin.weightKg)} kg`,
+    ...optionalLines,
+    `- Confianza OCR: ${normalizeConfidenceLabel(confidence, 'media')}`,
+    'Respondé `sí` para registrarlo tal cual, `cancelar` para descartarlo, o corregime en texto (ej: `82.1 kg grasa 24%`).',
+  ].join('\n');
+}
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -2149,6 +2431,38 @@ function consumePendingImageIntakeDraft(draftsByUser, userId = '') {
   const key = String(userId || '').trim();
   if (!key) return null;
   const draft = getPendingImageIntakeDraft(draftsByUser, key);
+  if (!draft) return null;
+  draftsByUser.delete(key);
+  return draft;
+}
+
+
+function getPendingImageWeighinDraft(draftsByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return null;
+  const draft = draftsByUser.get(key) || null;
+  if (!draft) return null;
+  if (Number(draft.expiresAt || 0) <= Date.now()) {
+    draftsByUser.delete(key);
+    return null;
+  }
+  return draft;
+}
+
+function setPendingImageWeighinDraft(draftsByUser, userId = '', draft = {}) {
+  const key = String(userId || '').trim();
+  if (!key || !draft || typeof draft !== 'object') return;
+  draftsByUser.set(key, {
+    ...draft,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + IMAGE_WEIGHIN_DRAFT_TTL_MS,
+  });
+}
+
+function consumePendingImageWeighinDraft(draftsByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return null;
+  const draft = getPendingImageWeighinDraft(draftsByUser, key);
   if (!draft) return null;
   draftsByUser.delete(key);
   return draft;
@@ -2338,6 +2652,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   const promptSnippet = loadPromptFile(manifest);
   const chatIdByUser = new Map();
   const pendingImageIntakeDraftByUser = new Map();
+  const pendingImageWeighinDraftByUser = new Map();
   const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
   const defaultBackupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : '';
   const nutritionDbReliability = startNutritionDbReliabilityLoop({
@@ -2814,22 +3129,46 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         ].filter(Boolean).join('\n');
         shouldCharge = true;
       } else if (guidedAction === 'log_weighin') {
-        if (hasMedia && !cleanMessage) {
-          return [
-            '⚖️ En V1 no hago OCR de pesaje.',
-            'Mandame texto con el peso: `81.4 kg` (y opcionales si querés).',
-          ].join('\n');
+        let parsed = null;
+        let rawInputForPersist = cleanMessage;
+        const pendingWeighinDraft = getPendingImageWeighinDraft(
+          pendingImageWeighinDraftByUser,
+          userId
+        );
+
+        if (pendingWeighinDraft && cleanMessage && isImageDraftCancelIntent(cleanMessage)) {
+          consumePendingImageWeighinDraft(pendingImageWeighinDraftByUser, userId);
+          return 'Perfecto, descarté la inferencia de pesaje. Mandame otra foto o texto y lo registro.';
         }
 
-        if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
+        if (pendingWeighinDraft && cleanMessage && isImageDraftConfirmIntent(cleanMessage)) {
+          const consumedDraft = consumePendingImageWeighinDraft(
+            pendingImageWeighinDraftByUser,
+            userId
+          );
+          if (consumedDraft?.parsed?.ok) {
+            parsed = consumedDraft.parsed;
+            rawInputForPersist =
+              consumedDraft.rawInput ||
+              serializeWeighinRawInput({
+                temporal: parsed.temporal,
+                weighin: parsed.weighin,
+              });
+          }
+        }
+
+        if (!parsed && !hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
           const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
           const todayRows = getTodayNutritionWeighins(userId, temporal.localDate, { limit: 10 });
           if (!todayRows.length) {
             return 'No tenés pesajes registrados hoy para eliminar.';
           }
           const deleteResult = await resolveDeleteTargetWithModel({
-            openai, modelCandidates: smartModelCandidates,
-            rawMessage: cleanMessage, todayRows, entityType: 'weighin',
+            openai,
+            modelCandidates: smartModelCandidates,
+            rawMessage: cleanMessage,
+            todayRows,
+            entityType: 'weighin',
           });
           usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
           if (deleteResult.action === 'cannot_identify') {
@@ -2837,7 +3176,9 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               .slice(0, 5)
               .map((r) => `- ${r.localTime || '?'} → ${r.weightKg} kg`)
               .join('\n');
-            return `No identifiqué cuál borrar. Pesajes de hoy:\n${list}\nDecime cuál: "borrá el de las 08:00" o "borrá el último".`;
+            return `No identifiqué cuál borrar. Pesajes de hoy:
+${list}
+Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
           const targetId =
             deleteResult.action === 'delete_last'
@@ -2853,53 +3194,137 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
           const latest = getLatestNutritionWeighin(userId);
           replyText = [
             '✅ Pesaje eliminado.',
-            latest ? `⚖️ Último pesaje registrado: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})` : 'Sin pesajes previos registrados.',
+            latest
+              ? `⚖️ Último pesaje registrado: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})`
+              : 'Sin pesajes previos registrados.',
           ].join('\n');
           shouldCharge = true;
         } else {
+          if (!parsed && hasMedia) {
+            let imageWeighinResult = null;
+            try {
+              imageWeighinResult = await inferWeighinFromImage({
+                openai,
+                modelCandidates: smartModelCandidates,
+                inputItems,
+                userMessage: cleanMessage,
+                userTimeZone,
+              });
+              usageSnapshot = mergeUsageSnapshots(usageSnapshot, imageWeighinResult.usage);
+              if (imageWeighinResult.usage) {
+                addNutritionUsageRecord(userId, {
+                  guidedAction: 'log_weighin_image_parser',
+                  model: imageWeighinResult.model,
+                  inputTokens: imageWeighinResult.usage.inputTokens,
+                  outputTokens: imageWeighinResult.usage.outputTokens,
+                  totalTokens: imageWeighinResult.usage.totalTokens,
+                  reasoningTokens: imageWeighinResult.usage.reasoningTokens,
+                  cachedTokens: imageWeighinResult.usage.cachedTokens,
+                  rawUsage: imageWeighinResult.usage.rawUsage,
+                });
+              }
+            } catch (imageWeighinError) {
+              console.error('[nutrition-runtime] weighin image parser failed', imageWeighinError);
+            }
 
-        const parsed = parseWeighinPayload({
-          rawMessage: cleanMessage,
-          userTimeZone,
-        });
-        if (!parsed.ok) {
-          return [
-            'No pude detectar el peso en tu mensaje.',
-            'Formato mínimo: `81.4 kg`.',
-          ].join('\n');
-        }
+            if (!imageWeighinResult || imageWeighinResult.error === 'unclear_image') {
+              return [
+                'No pude leer el peso de la imagen.',
+                'Mandame otra foto más nítida o texto `81.4 kg`.',
+              ].join('\n');
+            }
 
-        const weighinWrite = addNutritionWeighin(
-          userId,
-          {
-            ...parsed.weighin,
-            loggedAt: parsed.temporal.loggedAt,
-            localDate: parsed.temporal.localDate,
-            localTime: parsed.temporal.localTime,
-            timezone: parsed.temporal.timeZone,
-            rawInput: cleanMessage,
-          },
-          {
-            idempotency: {
-              sourceMessageId,
-              operationType: 'log_weighin',
-            },
+            if (imageWeighinResult.error === 'not_weighin_image') {
+              return [
+                'No detecté una pantalla de balanza en esa imagen.',
+                'Mandame foto/screenshot de la balanza o texto `81.4 kg`.',
+              ].join('\n');
+            }
+
+            if (imageWeighinResult.error === 'missing_weight') {
+              return [
+                'No pude leer el peso de la imagen.',
+                'Mandame otra foto más nítida o texto `81.4 kg`.',
+              ].join('\n');
+            }
+
+            if (imageWeighinResult.action === 'weighin_ready' && imageWeighinResult.parsed?.ok) {
+              setPendingImageWeighinDraft(pendingImageWeighinDraftByUser, userId, {
+                parsed: imageWeighinResult.parsed,
+                rawInput:
+                  imageWeighinResult.rawInput ||
+                  serializeWeighinRawInput({
+                    temporal: imageWeighinResult.parsed.temporal,
+                    weighin: imageWeighinResult.parsed.weighin,
+                  }),
+              });
+              return buildWeighinDraftReply({
+                parsed: imageWeighinResult.parsed,
+                confidence: imageWeighinResult.confidence,
+              });
+            }
+
+            return [
+              'No pude leer el peso de la imagen.',
+              'Mandame otra foto más nítida o texto `81.4 kg`.',
+            ].join('\n');
           }
-        );
-        if (!weighinWrite?.ok) {
-          return formatWriteFailureReply('log_weighin', weighinWrite?.error || 'db_write_failed');
-        }
 
-        const idempotencyNotice = formatIdempotencyNotice(weighinWrite.idempotencyStatus);
-        replyText = [
-          `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
-          '✅ Pesaje registrado.',
-          `⚖️ Peso: ${Number(parsed.weighin.weightKg).toFixed(1)} kg`,
-          idempotencyNotice,
-        ]
-          .filter(Boolean)
-          .join('\n');
-        shouldCharge = true;
+          if (!parsed) {
+            parsed = parseWeighinPayload({
+              rawMessage: cleanMessage,
+              userTimeZone,
+            });
+            rawInputForPersist = cleanMessage;
+          }
+
+          if (!parsed?.ok) {
+            return [
+              'No pude detectar el peso en tu mensaje.',
+              'Formato mínimo: `81.4 kg`.',
+            ].join('\n');
+          }
+
+          const weighinWrite = addNutritionWeighin(
+            userId,
+            {
+              ...parsed.weighin,
+              loggedAt: parsed.temporal.loggedAt,
+              localDate: parsed.temporal.localDate,
+              localTime: parsed.temporal.localTime,
+              timezone: parsed.temporal.timeZone,
+              rawInput:
+                rawInputForPersist ||
+                serializeWeighinRawInput({
+                  temporal: parsed.temporal,
+                  weighin: parsed.weighin,
+                }),
+            },
+            {
+              idempotency: {
+                sourceMessageId,
+                operationType: 'log_weighin',
+              },
+            }
+          );
+          if (!weighinWrite?.ok) {
+            return formatWriteFailureReply('log_weighin', weighinWrite?.error || 'db_write_failed');
+          }
+
+          pendingImageWeighinDraftByUser.delete(userId);
+
+          const optionalLines = formatWeighinOptionalLines(parsed.weighin);
+          const idempotencyNotice = formatIdempotencyNotice(weighinWrite.idempotencyStatus);
+          replyText = [
+            `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
+            '✅ Pesaje registrado.',
+            `⚖️ Peso: ${Number(parsed.weighin.weightKg).toFixed(1)} kg`,
+            ...optionalLines,
+            idempotencyNotice,
+          ]
+            .filter(Boolean)
+            .join('\n');
+          shouldCharge = true;
         } // end else (not delete intent)
       } else if (guidedAction === 'learning_chat') {
         // Tutorial menu navigation (no LLM cost)

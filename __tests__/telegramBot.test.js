@@ -554,6 +554,9 @@ export async function runTelegramBotTests() {
       })
     );
 
+    const weighinHint = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(weighinHint.text, /foto|screenshot|imagen/i);
+
     await fakeBot.emit(
       'message',
       createBaseMessage({
@@ -564,6 +567,104 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls.length, 0);
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /modo guiado - registrar pesaje/i);
+    assert.match(out.text, /foto|screenshot|imagen/i);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_log_weighin',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '',
+        photo: [{ file_id: 'weighin_photo_1', file_size: 1000 }],
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'log_weighin');
+    assert.equal(router.calls[0].inputType, 'image_weighin');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_log_weighin',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'borra el ultimo pesaje',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'log_weighin');
+    assert.equal(router.calls[0].inputType, 'text_weighin');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_log_weighin',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '81.4 kg',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'log_weighin');
+    assert.equal(router.calls[0].inputType, 'text_weighin');
   });
 
   tests.push(async () => {
