@@ -2360,7 +2360,12 @@ function formatWeighinOptionalLines(weighin = {}) {
   return lines;
 }
 
-function buildWeighinDraftReply({ parsed = null, confidence = 'media' } = {}) {
+function buildWeighinAutoSavedReply({
+  parsed = null,
+  confidence = '',
+  idempotencyNotice = '',
+  mode = 'saved',
+} = {}) {
   if (!parsed?.ok) {
     return [
       'No pude leer el peso de la imagen.',
@@ -2369,15 +2374,25 @@ function buildWeighinDraftReply({ parsed = null, confidence = 'media' } = {}) {
   }
 
   const optionalLines = formatWeighinOptionalLines(parsed.weighin);
+  const header =
+    mode === 'modified'
+      ? '✅ Pesaje modificado y ya quedó asentado.'
+      : '✅ Ya quedó asentado el pesaje por OCR.';
+  const confidenceLine = confidence
+    ? `- Confianza OCR: ${normalizeConfidenceLabel(confidence, 'media')}`
+    : null;
   return [
-    '👀 Esto es lo que inferí del pesaje (sin registrar todavía):',
+    header,
     `- Fecha: ${parsed.temporal.localDate}`,
     `- Hora: ${parsed.temporal.localTime}`,
     `- Peso: ${formatNumberCompact(parsed.weighin.weightKg)} kg`,
     ...optionalLines,
-    `- Confianza OCR: ${normalizeConfidenceLabel(confidence, 'media')}`,
-    'Respondé `sí` para registrarlo tal cual, `cancelar` para descartarlo, o corregime en texto (ej: `82.1 kg grasa 24%`).',
-  ].join('\n');
+    confidenceLine,
+    idempotencyNotice,
+    'Si querés ajustar este último OCR, escribí `cancelar` para deshacer o `modificar 82.1 kg` para corregir.',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function normalizeText(value = '') {
@@ -2403,6 +2418,42 @@ function isImageDraftCancelIntent(text = '') {
   return /\b(cancela|cancelar|descarta|descartar|no registrar|no cargues|no anotes)\b/.test(
     normalized
   );
+}
+
+function parseWeighinModifyCommand(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return { isModify: false, payload: '' };
+  }
+  const match = raw.match(
+    /^(?:modificar|modifica|modif|corregir|corregi|corrige|editar|edita|ajustar|ajusta)\b[:\s-]*/i
+  );
+  if (!match) {
+    return { isModify: false, payload: '' };
+  }
+  const payload = raw.slice(match[0].length).trim();
+  return {
+    isModify: true,
+    payload,
+  };
+}
+
+function applyBaseTemporalToCorrection(parsed = null, baseTemporal = null) {
+  if (!parsed?.ok) return parsed;
+  if (!baseTemporal || typeof baseTemporal !== 'object') return parsed;
+  const temporal = parsed.temporal || {};
+  if (temporal.hadExplicitDate || temporal.hadExplicitTime) return parsed;
+
+  return {
+    ...parsed,
+    temporal: {
+      ...temporal,
+      localDate: String(baseTemporal.localDate || temporal.localDate || '').trim() || temporal.localDate,
+      localTime: String(baseTemporal.localTime || temporal.localTime || '').trim() || temporal.localTime,
+      loggedAt: String(baseTemporal.loggedAt || temporal.loggedAt || '').trim() || temporal.loggedAt,
+      timeZone: String(baseTemporal.timeZone || temporal.timeZone || '').trim() || temporal.timeZone,
+    },
+  };
 }
 
 function getPendingImageIntakeDraft(draftsByUser, userId = '') {
@@ -2437,7 +2488,7 @@ function consumePendingImageIntakeDraft(draftsByUser, userId = '') {
 }
 
 
-function getPendingImageWeighinDraft(draftsByUser, userId = '') {
+function getRecentImageWeighinAction(draftsByUser, userId = '') {
   const key = String(userId || '').trim();
   if (!key) return null;
   const draft = draftsByUser.get(key) || null;
@@ -2446,10 +2497,14 @@ function getPendingImageWeighinDraft(draftsByUser, userId = '') {
     draftsByUser.delete(key);
     return null;
   }
+  if (!Number.isFinite(Number(draft.weighinId)) || Number(draft.weighinId) <= 0) {
+    draftsByUser.delete(key);
+    return null;
+  }
   return draft;
 }
 
-function setPendingImageWeighinDraft(draftsByUser, userId = '', draft = {}) {
+function setRecentImageWeighinAction(draftsByUser, userId = '', draft = {}) {
   const key = String(userId || '').trim();
   if (!key || !draft || typeof draft !== 'object') return;
   draftsByUser.set(key, {
@@ -2459,13 +2514,10 @@ function setPendingImageWeighinDraft(draftsByUser, userId = '', draft = {}) {
   });
 }
 
-function consumePendingImageWeighinDraft(draftsByUser, userId = '') {
+function clearRecentImageWeighinAction(draftsByUser, userId = '') {
   const key = String(userId || '').trim();
-  if (!key) return null;
-  const draft = getPendingImageWeighinDraft(draftsByUser, key);
-  if (!draft) return null;
+  if (!key) return;
   draftsByUser.delete(key);
-  return draft;
 }
 
 function looksLikeSummaryQuestion(text = '') {
@@ -2652,7 +2704,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   const promptSnippet = loadPromptFile(manifest);
   const chatIdByUser = new Map();
   const pendingImageIntakeDraftByUser = new Map();
-  const pendingImageWeighinDraftByUser = new Map();
+  const recentImageWeighinActionByUser = new Map();
   const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
   const defaultBackupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : '';
   const nutritionDbReliability = startNutritionDbReliabilityLoop({
@@ -3131,201 +3183,304 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       } else if (guidedAction === 'log_weighin') {
         let parsed = null;
         let rawInputForPersist = cleanMessage;
-        const pendingWeighinDraft = getPendingImageWeighinDraft(
-          pendingImageWeighinDraftByUser,
+        let weighinMessageForParse = cleanMessage;
+        let shouldTrackRecentImageWeighin = false;
+        let imageOcrConfidence = '';
+        let weighinReplyMode = 'default';
+        let replaceTarget = null;
+        let replacementDeleteNotice = '';
+
+        const recentImageWeighinAction = getRecentImageWeighinAction(
+          recentImageWeighinActionByUser,
           userId
         );
+        const modifyCommand = parseWeighinModifyCommand(cleanMessage);
+        const cancelIntent =
+          Boolean(cleanMessage) &&
+          isImageDraftCancelIntent(cleanMessage) &&
+          !looksLikeDeleteIntent(cleanMessage);
 
-        if (pendingWeighinDraft && cleanMessage && isImageDraftCancelIntent(cleanMessage)) {
-          consumePendingImageWeighinDraft(pendingImageWeighinDraftByUser, userId);
-          return 'Perfecto, descarté la inferencia de pesaje. Mandame otra foto o texto y lo registro.';
-        }
+        if (recentImageWeighinAction && cancelIntent) {
+          const cancelled = deleteNutritionWeighin(userId, recentImageWeighinAction.weighinId);
+          clearRecentImageWeighinAction(recentImageWeighinActionByUser, userId);
+          if (!cancelled?.ok || !cancelled.deleted) {
+            return [
+              'No pude deshacer ese último pesaje OCR porque ya no estaba disponible.',
+              'Si querés, registrá uno nuevo con foto o texto `81.4 kg`.',
+            ].join('\n');
+          }
 
-        if (pendingWeighinDraft && cleanMessage && isImageDraftConfirmIntent(cleanMessage)) {
-          const consumedDraft = consumePendingImageWeighinDraft(
-            pendingImageWeighinDraftByUser,
-            userId
-          );
-          if (consumedDraft?.parsed?.ok) {
-            parsed = consumedDraft.parsed;
-            rawInputForPersist =
-              consumedDraft.rawInput ||
-              serializeWeighinRawInput({
-                temporal: parsed.temporal,
-                weighin: parsed.weighin,
-              });
-          }
-        }
-
-        if (!parsed && !hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
-          const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
-          const todayRows = getTodayNutritionWeighins(userId, temporal.localDate, { limit: 10 });
-          if (!todayRows.length) {
-            return 'No tenés pesajes registrados hoy para eliminar.';
-          }
-          const deleteResult = await resolveDeleteTargetWithModel({
-            openai,
-            modelCandidates: smartModelCandidates,
-            rawMessage: cleanMessage,
-            todayRows,
-            entityType: 'weighin',
-          });
-          usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
-          if (deleteResult.action === 'cannot_identify') {
-            const list = todayRows
-              .slice(0, 5)
-              .map((r) => `- ${r.localTime || '?'} → ${r.weightKg} kg`)
-              .join('\n');
-            return `No identifiqué cuál borrar. Pesajes de hoy:
-${list}
-Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
-          }
-          const targetId =
-            deleteResult.action === 'delete_last'
-              ? Number(todayRows[0]?.id)
-              : Number(deleteResult.targetId);
-          if (!targetId) {
-            return 'No pude identificar el pesaje. Intentá con más detalle.';
-          }
-          const deleted = deleteNutritionWeighin(userId, targetId);
-          if (!deleted?.ok || !deleted.deleted) {
-            return '❌ No pude eliminar ese pesaje. Puede que ya no exista.';
-          }
           const latest = getLatestNutritionWeighin(userId);
           replyText = [
-            '✅ Pesaje eliminado.',
+            '✅ Listo, cancelé el último pesaje OCR y lo saqué del registro.',
             latest
-              ? `⚖️ Último pesaje registrado: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})`
-              : 'Sin pesajes previos registrados.',
+              ? `⚖️ Último pesaje vigente: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})`
+              : 'No quedan pesajes registrados.',
           ].join('\n');
           shouldCharge = true;
+        } else if (!recentImageWeighinAction && cancelIntent) {
+          return [
+            'No tengo un pesaje OCR reciente para cancelar.',
+            'Si querés borrar uno ya guardado, escribí `borra el ultimo pesaje`.',
+          ].join('\n');
         } else {
-          if (!parsed && hasMedia) {
-            let imageWeighinResult = null;
-            try {
-              imageWeighinResult = await inferWeighinFromImage({
-                openai,
-                modelCandidates: smartModelCandidates,
-                inputItems,
-                userMessage: cleanMessage,
-                userTimeZone,
-              });
-              usageSnapshot = mergeUsageSnapshots(usageSnapshot, imageWeighinResult.usage);
-              if (imageWeighinResult.usage) {
-                addNutritionUsageRecord(userId, {
-                  guidedAction: 'log_weighin_image_parser',
-                  model: imageWeighinResult.model,
-                  inputTokens: imageWeighinResult.usage.inputTokens,
-                  outputTokens: imageWeighinResult.usage.outputTokens,
-                  totalTokens: imageWeighinResult.usage.totalTokens,
-                  reasoningTokens: imageWeighinResult.usage.reasoningTokens,
-                  cachedTokens: imageWeighinResult.usage.cachedTokens,
-                  rawUsage: imageWeighinResult.usage.rawUsage,
-                });
+          if (modifyCommand.isModify) {
+            if (!recentImageWeighinAction) {
+              if (!modifyCommand.payload) {
+                return [
+                  'No tengo un pesaje OCR reciente para modificar.',
+                  'Podés mandar una corrección completa en texto, por ejemplo: `82.1 kg grasa 24%`.',
+                ].join('\n');
               }
-            } catch (imageWeighinError) {
-              console.error('[nutrition-runtime] weighin image parser failed', imageWeighinError);
+              weighinMessageForParse = modifyCommand.payload;
+              rawInputForPersist = modifyCommand.payload;
+            } else if (!modifyCommand.payload) {
+              setRecentImageWeighinAction(recentImageWeighinActionByUser, userId, {
+                ...recentImageWeighinAction,
+                awaitingCorrection: true,
+              });
+              return 'Perfecto. Mandame la corrección en texto (ej: `82.1 kg grasa 24%`) y reemplazo el último OCR.';
+            } else {
+              replaceTarget = recentImageWeighinAction;
+              weighinMessageForParse = modifyCommand.payload;
+              rawInputForPersist = modifyCommand.payload;
+              shouldTrackRecentImageWeighin = true;
+              weighinReplyMode = 'modified';
             }
+          } else if (
+            recentImageWeighinAction?.awaitingCorrection &&
+            cleanMessage &&
+            !hasMedia &&
+            !looksLikeDeleteIntent(cleanMessage)
+          ) {
+            replaceTarget = recentImageWeighinAction;
+            weighinMessageForParse = cleanMessage;
+            rawInputForPersist = cleanMessage;
+            shouldTrackRecentImageWeighin = true;
+            weighinReplyMode = 'modified';
+          }
 
-            if (!imageWeighinResult || imageWeighinResult.error === 'unclear_image') {
+          if (replaceTarget) {
+            const parsedCorrection = parseWeighinPayload({
+              rawMessage: weighinMessageForParse,
+              userTimeZone,
+            });
+            if (!parsedCorrection?.ok) {
               return [
-                'No pude leer el peso de la imagen.',
-                'Mandame otra foto más nítida o texto `81.4 kg`.',
+                'No pude detectar el peso en la corrección.',
+                'Formato mínimo: `82.1 kg`.',
               ].join('\n');
             }
+            parsed = applyBaseTemporalToCorrection(parsedCorrection, replaceTarget.temporal);
+          }
 
-            if (imageWeighinResult.error === 'not_weighin_image') {
-              return [
-                'No detecté una pantalla de balanza en esa imagen.',
-                'Mandame foto/screenshot de la balanza o texto `81.4 kg`.',
-              ].join('\n');
+          if (!parsed && !hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
+            const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+            const todayRows = getTodayNutritionWeighins(userId, temporal.localDate, { limit: 10 });
+            if (!todayRows.length) {
+              return 'No tenés pesajes registrados hoy para eliminar.';
             }
-
-            if (imageWeighinResult.error === 'missing_weight') {
-              return [
-                'No pude leer el peso de la imagen.',
-                'Mandame otra foto más nítida o texto `81.4 kg`.',
-              ].join('\n');
+            const deleteResult = await resolveDeleteTargetWithModel({
+              openai,
+              modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage,
+              todayRows,
+              entityType: 'weighin',
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
+            if (deleteResult.action === 'cannot_identify') {
+              const list = todayRows
+                .slice(0, 5)
+                .map((r) => `- ${r.localTime || '?'} → ${r.weightKg} kg`)
+                .join('\n');
+              return `No identifiqué cuál borrar. Pesajes de hoy:
+${list}
+Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             }
+            const targetId =
+              deleteResult.action === 'delete_last'
+                ? Number(todayRows[0]?.id)
+                : Number(deleteResult.targetId);
+            if (!targetId) {
+              return 'No pude identificar el pesaje. Intentá con más detalle.';
+            }
+            const deleted = deleteNutritionWeighin(userId, targetId);
+            if (!deleted?.ok || !deleted.deleted) {
+              return '❌ No pude eliminar ese pesaje. Puede que ya no exista.';
+            }
+            clearRecentImageWeighinAction(recentImageWeighinActionByUser, userId);
+            const latest = getLatestNutritionWeighin(userId);
+            replyText = [
+              '✅ Pesaje eliminado.',
+              latest
+                ? `⚖️ Último pesaje registrado: ${Number(latest.weightKg).toFixed(1)} kg (${latest.localDate})`
+                : 'Sin pesajes previos registrados.',
+            ].join('\n');
+            shouldCharge = true;
+          } else {
+            if (!parsed && hasMedia) {
+              let imageWeighinResult = null;
+              try {
+                imageWeighinResult = await inferWeighinFromImage({
+                  openai,
+                  modelCandidates: smartModelCandidates,
+                  inputItems,
+                  userMessage: cleanMessage,
+                  userTimeZone,
+                });
+                usageSnapshot = mergeUsageSnapshots(usageSnapshot, imageWeighinResult.usage);
+                if (imageWeighinResult.usage) {
+                  addNutritionUsageRecord(userId, {
+                    guidedAction: 'log_weighin_image_parser',
+                    model: imageWeighinResult.model,
+                    inputTokens: imageWeighinResult.usage.inputTokens,
+                    outputTokens: imageWeighinResult.usage.outputTokens,
+                    totalTokens: imageWeighinResult.usage.totalTokens,
+                    reasoningTokens: imageWeighinResult.usage.reasoningTokens,
+                    cachedTokens: imageWeighinResult.usage.cachedTokens,
+                    rawUsage: imageWeighinResult.usage.rawUsage,
+                  });
+                }
+              } catch (imageWeighinError) {
+                console.error('[nutrition-runtime] weighin image parser failed', imageWeighinError);
+              }
 
-            if (imageWeighinResult.action === 'weighin_ready' && imageWeighinResult.parsed?.ok) {
-              setPendingImageWeighinDraft(pendingImageWeighinDraftByUser, userId, {
-                parsed: imageWeighinResult.parsed,
-                rawInput:
+              if (!imageWeighinResult || imageWeighinResult.error === 'unclear_image') {
+                return [
+                  'No pude leer el peso de la imagen.',
+                  'Mandame otra foto más nítida o texto `81.4 kg`.',
+                ].join('\n');
+              }
+
+              if (imageWeighinResult.error === 'not_weighin_image') {
+                return [
+                  'No detecté una pantalla de balanza en esa imagen.',
+                  'Mandame foto/screenshot de la balanza o texto `81.4 kg`.',
+                ].join('\n');
+              }
+
+              if (imageWeighinResult.error === 'missing_weight') {
+                return [
+                  'No pude leer el peso de la imagen.',
+                  'Mandame otra foto más nítida o texto `81.4 kg`.',
+                ].join('\n');
+              }
+
+              if (imageWeighinResult.action === 'weighin_ready' && imageWeighinResult.parsed?.ok) {
+                parsed = imageWeighinResult.parsed;
+                rawInputForPersist =
                   imageWeighinResult.rawInput ||
                   serializeWeighinRawInput({
                     temporal: imageWeighinResult.parsed.temporal,
                     weighin: imageWeighinResult.parsed.weighin,
+                  });
+                shouldTrackRecentImageWeighin = true;
+                weighinReplyMode = 'saved';
+                imageOcrConfidence = imageWeighinResult.confidence || '';
+              } else {
+                return [
+                  'No pude leer el peso de la imagen.',
+                  'Mandame otra foto más nítida o texto `81.4 kg`.',
+                ].join('\n');
+              }
+            }
+
+            if (!parsed) {
+              parsed = parseWeighinPayload({
+                rawMessage: weighinMessageForParse,
+                userTimeZone,
+              });
+              rawInputForPersist = rawInputForPersist || weighinMessageForParse;
+            }
+
+            if (!parsed?.ok) {
+              return [
+                'No pude detectar el peso en tu mensaje.',
+                'Formato mínimo: `81.4 kg`.',
+              ].join('\n');
+            }
+
+            const weighinWrite = addNutritionWeighin(
+              userId,
+              {
+                ...parsed.weighin,
+                loggedAt: parsed.temporal.loggedAt,
+                localDate: parsed.temporal.localDate,
+                localTime: parsed.temporal.localTime,
+                timezone: parsed.temporal.timeZone,
+                rawInput:
+                  rawInputForPersist ||
+                  serializeWeighinRawInput({
+                    temporal: parsed.temporal,
+                    weighin: parsed.weighin,
                   }),
-              });
-              return buildWeighinDraftReply({
-                parsed: imageWeighinResult.parsed,
-                confidence: imageWeighinResult.confidence,
-              });
-            }
-
-            return [
-              'No pude leer el peso de la imagen.',
-              'Mandame otra foto más nítida o texto `81.4 kg`.',
-            ].join('\n');
-          }
-
-          if (!parsed) {
-            parsed = parseWeighinPayload({
-              rawMessage: cleanMessage,
-              userTimeZone,
-            });
-            rawInputForPersist = cleanMessage;
-          }
-
-          if (!parsed?.ok) {
-            return [
-              'No pude detectar el peso en tu mensaje.',
-              'Formato mínimo: `81.4 kg`.',
-            ].join('\n');
-          }
-
-          const weighinWrite = addNutritionWeighin(
-            userId,
-            {
-              ...parsed.weighin,
-              loggedAt: parsed.temporal.loggedAt,
-              localDate: parsed.temporal.localDate,
-              localTime: parsed.temporal.localTime,
-              timezone: parsed.temporal.timeZone,
-              rawInput:
-                rawInputForPersist ||
-                serializeWeighinRawInput({
-                  temporal: parsed.temporal,
-                  weighin: parsed.weighin,
-                }),
-            },
-            {
-              idempotency: {
-                sourceMessageId,
-                operationType: 'log_weighin',
               },
+              {
+                idempotency: {
+                  sourceMessageId,
+                  operationType: 'log_weighin',
+                },
+              }
+            );
+            if (!weighinWrite?.ok) {
+              return formatWriteFailureReply('log_weighin', weighinWrite?.error || 'db_write_failed');
             }
-          );
-          if (!weighinWrite?.ok) {
-            return formatWriteFailureReply('log_weighin', weighinWrite?.error || 'db_write_failed');
-          }
 
-          pendingImageWeighinDraftByUser.delete(userId);
+            if (replaceTarget && weighinWrite.idempotencyStatus !== 'replayed') {
+              const replacedDelete = deleteNutritionWeighin(userId, replaceTarget.weighinId);
+              if (!replacedDelete?.ok || !replacedDelete.deleted) {
+                replacementDeleteNotice =
+                  '⚠️ Guardé la corrección, pero no pude eliminar el OCR anterior. Si querés, borrá manualmente el pesaje duplicado.';
+              }
+            }
 
-          const optionalLines = formatWeighinOptionalLines(parsed.weighin);
-          const idempotencyNotice = formatIdempotencyNotice(weighinWrite.idempotencyStatus);
-          replyText = [
-            `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
-            '✅ Pesaje registrado.',
-            `⚖️ Peso: ${Number(parsed.weighin.weightKg).toFixed(1)} kg`,
-            ...optionalLines,
-            idempotencyNotice,
-          ]
-            .filter(Boolean)
-            .join('\n');
-          shouldCharge = true;
-        } // end else (not delete intent)
+            const persistedWeighinId =
+              Number(weighinWrite.weighinId || 0) || Number(getLatestNutritionWeighin(userId)?.id || 0);
+
+            if (shouldTrackRecentImageWeighin && persistedWeighinId > 0) {
+              setRecentImageWeighinAction(recentImageWeighinActionByUser, userId, {
+                weighinId: persistedWeighinId,
+                temporal: {
+                  loggedAt: parsed.temporal.loggedAt,
+                  localDate: parsed.temporal.localDate,
+                  localTime: parsed.temporal.localTime,
+                  timeZone: parsed.temporal.timeZone,
+                },
+                rawInput:
+                  rawInputForPersist ||
+                  serializeWeighinRawInput({
+                    temporal: parsed.temporal,
+                    weighin: parsed.weighin,
+                  }),
+                awaitingCorrection: false,
+              });
+            } else if (!shouldTrackRecentImageWeighin) {
+              clearRecentImageWeighinAction(recentImageWeighinActionByUser, userId);
+            }
+
+            const optionalLines = formatWeighinOptionalLines(parsed.weighin);
+            const idempotencyNotice = formatIdempotencyNotice(weighinWrite.idempotencyStatus);
+            if (weighinReplyMode === 'saved' || weighinReplyMode === 'modified') {
+              replyText = buildWeighinAutoSavedReply({
+                parsed,
+                confidence: weighinReplyMode === 'saved' ? imageOcrConfidence : '',
+                idempotencyNotice: [idempotencyNotice, replacementDeleteNotice].filter(Boolean).join('\n'),
+                mode: weighinReplyMode,
+              });
+            } else {
+              replyText = [
+                `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
+                '✅ Pesaje registrado.',
+                `⚖️ Peso: ${Number(parsed.weighin.weightKg).toFixed(1)} kg`,
+                ...optionalLines,
+                idempotencyNotice,
+              ]
+                .filter(Boolean)
+                .join('\n');
+            }
+            shouldCharge = true;
+          } // end else (not delete intent)
+        } // end else (not cancel flow)
       } else if (guidedAction === 'learning_chat') {
         // Tutorial menu navigation (no LLM cost)
         if (cleanMessage.startsWith('tutorial:menu_')) {

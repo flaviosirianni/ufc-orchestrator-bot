@@ -155,6 +155,22 @@ const NUTRITION_APRENDIZAJE_ROWS = [
   [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
+const NUTRITION_REGISTRO_LEAF_ROWS = [
+  [{ text: '⬅ Volver a Registro', callback_data: 'menu:nutrition_registro' }],
+];
+
+const NUTRITION_PERFIL_LEAF_ROWS = [
+  [{ text: '⬅ Volver a Perfil', callback_data: 'menu:nutrition_perfil' }],
+];
+
+const NUTRITION_ESTADISTICAS_LEAF_ROWS = [
+  [{ text: '⬅ Volver a Estadísticas', callback_data: 'menu:nutrition_estadisticas' }],
+];
+
+const NUTRITION_APRENDIZAJE_LEAF_ROWS = [
+  [{ text: '⬅ Volver a Aprendizaje', callback_data: 'menu:nutrition_aprendizaje' }],
+];
+
 const NUTRITION_TUTORIAL_LEVEL_ROWS = [
   [
     { text: '🟢 Básico', callback_data: 'qa:nutrition_tutorial:menu_basico' },
@@ -436,7 +452,7 @@ const QUICK_ACTION_HINTS = {
     '',
     'Modulos:',
     '- `Registrar ingesta`: texto simple `hora + lo ingerido` (si no ponés hora, uso ahora local).',
-    '- `Registrar pesaje`: texto con `peso_kg` o foto/screenshot; si es imagen, siempre pido confirmación antes de guardar.',
+    '- `Registrar pesaje`: texto con `peso_kg` o foto/screenshot; si es imagen, se asienta directo y podés usar `cancelar`/`modificar`.',
     '- `Perfil/objetivos`: objetivo, kcal target, proteina target, timezone, notas y productos fijos por alias.',
     '- `Resumen`: hoy + rolling 7d/14d + estado vs objetivo.',
     '- `Aprendizaje`: unico modulo con chat libre nutricional.',
@@ -462,7 +478,8 @@ const QUICK_ACTION_HINTS = {
   nutrition_log_weighin: [
     '⚖️ Registrar pesaje',
     'Mandame texto (`81.4 kg`) o foto/screenshot de la balanza.',
-    'Si mandás imagen, primero te muestro un borrador con peso y opcionales para confirmar o corregir.',
+    'Si mandás imagen y se lee bien, queda asentado al instante.',
+    'Después podés escribir `cancelar` para deshacer o `modificar 82.1 kg` para corregir.',
     'Ejemplos:',
     '- `81.4 kg`',
     '- `hoy 08:15 81.4 kg grasa 18.2% agua 56%`',
@@ -516,7 +533,7 @@ const QUICK_ACTION_HINTS = {
   nutrition_reencauce_weighin: [
     '📌 Modo guiado - Registrar pesaje.',
     'Mandame `81.4 kg` o foto/screenshot de la balanza.',
-    'Si llega imagen, te pido confirmación antes de guardar.',
+    'Si llega imagen legible, queda asentado; luego podés usar `cancelar` o `modificar`.',
   ].join('\n'),
   nutrition_reencauce_profile: [
     '📌 Modo guiado - Perfil/objetivos.',
@@ -528,6 +545,7 @@ const QUICK_ACTION_HINTS = {
 const MENU_SCOPES = new Set([
   'main', 'ledger', 'ufc_analysis', 'ufc_event', 'ufc_config', 'bets', 'event', 'config',
   'nutrition_registro', 'nutrition_perfil', 'nutrition_estadisticas', 'nutrition_aprendizaje',
+  'nutrition_registro_leaf', 'nutrition_perfil_leaf', 'nutrition_estadisticas_leaf', 'nutrition_aprendizaje_leaf',
 ]);
 const GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:main',
@@ -754,6 +772,9 @@ function looksLikeWeighinWorkflowText(message = '') {
   if (looksLikeStructuredWeighinText(text)) return true;
   if (/^(si|ok|dale|confirmo|confirmado)\b/.test(text)) return true;
   if (/^(no|cancelar|cancela|descartar|descarta)\b/.test(text)) return true;
+  if (/^(modificar|modifica|modif|corregir|corregi|corrige|editar|edita|ajustar|ajusta)\b/.test(text)) {
+    return true;
+  }
   if (/\b(registra|registrar|anota|anotalo|carga|cargalo)\b.*\b(eso|asi)\b/.test(text)) {
     return true;
   }
@@ -1096,7 +1117,11 @@ function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc
 
 function guidedMenuScopeForAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
   if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
-    return 'main';
+    const action = normalizeGuidedAction(guidedAction, { defaultAction: 'log_intake' });
+    if (action === 'update_profile') return 'nutrition_perfil_leaf';
+    if (action === 'view_summary') return 'nutrition_estadisticas_leaf';
+    if (action === 'learning_chat' || action === 'view_analysis') return 'nutrition_aprendizaje_leaf';
+    return 'nutrition_registro_leaf';
   }
   const action = normalizeGuidedAction(guidedAction, {
     defaultAction: 'analyze_quotes',
@@ -1360,6 +1385,10 @@ export function startTelegramBot(router, options = {}) {
         if (scope === 'nutrition_perfil') return { inline_keyboard: NUTRITION_PERFIL_ROWS };
         if (scope === 'nutrition_estadisticas') return { inline_keyboard: NUTRITION_ESTADISTICAS_ROWS };
         if (scope === 'nutrition_aprendizaje') return { inline_keyboard: NUTRITION_APRENDIZAJE_ROWS };
+        if (scope === 'nutrition_registro_leaf') return { inline_keyboard: NUTRITION_REGISTRO_LEAF_ROWS };
+        if (scope === 'nutrition_perfil_leaf') return { inline_keyboard: NUTRITION_PERFIL_LEAF_ROWS };
+        if (scope === 'nutrition_estadisticas_leaf') return { inline_keyboard: NUTRITION_ESTADISTICAS_LEAF_ROWS };
+        if (scope === 'nutrition_aprendizaje_leaf') return { inline_keyboard: NUTRITION_APRENDIZAJE_LEAF_ROWS };
         return { inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS };
       }
       if (scope === 'ufc_analysis') {
@@ -1919,7 +1948,7 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_log_intake') {
           setGuidedAction(chatId, 'log_intake');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_intake, {
-            menuScope: 'nutrition_registro',
+            menuScope: 'nutrition_registro_leaf',
           });
           return;
         }
@@ -1927,7 +1956,7 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_log_weighin') {
           setGuidedAction(chatId, 'log_weighin');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_log_weighin, {
-            menuScope: 'nutrition_registro',
+            menuScope: 'nutrition_registro_leaf',
           });
           return;
         }
@@ -1935,7 +1964,7 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_modify_delete_intake') {
           setGuidedAction(chatId, 'log_intake');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_modify_delete_intake, {
-            menuScope: 'nutrition_registro',
+            menuScope: 'nutrition_registro_leaf',
           });
           return;
         }
@@ -1943,20 +1972,20 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_modify_delete_weighin') {
           setGuidedAction(chatId, 'log_weighin');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_modify_delete_weighin, {
-            menuScope: 'nutrition_registro',
+            menuScope: 'nutrition_registro_leaf',
           });
           return;
         }
 
         // ── Perfil submenu ─────────────────────────────────────────────────
         if (data === 'qa:nutrition_view_profile') {
-          setGuidedAction(chatId, 'view_summary');
+          setGuidedAction(chatId, 'update_profile');
           const profileReply = await routeSyntheticAction(query, '__view_profile__', {
             guidedAction: 'view_summary',
             inputType: 'synthetic',
           });
           await sendBotMessage(chatId, profileReply || 'No pude leer tu perfil ahora mismo.', {
-            menuScope: 'nutrition_perfil',
+            menuScope: 'nutrition_perfil_leaf',
           });
           return;
         }
@@ -1964,7 +1993,7 @@ export function startTelegramBot(router, options = {}) {
         if (data === 'qa:nutrition_update_profile') {
           setGuidedAction(chatId, 'update_profile');
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_update_profile, {
-            menuScope: 'nutrition_perfil',
+            menuScope: 'nutrition_perfil_leaf',
           });
           return;
         }
@@ -1978,7 +2007,7 @@ export function startTelegramBot(router, options = {}) {
             { guidedAction: 'view_summary', inputType: 'synthetic' }
           );
           await sendBotMessage(chatId, routed || 'No pude calcular el resumen ahora mismo.', {
-            menuScope: 'nutrition_estadisticas',
+            menuScope: 'nutrition_estadisticas_leaf',
           });
           return;
         }
@@ -1990,7 +2019,7 @@ export function startTelegramBot(router, options = {}) {
             inputType: 'synthetic',
           });
           await sendBotMessage(chatId, routed || 'No encontré ingestas de ayer.', {
-            menuScope: 'nutrition_estadisticas',
+            menuScope: 'nutrition_estadisticas_leaf',
           });
           return;
         }
@@ -2002,7 +2031,7 @@ export function startTelegramBot(router, options = {}) {
             inputType: 'synthetic',
           });
           await sendBotMessage(chatId, routed || 'No encontré pesajes registrados.', {
-            menuScope: 'nutrition_estadisticas',
+            menuScope: 'nutrition_estadisticas_leaf',
           });
           return;
         }
@@ -2014,7 +2043,7 @@ export function startTelegramBot(router, options = {}) {
             inputType: 'synthetic',
           });
           await sendBotMessage(chatId, routed || 'No pude calcular la tendencia semanal.', {
-            menuScope: 'nutrition_estadisticas',
+            menuScope: 'nutrition_estadisticas_leaf',
           });
           return;
         }
@@ -2035,7 +2064,7 @@ export function startTelegramBot(router, options = {}) {
             inputType: 'synthetic',
           });
           await sendBotMessage(chatId, analysisReply || 'No pude generar el análisis ahora mismo.', {
-            menuScope: 'nutrition_aprendizaje',
+            menuScope: 'nutrition_aprendizaje_leaf',
           });
           return;
         }

@@ -83,6 +83,14 @@ function createBaseCallback({
   };
 }
 
+function extractCallbackDataList(message = null) {
+  const keyboard = message?.options?.reply_markup?.inline_keyboard || [];
+  return keyboard
+    .flat()
+    .map((item) => item.callback_data)
+    .filter(Boolean);
+}
+
 export async function runTelegramBotTests() {
   const tests = [];
 
@@ -532,6 +540,8 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls.length, 1);
     assert.equal(router.calls[0].guidedAction, 'view_summary');
     assert.equal(router.calls[0].inputType, 'synthetic');
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_estadisticas']);
   });
 
   tests.push(async () => {
@@ -556,6 +566,8 @@ export async function runTelegramBotTests() {
 
     const weighinHint = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(weighinHint.text, /foto|screenshot|imagen/i);
+    assert.doesNotMatch(weighinHint.text, /confirm/i);
+    assert.deepEqual(extractCallbackDataList(weighinHint), ['menu:nutrition_registro']);
 
     await fakeBot.emit(
       'message',
@@ -568,6 +580,7 @@ export async function runTelegramBotTests() {
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /modo guiado - registrar pesaje/i);
     assert.match(out.text, /foto|screenshot|imagen/i);
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_registro']);
   });
 
   tests.push(async () => {
@@ -627,6 +640,38 @@ export async function runTelegramBotTests() {
       'message',
       createBaseMessage({
         text: 'borra el ultimo pesaje',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'log_weighin');
+    assert.equal(router.calls[0].inputType, 'text_weighin');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_log_weighin',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'modificar',
       })
     );
 
@@ -719,6 +764,7 @@ export async function runTelegramBotTests() {
 
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /modificar\/borrar ingesta/i);
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_registro']);
     assert.equal(router.calls.length, 0);
   });
 
@@ -752,6 +798,7 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls.length, 0);
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /modo guiado - registrar pesaje/i);
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_registro']);
   });
 
   tests.push(async () => {
@@ -783,6 +830,60 @@ export async function runTelegramBotTests() {
 
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
     assert.match(out.text, /resumen/i);
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_estadisticas']);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_update_profile',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /perfil|objetivos/i);
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_perfil']);
+    assert.equal(router.calls.length, 0);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_analysis',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'view_analysis');
+    assert.equal(router.calls[0].inputType, 'synthetic');
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_aprendizaje']);
   });
 
 

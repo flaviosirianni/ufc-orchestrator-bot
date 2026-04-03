@@ -1390,7 +1390,10 @@ export function addNutritionWeighin(userId = '', weighin = {}, options = {}) {
         throw new Error('insert_count_mismatch');
       }
 
-      return { inserted: true };
+      return {
+        inserted: true,
+        weighinId: Number(result?.lastInsertRowid) || null,
+      };
     },
   });
 
@@ -1401,6 +1404,7 @@ export function addNutritionWeighin(userId = '', weighin = {}, options = {}) {
   return {
     ok: true,
     idempotencyStatus: mutationResult.idempotencyStatus || null,
+    weighinId: Number(mutationResult.weighinId) || null,
   };
 }
 
