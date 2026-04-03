@@ -21,11 +21,11 @@ La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (
 
 ## Backlog Unificado (Bot Factory)
 
-Revision de estado: `2026-03-30` (post migracion a arquitectura Core + Bots, deploy OCI y billing global).
+Revision de estado: `2026-04-02` (post migracion a arquitectura Core + Bots, deploy OCI y billing global).
 
 ### Estructura actual del backlog
 
-- **Plataforma/Billing (cross-bot):** items 1, 2, 3, 8, 9, 11, 13, 14, 20, 29, 34, 35.
+- **Plataforma/Billing (cross-bot):** items 1, 2, 3, 8, 9, 11, 13, 14, 20, 29, 34, 35, 37.
 - **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33.
 - **Nutrition (dominio nutricion):** item 36 (mas backlog incremental a crear en esta seccion en siguientes iteraciones).
 
@@ -39,7 +39,7 @@ Revision de estado: `2026-03-30` (post migracion a arquitectura Core + Bots, dep
 
 - `resuelto`: 10 items.
 - `en progreso`: 19 items.
-- `pendiente`: 7 items.
+- `pendiente`: 8 items.
 
 1. **Feedback de "pensando" mientras el bot procesa la respuesta**
    - **Objetivo:** mejorar la UX cuando la respuesta tarda varios segundos.
@@ -1205,5 +1205,50 @@ Revision de estado: `2026-03-30` (post migracion a arquitectura Core + Bots, dep
      - Decision abierta: elegir si `delete` es hard delete o soft delete (`deleted_at`) en `nutrition_intakes`.
      - Decision abierta: definir hasta cuantas horas/dias hacia atras se puede editar sin confirmacion adicional.
      - Decision abierta: definir si el flujo requiere confirmacion explicita para `delete`.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+37. **Submenu de feedback en Ayuda para ambos bots (`Proponer Idea` / `Reportar Problema`)**
+   - **Objetivo de negocio/UX:** capturar feedback accionable desde el punto donde el usuario ya pide ayuda, reduciendo friccion para reportes y generacion de backlog real por uso en produccion.
+   - **Problema observado (ejemplo real):**
+     - El usuario necesita proponer mejoras y reportar fallas, pero hoy `Ayuda` no ofrece una accion dedicada para eso.
+     - Sin entrypoint explicito, el feedback queda mezclado en chat libre y es facil perder contexto tecnico (bot, modulo, accion, timestamp).
+   - **Comportamiento deseado para el usuario final:**
+     - En `Ayuda` de UFC y Nutrition aparece un sub-menu con:
+       - `💡 Proponer Idea`
+       - `🐞 Reportar Problema`
+       - `⬅ Volver al menú`
+     - Al tocar una opcion, el bot pide un mensaje corto estructurado y confirma recepcion con comprobante (id de feedback + fecha/hora local).
+     - El usuario puede seguir operando normal luego de enviar feedback, sin quedar bloqueado en ese flujo.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `telegramBot`:
+       - nuevos callbacks guiados/hibridos: `qa:feedback_menu`, `qa:feedback_idea`, `qa:feedback_issue`.
+       - `HELP_FEEDBACK_ROWS` reutilizable para ambos dominios (`ufc_v1`, `nutrition_v1`).
+       - estado conversacional efimero por chat: `feedback_mode = idea|issue` con expiracion corta (ej: 1 mensaje o 10 min).
+     - Persistencia:
+       - nueva tabla cross-bot `user_feedback` (en DB operativa compartida o storage definido) con:
+         - `id`, `bot_id`, `telegram_user_id`, `category` (`idea|issue`), `message_text`,
+         - `chat_id`, `message_id`, `guided_menu_id`, `menu_scope`, `created_at`, `status` (`new|triaged|closed`).
+     - Enrutado:
+       - no pasar por herramientas de mutacion de dominio; registrar feedback en handler dedicado para evitar side effects.
+     - Guardrails:
+       - validar longitud minima (ej: >= 10 chars) para evitar spam vacio.
+       - rate-limit basico por usuario (ej: max 5 feedbacks / 10 min).
+       - sanitizar PII obvia si se replica a canal interno externo.
+   - **Criterios de aceptacion verificables:**
+     - En ambos bots, `Ayuda` permite abrir el sub-menu de feedback en 1 toque.
+     - `Proponer Idea` y `Reportar Problema` guardan un registro persistente con categoria correcta.
+     - El bot responde con confirmacion que incluye `feedback_id` y timestamp.
+     - Tras confirmar, el usuario puede volver al menu principal sin perder navegacion.
+   - **Pruebas de regresion necesarias:**
+     - UFC `guided_strict`: `Ayuda -> Proponer Idea -> envio` guarda registro y devuelve confirmacion.
+     - Nutrition `guided_strict`: `Ayuda -> Reportar Problema -> envio` guarda registro y devuelve confirmacion.
+     - Callback fuera de allowlist en modo guiado sigue bloqueado (no abrir caminos inesperados).
+     - Expiracion de `feedback_mode`: mensaje tardio no se registra en categoria incorrecta.
+     - Reintento rapido/spam: respeta rate-limit sin romper menu.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: destino secundario de triage (solo DB, Google Sheet, GitHub Issue, Slack/Telegram interno).
+     - Decision abierta: definir SLA y owner de revision (`new -> triaged`).
+     - Decision abierta: permitir adjuntos (screenshots/audio) en fase 1 o limitar a texto.
    - **Prioridad:** alta.
    - **Estado:** pendiente.

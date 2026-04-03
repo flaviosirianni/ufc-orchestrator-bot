@@ -1,0 +1,38 @@
+RESUMEN DIARIO (últimos 15 días),,,,,,,
+fecha,requests,input_tokens,output_tokens,total_tokens,cached_tokens,guided_actions,modelos
+2026-04-01,1,1962,231,2193,0,log_intake_structured_parser,gpt-5.4
+2026-03-31,14,20028,1735,21763,0,"log_intake_image_parser, log_intake_structured_parser, log_intake_normalization, learning_chat, log_intake_label_extraction",gpt-5.4
+2026-03-30,6,10910,1000,11910,0,"log_intake_label_extraction, log_intake_structured_parser, log_intake_normalization, log_intake_image_parser",gpt-5.4
+2026-03-29,14,11217,904,12121,0,"log_intake_normalization, log_intake_structured_parser, learning_chat",gpt-5.4
+,,,,,,,
+DETALLE POR ACCIÓN Y DÍA,,,,,,,
+fecha,guided_action,requests,input_tokens,output_tokens,total_tokens,modelo,costo_estimado_usd
+2026-04-01,log_intake_structured_parser,1,1962,231,2193,gpt-5.4,0.0015
+2026-03-31,log_intake_structured_parser,4,7583,359,7942,gpt-5.4,0.0054
+2026-03-31,log_intake_image_parser,4,7370,907,8277,gpt-5.4,0.0056
+2026-03-31,log_intake_normalization,3,1415,121,1536,gpt-5.4,0.0010
+2026-03-31,log_intake_label_extraction,2,3329,201,3530,gpt-5.4,0.0024
+2026-03-31,learning_chat,1,331,147,478,gpt-5.4,0.0003
+2026-03-30,log_intake_structured_parser,2,3651,391,4042,gpt-5.4,0.0027
+2026-03-30,log_intake_image_parser,2,3669,454,4123,gpt-5.4,0.0028
+2026-03-30,log_intake_normalization,1,488,65,553,gpt-5.4,0.0004
+2026-03-30,log_intake_label_extraction,1,3102,90,3192,gpt-5.4,0.0022
+2026-03-29,log_intake_normalization,7,2924,351,3275,gpt-5.4,0.0022
+2026-03-29,log_intake_structured_parser,5,7641,415,8056,gpt-5.4,0.0055
+2026-03-29,learning_chat,2,652,138,790,gpt-5.4,0.0005
+,,,,,,,
+TOTALES POR ACCIÓN (período completo),,,,,,,
+guided_action,requests totales,input_tokens totales,output_tokens totales,total_tokens,tokens/request promedio,,
+log_intake_structured_parser,12,20877,1396,22273,1856,,
+log_intake_image_parser,6,11039,1361,12400,2067,,
+log_intake_normalization,11,4827,537,5364,488,,
+log_intake_label_extraction,3,6431,291,6722,2241,,
+learning_chat,3,983,285,1268,423,,
+,,,,,,,
+NOTAS,,,,,,,
+"- Período: 29-Mar a 01-Abr 2026 (4 días con actividad)",,,,,,,
+"- Modelo usado: gpt-5.4 en todos los registros",,,,,,,
+"- Costo estimado calculado con tarifa gpt-4.1-mini ~$0.40/1M input + $1.60/1M output (aproximación)",,,,,,,
+"- log_intake_image_parser consume ~2x tokens vs structured_parser — es el más caro por request",,,,,,,
+"- log_intake_label_extraction también es costoso (~2241 tokens/req) — evaluar si puede optimizarse",,,,,,,
+"- Los días sin datos (antes del 29-Mar) no tienen registros en la DB — puede que el tracking fuera más nuevo",,,,,,,
