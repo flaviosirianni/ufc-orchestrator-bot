@@ -23,6 +23,7 @@ import {
 } from '../src/bots/nutrition/nutritionDomain.js';
 import {
   __testEnforceExplicitTemporalFromRawMessage,
+  __testParsedItemsHaveAnyUserOverlap,
   __testParsedItemsAlignWithUserInput,
   __testResolveTemporalFromStructured,
 } from '../src/bots/nutrition/runtime.js';
@@ -459,6 +460,47 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(correctAlignment, true);
 
+  const strictImageAlignment = __testParsedItemsAlignWithUserInput(
+    'mi cena: milanesa de pollo y ensalada de tomate con palta',
+    [
+      {
+        foodItem: 'pechuga de pollo cocida',
+        inputAlias: 'milanesa de pollo',
+      },
+      {
+        foodItem: 'papas hervidas y doradas a la sartén sin aceite',
+        inputAlias: 'papas hervidas',
+      },
+    ]
+  );
+  assert.equal(strictImageAlignment, false);
+
+  const softImageAlignment = __testParsedItemsHaveAnyUserOverlap(
+    'mi cena: milanesa de pollo y ensalada de tomate con palta',
+    [
+      {
+        foodItem: 'pechuga de pollo cocida',
+        inputAlias: 'milanesa de pollo',
+      },
+      {
+        foodItem: 'papas hervidas y doradas a la sartén sin aceite',
+        inputAlias: 'papas hervidas',
+      },
+    ]
+  );
+  assert.equal(softImageAlignment, true);
+
+  const softImageMismatch = __testParsedItemsHaveAnyUserOverlap(
+    'anotame 1 yogur',
+    [
+      {
+        foodItem: 'crema de maní natural',
+        inputAlias: 'crema de maní',
+      },
+    ]
+  );
+  assert.equal(softImageMismatch, false);
+
   const temporalOverride = __testEnforceExplicitTemporalFromRawMessage({
     rawMessage: 'registra 1 taza de granola natural a las 13:40hs',
     userTimeZone: 'America/Argentina/Buenos_Aires',
@@ -491,6 +533,18 @@ export async function runNutritionDomainTests() {
   });
   assert.equal(structuredTemporalOverride.localDate, '2026-04-01');
   assert.equal(structuredTemporalOverride.localTime, '13:40');
+
+  const structuredTemporalNoExplicitDate = __testResolveTemporalFromStructured({
+    rawMessage: 'mi cena: milanesa con ensalada',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    temporal: {
+      localDate: '2026-04-03',
+      localTime: '22:49',
+    },
+    now: new Date('2026-04-03T01:05:00.000Z'),
+  });
+  assert.equal(structuredTemporalNoExplicitDate.localDate, '2026-04-02');
+  assert.equal(structuredTemporalNoExplicitDate.localTime, '22:49');
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',

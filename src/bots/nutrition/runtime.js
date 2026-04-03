@@ -1248,6 +1248,20 @@ function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {
   return true;
 }
 
+function parsedItemsHaveAnyUserOverlap({ rawMessage = '', parsedItems = [] } = {}) {
+  const messageTokens = tokenizeForIntakeMatch(rawMessage);
+  if (!messageTokens.length) return true;
+  if (!Array.isArray(parsedItems) || !parsedItems.length) return false;
+
+  for (const item of parsedItems) {
+    const aliasTokens = tokenizeForIntakeMatch(String(item?.inputAlias || '').trim());
+    const resolvedTokens = tokenizeForIntakeMatch(String(item?.foodItem || '').trim());
+    if (hasApproxTokenOverlap(aliasTokens, messageTokens)) return true;
+    if (hasApproxTokenOverlap(resolvedTokens, messageTokens)) return true;
+  }
+  return false;
+}
+
 function enforceExplicitTemporalFromRawMessage({
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
@@ -1400,6 +1414,10 @@ export function __testParsedItemsAlignWithUserInput(rawMessage = '', parsedItems
   return parsedItemsAlignWithUserInput({ rawMessage, parsedItems });
 }
 
+export function __testParsedItemsHaveAnyUserOverlap(rawMessage = '', parsedItems = []) {
+  return parsedItemsHaveAnyUserOverlap({ rawMessage, parsedItems });
+}
+
 export function __testEnforceExplicitTemporalFromRawMessage({
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
@@ -1416,11 +1434,13 @@ export function __testResolveTemporalFromStructured({
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
   temporal = {},
+  now = new Date(),
 } = {}) {
   return resolveTemporalFromStructured({
     rawMessage,
     userTimeZone,
     temporal,
+    now,
   });
 }
 
@@ -1664,19 +1684,18 @@ function resolveTemporalFromStructured({
   rawMessage = '',
   userTimeZone = DEFAULT_USER_TIMEZONE,
   temporal = {},
+  now = new Date(),
 } = {}) {
   const baseline = resolveTemporalContext({
     rawMessage,
     userTimeZone,
+    now,
   });
-  const hasExplicitDate = Boolean(baseline?.hadExplicitDate);
   const hasExplicitTime = Boolean(baseline?.hadExplicitTime);
 
-  const localDate = hasExplicitDate
-    ? baseline.localDate
-    : isValidIsoDate(temporal?.localDate)
-      ? String(temporal.localDate).trim()
-      : baseline.localDate;
+  // Guardrail: if user did not provide an explicit date, keep local "today".
+  // This avoids model day drift (e.g. UTC boundary causing +1 day).
+  const localDate = baseline.localDate;
   const localTime = hasExplicitTime
     ? baseline.localTime
     : isValidHourMinute(temporal?.localTime)
@@ -1686,6 +1705,7 @@ function resolveTemporalFromStructured({
   const explicitTemporal = resolveTemporalContext({
     rawMessage: `${localDate} ${localTime}`,
     userTimeZone,
+    now,
   });
   return {
     ...explicitTemporal,
@@ -2006,6 +2026,8 @@ async function inferMealIntakeFromImage({
     '  "note":"string"',
     '}',
     'Reglas:',
+    '- Si llegan múltiples fotos en el mismo mensaje, tratarlas como parte de la misma comida y consolidar items sin duplicar.',
+    '- Si una foto muestra otro plato/componente de la misma comida, incluirlo como item adicional.',
     '- Si la imagen principal es una tabla nutricional/etiqueta: action=nutrition_label.',
     '- Si es comida/plato y podés inferir item(s) + porciones razonables: action=meal_log_ready.',
     '- Si hay comida pero duda material (item o porción): action=meal_needs_confirmation.',
@@ -3411,10 +3433,16 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
             userTimeZone,
             parsed,
           });
-          const alignedWithUserInput = parsedItemsAlignWithUserInput({
-            rawMessage: cleanMessage,
-            parsedItems: parsed?.items || [],
-          });
+          const strictAlignmentRequired = !hasMedia;
+          const alignedWithUserInput = strictAlignmentRequired
+            ? parsedItemsAlignWithUserInput({
+                rawMessage: cleanMessage,
+                parsedItems: parsed?.items || [],
+              })
+            : parsedItemsHaveAnyUserOverlap({
+                rawMessage: cleanMessage,
+                parsedItems: parsed?.items || [],
+              });
           if (!alignedWithUserInput) {
             const repaired = tryRepairParsedFromStructured({
               rawMessage: cleanMessage,
