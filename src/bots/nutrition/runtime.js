@@ -2219,8 +2219,43 @@ function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
     score += 60;
   }
 
-  const hintTokens = normalizedNameHint.split(' ').filter(Boolean);
-  const entryTokens = new Set(entryName.split(' ').filter(Boolean));
+  const scoreStopwords = new Set([
+    'de',
+    'del',
+    'la',
+    'el',
+    'los',
+    'las',
+    'con',
+    'sin',
+    'por',
+    'para',
+    'y',
+    'e',
+    'en',
+    'al',
+    'a',
+    'un',
+    'una',
+    'unos',
+    'unas',
+  ]);
+  const hintTokens = normalizedNameHint
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        token.length >= 3 && !scoreStopwords.has(token) && !/^\d+$/.test(token)
+    );
+  const entryTokens = new Set(
+    entryName
+      .split(' ')
+      .map((token) => token.trim())
+      .filter(
+        (token) =>
+          token.length >= 3 && !scoreStopwords.has(token) && !/^\d+$/.test(token)
+      )
+  );
   const overlap = hintTokens.filter((token) => entryTokens.has(token)).length;
   score += overlap * 10;
 
@@ -2255,6 +2290,72 @@ function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
   }
 
   return score;
+}
+
+const STRUCTURED_HINT_STOPWORDS = new Set([
+  'de',
+  'del',
+  'la',
+  'el',
+  'los',
+  'las',
+  'con',
+  'sin',
+  'por',
+  'para',
+  'y',
+  'e',
+  'en',
+  'al',
+  'a',
+  'un',
+  'una',
+  'unos',
+  'unas',
+  'pata',
+  'patas',
+]);
+
+function tokenizeStructuredFoodHint(value = '') {
+  return normalizeCatalogToken(value)
+    .replace(/[0-9/.,:+-]+/g, ' ')
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !STRUCTURED_HINT_STOPWORDS.has(token));
+}
+
+function hasReliableStructuredMatch({
+  hint = '',
+  entry = {},
+  score = 0,
+} = {}) {
+  const normalizedHint = normalizeCatalogToken(hint);
+  const normalizedEntry = normalizeCatalogToken(entry?.productName || entry?.normalizedName || '');
+  if (!normalizedHint || !normalizedEntry) return false;
+
+  const hasStrongStringMatch =
+    normalizedEntry === normalizedHint ||
+    normalizedHint.includes(normalizedEntry) ||
+    normalizedEntry.includes(normalizedHint);
+  if (hasStrongStringMatch && score >= 30) return true;
+
+  const hintTokens = tokenizeStructuredFoodHint(normalizedHint);
+  const entryTokens = tokenizeStructuredFoodHint(normalizedEntry);
+  if (!hintTokens.length || !entryTokens.length) return false;
+
+  const entryTokenSet = new Set(entryTokens);
+  const overlapCount = hintTokens.filter((token) => entryTokenSet.has(token)).length;
+  const overlapHintRatio = overlapCount / hintTokens.length;
+
+  // If user described a composed dish, avoid collapsing to a single overlapping ingredient.
+  if (hintTokens.length >= 4 && overlapCount < 2) return false;
+
+  if (overlapCount >= 2 && overlapHintRatio >= 0.4) return true;
+
+  // Keep short direct mentions working (e.g. "pollo", "huevo").
+  if (hintTokens.length <= 2 && overlapCount >= 1 && score >= 45) return true;
+
+  return false;
 }
 
 export function __testResolveCatalogEntryFromStructuredItem(
@@ -2579,6 +2680,15 @@ function resolveCatalogEntryFromStructuredItem(
     }
   }
   if (!best || bestScore < 20) return { entry: null, matchedPreferenceAlias: null };
+  if (
+    !hasReliableStructuredMatch({
+      hint,
+      entry: best,
+      score: bestScore,
+    })
+  ) {
+    return { entry: null, matchedPreferenceAlias: null };
+  }
   return {
     entry: best,
     matchedPreferenceAlias: String(best?.preferenceAlias || best?.aliasLabel || '').trim() || null,

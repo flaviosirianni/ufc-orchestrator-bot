@@ -502,8 +502,22 @@ function scoreCatalogMatch(entry = {}, normalizedNameHint = '') {
   if (normalizedNameHint.includes(entryName)) return 80;
   if (entryName.includes(normalizedNameHint)) return 60;
 
-  const hintTokens = normalizedNameHint.split(' ').filter(Boolean);
-  const entryTokens = new Set(entryName.split(' ').filter(Boolean));
+  const hintTokens = normalizedNameHint
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        token.length >= 3 && !NAME_STOPWORDS.has(token) && !/^\d+$/.test(token)
+    );
+  const entryTokens = new Set(
+    entryName
+      .split(' ')
+      .map((token) => token.trim())
+      .filter(
+        (token) =>
+          token.length >= 3 && !NAME_STOPWORDS.has(token) && !/^\d+$/.test(token)
+      )
+  );
   const overlap = hintTokens.filter((token) => entryTokens.has(token)).length;
   return overlap * 10;
 }
@@ -583,24 +597,45 @@ function resolveCatalogEntry(nameHint = '') {
   let looseBest = null;
   let looseScore = 0;
   let looseOverlap = 0;
+  let looseHintTokenCount = 0;
   for (const hintVariant of hintVariants) {
+    const hintTokens = normalizeText(hintVariant)
+      .split(' ')
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !NAME_STOPWORDS.has(token));
     for (const entry of pool) {
       const entryName = normalizeText(entry?.productName || entry?.normalizedName || '');
+      const entryTokens = entryName
+        .split(' ')
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 3 && !NAME_STOPWORDS.has(token));
       const overlap = tokenOverlapCount(hintVariant, entryName);
       if (overlap <= 0) continue;
+      if (hintTokens.length >= 4 && overlap < 2) continue;
       const isDirectHint =
         entryName === hintVariant ||
         hintVariant.includes(entryName) ||
         entryName.includes(hintVariant);
-      const score = overlap * 12 + (isDirectHint ? 8 : 0);
+      const overlapRatio = hintTokens.length
+        ? overlap / hintTokens.length
+        : 0;
+      const score = overlap * 12 + (isDirectHint ? 8 : 0) + overlapRatio * 10;
+      if (hintTokens.length >= 3 && overlapRatio < 0.34 && !isDirectHint) continue;
+      if (entryTokens.length >= 3 && overlap < 2 && !isDirectHint) continue;
       if (score > looseScore || (score === looseScore && overlap > looseOverlap)) {
         looseScore = score;
         looseOverlap = overlap;
+        looseHintTokenCount = hintTokens.length;
         looseBest = entry;
       }
     }
   }
-  if (looseBest && looseScore >= 12) return looseBest;
+  if (
+    looseBest &&
+    (looseScore >= 18 || (looseHintTokenCount > 0 && looseHintTokenCount <= 2 && looseOverlap >= 1 && looseScore >= 12))
+  ) {
+    return looseBest;
+  }
   return null;
 }
 

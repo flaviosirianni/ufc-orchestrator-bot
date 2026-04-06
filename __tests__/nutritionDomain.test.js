@@ -585,6 +585,22 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(wrongCatalogIdOverride.entry, null);
 
+  const compositeDishShouldNotCollapseToSingleIngredient =
+    __testResolveCatalogEntryFromStructuredItem(
+      {
+        foodName: 'guiso de lentejas con una pata de pollo',
+        brand: '',
+        quantityValue: 1,
+        quantityUnit: 'plato',
+      },
+      defaultRowsAsCatalog,
+      {
+        userId,
+        userDefaultRows: defaultRowsAsCatalog,
+      }
+    );
+  assert.equal(compositeDishShouldNotCollapseToSingleIngredient.entry, null);
+
   const mismatchAlignment = __testParsedItemsAlignWithUserInput(
     'registra 1 taza de granola natural a las 13:40hs',
     [
