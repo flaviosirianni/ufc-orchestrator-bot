@@ -71,6 +71,10 @@ const DEFAULT_USER_TIMEZONE =
 const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
 const IMAGE_WEIGHIN_DRAFT_TTL_MS = 20 * 60 * 1000;
 const INTAKE_OPERATION_CONTEXT_TTL_MS = 20 * 60 * 1000;
+const NUTRITION_LLM_FIRST_PARSING =
+  String(process.env.NUTRITION_LLM_FIRST_PARSING ?? 'true').toLowerCase() !== 'false';
+const NUTRITION_STRICT_SEMANTIC_GUARDRAIL =
+  String(process.env.NUTRITION_STRICT_SEMANTIC_GUARDRAIL ?? 'false').toLowerCase() === 'true';
 const SPANISH_MONTH_HINT_PATTERN =
   'enero|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?';
 
@@ -1929,7 +1933,7 @@ async function parseSingleIntakeTextWithModels({
     return enforced;
   };
 
-  if (preferLexicalFirst) {
+  if (preferLexicalFirst && !NUTRITION_LLM_FIRST_PARSING) {
     parsed = parseLexical();
   }
 
@@ -1998,7 +2002,7 @@ async function parseSingleIntakeTextWithModels({
     }
   }
 
-  if (!parsed && !preferLexicalFirst) {
+  if (!parsed && (!preferLexicalFirst || NUTRITION_LLM_FIRST_PARSING)) {
     parsed = parseLexical();
   }
 
@@ -2020,30 +2024,32 @@ async function parseSingleIntakeTextWithModels({
     };
   }
 
-  const alignedWithUserInput = parsedItemsAlignWithUserInput({
-    rawMessage: alignmentInput,
-    parsedItems: parsed?.items || [],
-  });
-  if (!alignedWithUserInput) {
-    const repaired = tryRepairParsedFromStructured({
-      rawMessage: lineMessage,
-      userTimeZone,
-      modelStructured,
-      userId,
-      catalogRows: catalogRowsForParsing,
-      userDefaultRows,
+  if (NUTRITION_STRICT_SEMANTIC_GUARDRAIL) {
+    const alignedWithUserInput = parsedItemsAlignWithUserInput({
+      rawMessage: alignmentInput,
+      parsedItems: parsed?.items || [],
     });
-    if (repaired?.ok) {
-      parsed = repaired;
-    } else {
-      return {
-        ok: false,
-        error: 'semantic_mismatch',
-        usage,
+    if (!alignedWithUserInput) {
+      const repaired = tryRepairParsedFromStructured({
+        rawMessage: lineMessage,
+        userTimeZone,
         modelStructured,
-        modelNormalization,
-        lexicalParsed,
-      };
+        userId,
+        catalogRows: catalogRowsForParsing,
+        userDefaultRows,
+      });
+      if (repaired?.ok) {
+        parsed = repaired;
+      } else {
+        return {
+          ok: false,
+          error: 'semantic_mismatch',
+          usage,
+          modelStructured,
+          modelNormalization,
+          lexicalParsed,
+        };
+      }
     }
   }
 
@@ -2137,7 +2143,7 @@ async function parseBatchIntakeTextWithModels({
       userDefaultRows,
       userCatalogHistoryRows,
       catalogRowsForNormalization,
-      preferLexicalFirst: true,
+      preferLexicalFirst: !NUTRITION_LLM_FIRST_PARSING,
     });
     usage = mergeUsageSnapshots(usage, parsedLine.usage);
 
@@ -3223,6 +3229,97 @@ Texto opcional del usuario: ${
   };
 }
 
+async function parseWeighinFromTextWithModel({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const instructions = [
+    'Sos un parser textual de pesajes para nutricion.',
+    'Devolvé JSON puro sin markdown.',
+    'Schema:',
+    '{',
+    '  "action":"weighin_ready|missing_weight|not_weighin|ask_clarification",',
+    '  "confidence":"alta|media|baja",',
+    '  "weight_kg":number|null,',
+    '  "body_fat_percent":number|null,',
+    '  "body_water_percent":number|null,',
+    '  "muscle_mass_kg":number|null,',
+    '  "visceral_fat":number|null,',
+    '  "bmr_kcal":number|null,',
+    '  "bone_mass_kg":number|null,',
+    '  "temporal":{"local_date":"YYYY-MM-DD|null","local_time":"HH:MM|null"},',
+    '  "clarification_question":"string",',
+    '  "note":"string"',
+    '}',
+    'Reglas:',
+    '- Si el usuario informó peso en kg de forma interpretable, action=weighin_ready.',
+    '- Aceptar formatos con coma/punto decimal y español natural (ej: "81,4", "peso 81.4", "hoy 08:10 81.4 kg").',
+    '- Si no hay peso explícito, action=missing_weight o ask_clarification.',
+    '- Si el mensaje no trata de pesaje, action=not_weighin.',
+    '- No inventar valores.',
+    '- Nunca devuelvas texto fuera del JSON.',
+  ].join('\n');
+
+  const smart = await createSmartResponse({
+    openai,
+    modelCandidates,
+    instructions,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `Timezone usuario: ${userTimeZone}\nMensaje usuario: ${String(rawMessage || '').trim()}`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const outputText = extractOutputText(smart.response);
+  const json = extractJsonObject(outputText) || {};
+  const action = normalizeText(json?.action || '');
+  if (action === 'ask_clarification') {
+    return {
+      ok: true,
+      model: smart.model,
+      usage: extractUsageSnapshot(smart.response),
+      action: 'ask_clarification',
+      clarificationQuestion:
+        String(json?.clarification_question || '').trim() ||
+        'No pude detectar bien el pesaje. Pasamelo como `81.4 kg`.',
+      parsed: null,
+      error: 'ask_clarification',
+    };
+  }
+
+  const normalized = normalizeVisualWeighinPayload({
+    visualPayload: json,
+    rawMessage: String(rawMessage || '').trim(),
+    userTimeZone,
+  });
+
+  return {
+    ok: true,
+    model: smart.model,
+    usage: extractUsageSnapshot(smart.response),
+    action: normalized.action,
+    parsed: normalized.ok
+      ? {
+          ok: true,
+          temporal: normalized.temporal,
+          weighin: normalized.weighin,
+        }
+      : null,
+    rawInput: normalized.rawInput || '',
+    clarificationQuestion: '',
+    error: normalized.ok ? '' : normalized.error,
+  };
+}
+
 function formatWeighinOptionalLines(weighin = {}) {
   const lines = [];
   if (Number.isFinite(Number(weighin?.bodyFatPercent))) {
@@ -4302,11 +4399,46 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             }
 
             if (!parsed) {
-              parsed = parseWeighinPayload({
-                rawMessage: weighinMessageForParse,
-                userTimeZone,
-              });
-              rawInputForPersist = rawInputForPersist || weighinMessageForParse;
+              if (!hasMedia && weighinMessageForParse) {
+                try {
+                  const textWeighin = await parseWeighinFromTextWithModel({
+                    openai,
+                    modelCandidates: smartModelCandidates,
+                    rawMessage: weighinMessageForParse,
+                    userTimeZone,
+                  });
+                  usageSnapshot = mergeUsageSnapshots(usageSnapshot, textWeighin.usage);
+                  if (textWeighin.usage) {
+                    addNutritionUsageRecord(userId, {
+                      guidedAction: 'log_weighin_text_parser',
+                      model: textWeighin.model,
+                      inputTokens: textWeighin.usage.inputTokens,
+                      outputTokens: textWeighin.usage.outputTokens,
+                      totalTokens: textWeighin.usage.totalTokens,
+                      reasoningTokens: textWeighin.usage.reasoningTokens,
+                      cachedTokens: textWeighin.usage.cachedTokens,
+                      rawUsage: textWeighin.usage.rawUsage,
+                    });
+                  }
+                  if (textWeighin.action === 'ask_clarification') {
+                    return textWeighin.clarificationQuestion;
+                  }
+                  if (textWeighin.action === 'weighin_ready' && textWeighin.parsed?.ok) {
+                    parsed = textWeighin.parsed;
+                    rawInputForPersist = rawInputForPersist || textWeighin.rawInput || weighinMessageForParse;
+                  }
+                } catch (textWeighinError) {
+                  console.error('[nutrition-runtime] weighin text parser failed', textWeighinError);
+                }
+              }
+
+              if (!parsed) {
+                parsed = parseWeighinPayload({
+                  rawMessage: weighinMessageForParse,
+                  userTimeZone,
+                });
+                rawInputForPersist = rawInputForPersist || weighinMessageForParse;
+              }
             }
 
             if (!parsed?.ok) {
@@ -5252,7 +5384,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           ].join('\n');
         }
 
-        if (!parsedBatch && parsed?.ok && cleanMessage) {
+        if (!parsedBatch && parsed?.ok && cleanMessage && NUTRITION_STRICT_SEMANTIC_GUARDRAIL) {
           parsed = enforceExplicitTemporalFromRawMessage({
             rawMessage: cleanMessage,
             userTimeZone,
