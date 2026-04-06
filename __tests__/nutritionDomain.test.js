@@ -13,6 +13,7 @@ import {
   listNutritionUserProductDefaults,
   removeNutritionUserProductDefault,
   setNutritionUserProductDefault,
+  updateNutritionIntakeTemporal,
   upsertFoodCatalogEntry,
 } from '../src/bots/nutrition/nutritionStore.js';
 import { __testResolveCatalogEntryFromStructuredItem } from '../src/bots/nutrition/runtime.js';
@@ -113,6 +114,23 @@ export async function runNutritionDomainTests() {
   assert.equal(parsedRelative.ok, true);
   assert.equal(parsedRelative.temporal.localDate, '2026-03-24');
   assert.equal(parsedRelative.temporal.localTime, '20:15');
+
+  const temporalNaturalDate = resolveTemporalContext({
+    rawMessage: 'fecha real 03 de abril',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    now: new Date('2026-04-10T03:00:00.000Z'),
+  });
+  assert.equal(temporalNaturalDate.localDate, '2026-04-03');
+  assert.equal(temporalNaturalDate.hadExplicitDate, true);
+
+  const parsedNaturalDateIntake = parseIntakePayload({
+    rawMessage: '03 de abril 23:30 100g arroz cocido',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    now: new Date('2026-04-10T03:00:00.000Z'),
+  });
+  assert.equal(parsedNaturalDateIntake.ok, true);
+  assert.equal(parsedNaturalDateIntake.temporal.localDate, '2026-04-03');
+  assert.equal(parsedNaturalDateIntake.temporal.localTime, '23:30');
 
   const parsedWeighin = parseWeighinPayload({
     rawMessage: 'hoy 08:10 81.4 kg grasa 18.2% agua 56%',
@@ -236,6 +254,24 @@ export async function runNutritionDomainTests() {
   assert.equal(summary.today.proteinG, 2.7);
   assert.equal(summary.rolling7d.caloriesKcal, 130);
   assert.equal(summary.rolling14d.caloriesKcal, 130);
+
+  const rowToMove = persistedRows[0];
+  const movedTemporal = resolveTemporalContext({
+    rawMessage: '2026-03-23 23:30',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  const updateResult = updateNutritionIntakeTemporal(userId, rowToMove.id, {
+    loggedAt: movedTemporal.loggedAt,
+    localDate: movedTemporal.localDate,
+    localTime: movedTemporal.localTime,
+    timezone: movedTemporal.timeZone,
+    rawInput: 'modificar fecha test',
+  });
+  assert.equal(updateResult.ok, true);
+  assert.equal(updateResult.updated, true);
+
+  const movedRows = listNutritionIntakesByDate(userId, '2026-03-23', { limit: 5 });
+  assert.equal(movedRows.some((row) => Number(row.id) === Number(rowToMove.id)), true);
 
   const idempotentPayload = parseIntakePayload({
     rawMessage: '2026-03-22 13:30 100g arroz cocido',

@@ -1280,6 +1280,36 @@ export function startTelegramBot(router, options = {}) {
   const menuScopeByChat = new Map();
   const guidedActionByChat = new Map();
   const recentCallbacksByChat = new Map();
+  const pollingRecovery = {
+    inFlight: false,
+    lastAttemptAt: 0,
+    cooldownMs: 30_000,
+  };
+
+  async function recoverPolling(reason = '') {
+    if (typeof bot.stopPolling !== 'function' || typeof bot.startPolling !== 'function') {
+      return;
+    }
+    const nowMs = Date.now();
+    if (pollingRecovery.inFlight) return;
+    if (nowMs - pollingRecovery.lastAttemptAt < pollingRecovery.cooldownMs) return;
+
+    pollingRecovery.inFlight = true;
+    pollingRecovery.lastAttemptAt = nowMs;
+    try {
+      await bot.stopPolling({ cancel: true });
+    } catch (stopError) {
+      console.error('[telegram] polling recovery stop failed', stopError?.message || stopError);
+    }
+    try {
+      await bot.startPolling();
+      console.log(`[telegram] polling recovered${reason ? ` (${reason})` : ''}`);
+    } catch (startError) {
+      console.error('[telegram] polling recovery start failed', startError?.message || startError);
+    } finally {
+      pollingRecovery.inFlight = false;
+    }
+  }
 
   function getMenuScope(chatId) {
     const key = String(chatId || '').trim();
@@ -2527,6 +2557,25 @@ export function startTelegramBot(router, options = {}) {
     await sendBotMessage(chatId, routed || 'No pude completar esa accion ahora mismo.', {
       menuScope,
     });
+  });
+
+  bot.on('polling_error', (error) => {
+    const message = String(error?.message || error || '').trim() || 'unknown_polling_error';
+    console.error('[telegram] polling_error', message);
+    const lowered = message.toLowerCase();
+    if (
+      lowered.includes('etimedout') ||
+      lowered.includes('econnreset') ||
+      lowered.includes('aggregateerror') ||
+      lowered.includes('socket hang up')
+    ) {
+      void recoverPolling(message);
+    }
+  });
+
+  bot.on('error', (error) => {
+    const message = String(error?.message || error || '').trim() || 'unknown_telegram_error';
+    console.error('[telegram] error', message);
   });
 
   console.log('🤖 Telegram bot iniciado y esperando mensajes...');

@@ -44,6 +44,7 @@ import {
   upsertNutritionProfile,
   getTodayNutritionIntakes,
   deleteNutritionIntake,
+  updateNutritionIntakeTemporal,
   getTodayNutritionWeighins,
   deleteNutritionWeighin,
   listRecentNutritionWeighins,
@@ -743,15 +744,34 @@ function looksLikeDeleteIntent(text = '') {
   );
 }
 
+function looksLikeIntakeModifyIntent(text = '') {
+  const normalized = String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+  if (!normalized) return false;
+  return (
+    /^(modificar|modifica|modif|editar|edita|ajustar|ajusta|corregir|corregi|corrige)\b/.test(
+      normalized
+    ) ||
+    /\b(modificar|editar|ajustar|corregir)\b.*\b(ingesta|comida|registro)\b/.test(normalized)
+  );
+}
+
 async function resolveDeleteTargetWithModel({
   openai,
   modelCandidates = [],
   rawMessage = '',
+  candidateRows = [],
   todayRows = [],
   entityType = 'intake',
+  rowsLabel = 'de hoy',
+  intentLabel = 'borrar',
 } = {}) {
   const isIntake = entityType === 'intake';
-  const rowLines = todayRows
+  const rows = Array.isArray(candidateRows) && candidateRows.length ? candidateRows : todayRows;
+  const rowLines = rows
     .map((r) => {
       if (isIntake) {
         const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
@@ -762,8 +782,8 @@ async function resolveDeleteTargetWithModel({
     .join('\n');
 
   const instructions = [
-    `Sos un asistente que identifica qué ${isIntake ? 'ingesta' : 'pesaje'} quiere borrar el usuario.`,
-    'Recibís el mensaje y la lista de registros de hoy.',
+    `Sos un asistente que identifica qué ${isIntake ? 'ingesta' : 'pesaje'} quiere ${intentLabel} el usuario.`,
+    `Recibís el mensaje y la lista de registros ${rowsLabel}.`,
     'Salida: JSON puro sin markdown.',
     'Schema: {"action":"delete_single|delete_last|cannot_identify","target_id":number|null,"reason":"string"}',
     'Reglas:',
@@ -773,7 +793,7 @@ async function resolveDeleteTargetWithModel({
     '- target_id debe ser un número entero del campo id de la lista',
   ].join('\n');
 
-  const inputText = `Mensaje: "${rawMessage}"\n\nRegistros de hoy:\n${rowLines}`;
+  const inputText = `Mensaje: "${rawMessage}"\n\nRegistros ${rowsLabel}:\n${rowLines}`;
 
   const smart = await createSmartResponse({
     openai,
@@ -3578,7 +3598,101 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         } // end else (not tutorial)
       } else {
         // log_intake handler
-        if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
+        if (!hasMedia && cleanMessage && looksLikeIntakeModifyIntent(cleanMessage)) {
+          const temporalHint = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+          if (!temporalHint.hadExplicitDate && !temporalHint.hadExplicitTime) {
+            return [
+              'Para modificar una ingesta, pasame al menos fecha u hora real.',
+              'Ejemplos: `modificar fernet con coca cola fecha 03 de abril` o `modificar la última ingesta hora 23:30`.',
+            ].join('\n');
+          }
+
+          const recentRows = listRecentNutritionIntakes(userId, { limit: 30 });
+          if (!recentRows.length) {
+            return 'No tengo ingestas recientes para modificar.';
+          }
+
+          const modifyTarget = await resolveDeleteTargetWithModel({
+            openai,
+            modelCandidates: smartModelCandidates,
+            rawMessage: cleanMessage,
+            candidateRows: recentRows,
+            entityType: 'intake',
+            rowsLabel: 'recientes',
+            intentLabel: 'modificar',
+          });
+          usageSnapshot = mergeUsageSnapshots(usageSnapshot, modifyTarget.usage);
+
+          if (modifyTarget.action === 'cannot_identify') {
+            const list = recentRows
+              .slice(0, 8)
+              .map((r) => {
+                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                return `- ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
+              })
+              .join('\n');
+            return [
+              'No pude identificar cuál ingesta querés modificar.',
+              'Referenciá el item y, si podés, la hora.',
+              'Ejemplo: `modificar fernet de las 23:30 fecha 03 de abril`.',
+              '',
+              `Ingestas recientes:\n${list}`,
+            ].join('\n');
+          }
+
+          const targetId =
+            modifyTarget.action === 'delete_last'
+              ? Number(recentRows[0]?.id)
+              : Number(modifyTarget.targetId);
+          if (!targetId) {
+            return 'No pude identificar el registro a modificar. Intentá con más detalle.';
+          }
+
+          const targetRow = recentRows.find((row) => Number(row?.id) === targetId);
+          if (!targetRow) {
+            return 'No pude encontrar esa ingesta para modificar. Puede que ya no exista.';
+          }
+
+          const nextLocalDate = temporalHint.hadExplicitDate
+            ? temporalHint.localDate
+            : String(targetRow.localDate || '').trim();
+          const nextLocalTime = temporalHint.hadExplicitTime
+            ? temporalHint.localTime
+            : String(targetRow.localTime || '').trim();
+          if (!nextLocalDate || !nextLocalTime) {
+            return 'No pude resolver la fecha/hora destino de la modificación.';
+          }
+
+          const mergedTemporal = resolveTemporalContext({
+            rawMessage: `${nextLocalDate} ${nextLocalTime}`,
+            userTimeZone,
+          });
+          const updated = updateNutritionIntakeTemporal(userId, targetId, {
+            loggedAt: mergedTemporal.loggedAt,
+            localDate: nextLocalDate,
+            localTime: nextLocalTime,
+            timezone: mergedTemporal.timeZone,
+            rawInput: cleanMessage,
+          });
+          if (!updated?.ok) {
+            return formatWriteFailureReply('log_intake', updated?.error || 'db_write_failed');
+          }
+          if (!updated.updated) {
+            return 'No pude modificar esa ingesta porque ya no estaba disponible.';
+          }
+
+          const quantity = [targetRow.quantityValue, targetRow.quantityUnit].filter(Boolean).join(' ');
+          const summary = getNutritionSummary(userId, nextLocalDate);
+          const status = calculateProfileStatus(profile, summary.today);
+          replyText = [
+            '✅ Ingesta modificada.',
+            `- Item: ${targetRow.foodItem}${quantity ? ` (${quantity})` : ''}`,
+            `- Nueva fecha/hora: ${nextLocalDate} ${nextLocalTime}`,
+            formatMacroLine('📊 Día actualizado: ', summary.today),
+            `🎯 Estado vs objetivo: ${status}`,
+          ].join('\n');
+          shouldCharge = true;
+        } else if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
           const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
           const todayRows = getTodayNutritionIntakes(userId, temporal.localDate, { limit: 20 });
           if (!todayRows.length) {

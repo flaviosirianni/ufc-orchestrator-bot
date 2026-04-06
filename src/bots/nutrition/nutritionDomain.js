@@ -125,6 +125,7 @@ function extractTimeParts(localTime = '') {
 function detectDateHint(message = '', todayIsoDate = '') {
   const text = String(message || '');
   const normalized = normalizeText(text);
+  const todayParts = extractDateParts(todayIsoDate);
   const isoMatch = text.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/);
   if (isoMatch) {
     const [_, yearRaw, monthRaw, dayRaw] = isoMatch;
@@ -153,6 +154,54 @@ function detectDateHint(message = '', todayIsoDate = '') {
           .toString()
           .padStart(2, '0')}-${day.toString().padStart(2, '0')}`,
         matchedToken: dmyMatch[0],
+      };
+    }
+  }
+
+  const monthNameToNumber = {
+    enero: 1,
+    feb: 2,
+    febrero: 2,
+    mar: 3,
+    marzo: 3,
+    abr: 4,
+    abril: 4,
+    may: 5,
+    mayo: 5,
+    jun: 6,
+    junio: 6,
+    jul: 7,
+    julio: 7,
+    ago: 8,
+    agosto: 8,
+    sep: 9,
+    sept: 9,
+    set: 9,
+    setiembre: 9,
+    septiembre: 9,
+    oct: 10,
+    octubre: 10,
+    nov: 11,
+    noviembre: 11,
+    dic: 12,
+    diciembre: 12,
+  };
+  const dayMonthNameMatch = normalized.match(
+    /\b(\d{1,2})\s*(?:de\s+)?(enero|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s*(?:de)?\s*(20\d{2}))?\b/
+  );
+  if (dayMonthNameMatch) {
+    const day = Number(dayMonthNameMatch[1]);
+    const monthToken = String(dayMonthNameMatch[2] || '').trim();
+    const month = Number(monthNameToNumber[monthToken] || 0);
+    const fallbackYear = Number(todayParts?.year || 0);
+    const parsedYear = Number(dayMonthNameMatch[3] || 0);
+    const year = parsedYear >= 2000 ? parsedYear : fallbackYear;
+    if (year >= 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return {
+        localDate: `${year.toString().padStart(4, '0')}-${month
+          .toString()
+          .padStart(2, '0')}-${day.toString().padStart(2, '0')}`,
+        matchedToken: dayMonthNameMatch[0],
       };
     }
   }

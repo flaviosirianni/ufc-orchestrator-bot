@@ -1892,6 +1892,65 @@ export function deleteNutritionIntake(userId = '', intakeId = null) {
   return { ok: true, deleted: result.changes > 0 };
 }
 
+export function updateNutritionIntakeTemporal(
+  userId = '',
+  intakeId = null,
+  {
+    loggedAt = '',
+    localDate = '',
+    localTime = '',
+    timezone = '',
+    rawInput = '',
+  } = {}
+) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const id = Number(intakeId);
+  const normalizedLoggedAt = String(loggedAt || '').trim();
+  const normalizedLocalDate = String(localDate || '').trim();
+  const normalizedLocalTime = String(localTime || '').trim();
+  const normalizedTimezone = String(timezone || '').trim();
+  const normalizedRawInput = String(rawInput || '').trim();
+  if (!normalizedUserId || !Number.isFinite(id) || id <= 0) {
+    return { ok: false, error: 'invalid_params' };
+  }
+  if (!normalizedLoggedAt || !normalizedLocalDate || !normalizedLocalTime || !normalizedTimezone) {
+    return { ok: false, error: 'missing_temporal_fields' };
+  }
+
+  const existing = getDb()
+    .prepare(`SELECT id FROM nutrition_intakes WHERE id = ? AND telegram_user_id = ?`)
+    .get(id, normalizedUserId);
+  if (!existing) {
+    return { ok: true, updated: false };
+  }
+
+  const result = getDb()
+    .prepare(
+      `
+    UPDATE nutrition_intakes
+    SET
+      logged_at = @loggedAt,
+      local_date = @localDate,
+      local_time = @localTime,
+      timezone = @timezone,
+      raw_input = @rawInput
+    WHERE id = @id AND telegram_user_id = @userId
+  `
+    )
+    .run({
+      loggedAt: normalizedLoggedAt,
+      localDate: normalizedLocalDate,
+      localTime: normalizedLocalTime,
+      timezone: normalizedTimezone,
+      rawInput: normalizedRawInput,
+      id,
+      userId: normalizedUserId,
+    });
+
+  return { ok: true, updated: result.changes > 0 };
+}
+
 export function getTodayNutritionWeighins(userId = '', localDate = '', { limit = 10 } = {}) {
   ensureNutritionSchema();
   const normalizedUserId = String(userId || '').trim();
