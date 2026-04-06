@@ -1408,6 +1408,12 @@ const NUTRITION_MATCH_STOPWORDS = new Set([
   'registra',
   'suma',
   'sumae',
+  'para',
+  'uno',
+  'una',
+  'unos',
+  'unas',
+  'real',
   'taza',
   'tazon',
   'porcion',
@@ -1426,6 +1432,19 @@ const NUTRITION_MATCH_STOPWORDS = new Set([
   'almuerzo',
   'merienda',
   'cena',
+  'enero',
+  'febrero',
+  'marzo',
+  'abril',
+  'mayo',
+  'junio',
+  'julio',
+  'agosto',
+  'septiembre',
+  'setiembre',
+  'octubre',
+  'noviembre',
+  'diciembre',
 ]);
 
 function tokenizeForIntakeMatch(value = '') {
@@ -1467,6 +1486,48 @@ function countTokenOverlap(itemTokens = [], messageTokens = []) {
     }
   }
   return overlap;
+}
+
+function tokenMatchesApprox(a = '', b = '') {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) {
+    return true;
+  }
+  return false;
+}
+
+function computeTokenCoverage({ messageTokens = [], parsedItems = [] } = {}) {
+  if (!Array.isArray(messageTokens) || !messageTokens.length) {
+    return { matchedCount: 0, coverageRatio: 1 };
+  }
+  if (!Array.isArray(parsedItems) || !parsedItems.length) {
+    return { matchedCount: 0, coverageRatio: 0 };
+  }
+
+  const parsedTokens = [];
+  for (const item of parsedItems) {
+    parsedTokens.push(
+      ...tokenizeForIntakeMatch(String(item?.inputAlias || '').trim()),
+      ...tokenizeForIntakeMatch(String(item?.foodItem || '').trim())
+    );
+  }
+
+  const matchedMessageTokenSet = new Set();
+  for (const msgToken of messageTokens) {
+    for (const parsedToken of parsedTokens) {
+      if (tokenMatchesApprox(msgToken, parsedToken)) {
+        matchedMessageTokenSet.add(msgToken);
+        break;
+      }
+    }
+  }
+
+  const matchedCount = matchedMessageTokenSet.size;
+  return {
+    matchedCount,
+    coverageRatio: matchedCount / Math.max(messageTokens.length, 1),
+  };
 }
 
 function hasApproxTokenOverlap(itemTokens = [], messageTokens = []) {
@@ -1612,6 +1673,7 @@ function evaluateParsedItemsAlignment({ rawMessage = '', parsedItems = [] } = {}
   let rowsWithQuantityMatch = 0;
   let hasCatalogAliasResolvedMismatch = false;
   let parsedItemsWithQuantity = 0;
+  const tokenCoverage = computeTokenCoverage({ messageTokens, parsedItems });
 
   for (const item of parsedItems) {
     const aliasTokens = tokenizeForIntakeMatch(String(item?.inputAlias || '').trim());
@@ -1674,8 +1736,13 @@ function evaluateParsedItemsAlignment({ rawMessage = '', parsedItems = [] } = {}
     ? tokenOverlapRatio * 0.7 + quantityMatchRatio * 0.3
     : tokenOverlapRatio;
   const score = Math.max(0, baseScore - (penalizedByCatalogHijack ? 0.25 : 0));
+  const tokenCoverageRatio = Number(tokenCoverage.coverageRatio || 0);
   const aligned =
     score >= 0.55 &&
+    (
+      tokenCoverageRatio >= 0.4 ||
+      (messageTokens.length <= 3 && Number(tokenCoverage.matchedCount || 0) >= 1)
+    ) &&
     rowsWithTokenOverlap > 0 &&
     !hasCatalogAliasResolvedMismatch &&
     (!hasQuantityHints || !canValidateQuantity || rowsWithQuantityMatch > 0 || quantityHints.length > 1);
@@ -1694,7 +1761,23 @@ function evaluateParsedItemsAlignment({ rawMessage = '', parsedItems = [] } = {}
           : 'low_overlap',
     tokenOverlapRatio,
     quantityMatchRatio,
+    tokenCoverageRatio,
+    tokenMatchedCount: Number(tokenCoverage.matchedCount || 0),
   };
+}
+
+function isSevereSemanticDrift({ evaluation = null, parsedItems = [] } = {}) {
+  if (!evaluation || evaluation.aligned) return false;
+  const coverage = Number(evaluation.tokenCoverageRatio || 0);
+  if (coverage >= 0.34) return false;
+  const hasCatalogRows = Array.isArray(parsedItems)
+    ? parsedItems.some(
+        (item) =>
+          Number.isFinite(Number(item?.catalogItemId)) ||
+          normalizeCatalogToken(item?.resolutionMode || '') === 'catalog'
+      )
+    : false;
+  return hasCatalogRows;
 }
 
 function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {}) {
@@ -5530,6 +5613,34 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
                 ok: false,
                 stage: intakeParseStage,
                 reasonCode: `semantic_mismatch:${String(alignmentEvaluation?.reason || 'unknown')}`,
+              });
+              return buildIntakeSemanticMismatchReply();
+            }
+          }
+        }
+
+        if (!parsedBatch && parsed?.ok && cleanMessage && !NUTRITION_STRICT_SEMANTIC_GUARDRAIL) {
+          const softEvaluation = evaluateParsedItemsAlignment({
+            rawMessage: cleanMessage,
+            parsedItems: parsed?.items || [],
+          });
+          if (isSevereSemanticDrift({ evaluation: softEvaluation, parsedItems: parsed?.items || [] })) {
+            const lexicalFallback = parseIntakePayload({
+              rawMessage: cleanMessage,
+              userTimeZone,
+            });
+            if (lexicalFallback?.ok) {
+              parsed = enforceExplicitTemporalFromRawMessage({
+                rawMessage: cleanMessage,
+                userTimeZone,
+                parsed: lexicalFallback,
+              });
+              intakeParseStage = intakeParseStage || 'lexical_recovery';
+            } else {
+              emitIntakeParseTrace({
+                ok: false,
+                stage: intakeParseStage,
+                reasonCode: 'semantic_drift_soft_guard',
               });
               return buildIntakeSemanticMismatchReply();
             }

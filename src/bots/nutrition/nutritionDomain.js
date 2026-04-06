@@ -683,6 +683,16 @@ function estimateItemFromNameHint({
       fatG: 8,
       source: 'estimacion_lexica',
     },
+    {
+      pattern: /\bguiso\b.*\blentej(?:a|as)\b|\blentej(?:a|as)\b.*\bguiso\b/,
+      foodItem: 'guiso de lentejas con pollo',
+      portionG: 350,
+      caloriesKcal: 420,
+      proteinG: 24,
+      carbsG: 46,
+      fatG: 14,
+      source: 'estimacion_lexica',
+    },
   ];
 
   const preset = presets.find((candidate) => candidate.pattern.test(normalized));

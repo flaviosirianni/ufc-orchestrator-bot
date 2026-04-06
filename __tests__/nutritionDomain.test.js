@@ -160,6 +160,28 @@ export async function runNutritionDomainTests() {
     true
   );
 
+  const parsedCompositeStew = parseIntakePayload({
+    rawMessage: 'registra para el 05 de abril 22hs 1 plato de guiso de lentejas con una pata de pollo',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    now: new Date('2026-04-10T03:00:00.000Z'),
+  });
+  assert.equal(parsedCompositeStew.ok, true);
+  assert.equal(parsedCompositeStew.temporal.localDate, '2026-04-05');
+  assert.equal(parsedCompositeStew.temporal.localTime, '22:00');
+  assert.equal(parsedCompositeStew.items.length >= 1, true);
+  assert.equal(
+    parsedCompositeStew.items.some((item) =>
+      /guiso|lentej/i.test(String(item?.foodItem || ''))
+    ),
+    true
+  );
+  assert.equal(
+    parsedCompositeStew.items.some((item) =>
+      /pechuga de pollo cocida/i.test(String(item?.foodItem || ''))
+    ),
+    false
+  );
+
   const parsedRelative = parseIntakePayload({
     rawMessage: 'ayer 20:15 100g pechuga de pollo cocida',
     userTimeZone: 'America/Argentina/Buenos_Aires',
