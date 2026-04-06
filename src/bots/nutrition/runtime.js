@@ -43,6 +43,7 @@ import {
   upsertFoodCatalogEntry,
   upsertNutritionProfile,
   getTodayNutritionIntakes,
+  findNutritionIntakeById,
   deleteNutritionIntake,
   updateNutritionIntakeTemporal,
   getTodayNutritionWeighins,
@@ -69,6 +70,8 @@ const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
 const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
 const IMAGE_WEIGHIN_DRAFT_TTL_MS = 20 * 60 * 1000;
+const SPANISH_MONTH_HINT_PATTERN =
+  'enero|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?';
 
 const TUTORIAL_CONTENT_MAP = {
   calorias: { title: 'Calorías: qué son y por qué importan', level: 'basico' },
@@ -459,6 +462,31 @@ function normalizeConfidenceLabel(value = '', fallback = 'media') {
   return fallback;
 }
 
+function toPositiveIntOrNull(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.trunc(parsed);
+}
+
+function formatIntakeIdPrefix(row = {}) {
+  const id = toPositiveIntOrNull(row?.id);
+  if (!id) return '';
+  return `ID ${id} | `;
+}
+
+function attachInsertedIdsToRows(rows = [], insertedIds = []) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const safeInsertedIds = Array.isArray(insertedIds) ? insertedIds : [];
+  return rows.map((row, index) => {
+    const intakeId = toPositiveIntOrNull(safeInsertedIds[index]);
+    if (!intakeId) return row;
+    return {
+      ...row,
+      id: intakeId,
+    };
+  });
+}
+
 function formatIntakeDetailLine(row = {}, { includeTime = false, includeConfidence = false } = {}) {
   const food = String(row?.foodItem || '').trim() || 'item';
   const quantity = formatQuantityText(row?.quantityValue, row?.quantityUnit);
@@ -467,9 +495,10 @@ function formatIntakeDetailLine(row = {}, { includeTime = false, includeConfiden
   const carbs = formatNumberCompact(row?.carbsG);
   const fat = formatNumberCompact(row?.fatG);
   const confidence = normalizeConfidenceLabel(row?.confidence, 'media');
-  const prefix = includeTime && row?.localTime ? `${row.localTime} | ` : '';
+  const idPrefix = formatIntakeIdPrefix(row);
+  const timePrefix = includeTime && row?.localTime ? `${row.localTime} | ` : '';
   const confidenceSuffix = includeConfidence ? ` | Conf: ${confidence}` : '';
-  return `- ${prefix}${food} (${quantity}) | ${kcal} kcal | P ${protein} g | C ${carbs} g | G ${fat} g${confidenceSuffix}`;
+  return `- ${idPrefix}${timePrefix}${food} (${quantity}) | ${kcal} kcal | P ${protein} g | C ${carbs} g | G ${fat} g${confidenceSuffix}`;
 }
 
 function buildIntakeDetailsBlock({
@@ -742,6 +771,16 @@ function looksLikeDeleteIntent(text = '') {
   return /\b(borra|borro|borrar|elimina|eliminar|deshacer|deshace|undo|el ultimo|la ultima|lo ultimo|esa ingesta|esa comida|ese registro|ese pesaje|ese peso|el ultimo registro|la ultima ingesta|el ultimo pesaje)\b/.test(
     normalized
   );
+}
+
+function parseIntakeIdFromText(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const directIdMatch =
+    raw.match(/\b(?:ingesta\s*)?(?:id|#)\s*[:=]?\s*(\d{1,12})\b/i) ||
+    raw.match(/\bingesta\s+(\d{1,12})\b/i);
+  if (!directIdMatch) return null;
+  return toPositiveIntOrNull(directIdMatch[1]);
 }
 
 function looksLikeIntakeModifyIntent(text = '') {
@@ -1369,6 +1408,407 @@ function tryRepairParsedFromStructured({
   return enforcedTemporal;
 }
 
+function stripBatchListPrefix(line = '') {
+  return String(line || '')
+    .replace(/^\s*(?:[-*•]+\s+|\d+\s*[).-]\s+)\s*/u, '')
+    .trim();
+}
+
+function hasExplicitDateHintInText(text = '') {
+  const raw = String(text || '');
+  const normalized = normalizeText(raw);
+  if (!normalized) return false;
+  if (/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/.test(raw)) return true;
+  if (/\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b/.test(raw)) return true;
+  if (
+    new RegExp(
+      `\\b\\d{1,2}\\s*(?:de\\s+)?(?:${SPANISH_MONTH_HINT_PATTERN})(?:\\s*(?:de)?\\s*20\\d{2})?\\b`,
+      'i'
+    ).test(normalized)
+  ) {
+    return true;
+  }
+  return /\b(hoy|ayer)\b/.test(normalized);
+}
+
+function hasExplicitTimeHintInText(text = '') {
+  const raw = String(text || '');
+  if (!raw.trim()) return false;
+  if (/\b([01]?\d|2[0-3])[:h.]([0-5]\d)\s*(?:hs?|h)?\b/i.test(raw)) return true;
+  if (/\b(?:a\s+las?\s*)([01]?\d|2[0-3])\s*(?:hs?|h)\b/i.test(raw)) return true;
+  if (/\b([01]?\d|2[0-3])\s*(?:hs|h)\b/i.test(raw)) return true;
+  return /\b([01]?\d|2[0-3])\s*h\b/i.test(raw);
+}
+
+function looksLikeBatchHeaderLine(line = '') {
+  const raw = String(line || '').trim();
+  const normalized = normalizeText(raw);
+  if (!normalized) return true;
+
+  if (/(^|\s)(ingestas?|comidas?|resumen|registro)\b/.test(normalized) && /:\s*$/u.test(raw)) {
+    return true;
+  }
+  if (/^(fecha|dia|día)\b/.test(normalized) && /:\s*$/u.test(raw)) {
+    return true;
+  }
+  if (
+    /^(ingestas?|comidas?)\b/.test(normalized) &&
+    !hasExplicitTimeHintInText(raw) &&
+    !/\b\d+\s*(g|gr|gramos?|ml|cc|kg|porcion(?:es)?|plato(?:s)?|bocha(?:s)?|huevo(?:s)?|taza(?:s)?|vaso(?:s)?|scoop(?:s)?|unidad(?:es)?)\b/u.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractBatchIntakeLines(rawMessage = '') {
+  const raw = String(rawMessage || '');
+  const lines = raw
+    .split(/\r?\n/u)
+    .map((line) => stripBatchListPrefix(line))
+    .filter(Boolean);
+  return lines.filter((line) => !looksLikeBatchHeaderLine(line));
+}
+
+function isLikelyBatchIntakeMessage(rawMessage = '') {
+  const lines = extractBatchIntakeLines(rawMessage);
+  if (lines.length < 2) return false;
+
+  const linesWithTime = lines.filter((line) => hasExplicitTimeHintInText(line)).length;
+  if (linesWithTime >= 2) return true;
+
+  const mealCueLines = lines.filter((line) =>
+    /\b(desayuno|almuerzo|merienda|cena|colacion|colación)\b/u.test(normalizeText(line))
+  ).length;
+  return lines.length >= 3 && (linesWithTime >= 1 || mealCueLines >= 2);
+}
+
+function applyBatchDateContextToLine(line = '', localDate = '') {
+  const cleanLine = String(line || '').trim();
+  const cleanDate = String(localDate || '').trim();
+  if (!cleanLine) return '';
+  if (!cleanDate) return cleanLine;
+  if (hasExplicitDateHintInText(cleanLine)) return cleanLine;
+  return `${cleanDate} ${cleanLine}`.trim();
+}
+
+async function parseSingleIntakeTextWithModels({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  alignmentMessage = '',
+  userId = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  catalogRowsForParsing = [],
+  userDefaultRows = [],
+  userCatalogHistoryRows = [],
+  catalogRowsForNormalization = [],
+  preferLexicalFirst = false,
+} = {}) {
+  const lineMessage = String(rawMessage || '').trim();
+  const alignmentInput = String(alignmentMessage || lineMessage).trim() || lineMessage;
+  if (!lineMessage) {
+    return { ok: false, error: 'empty_input' };
+  }
+
+  let parsed = null;
+  let lexicalParsed = null;
+  let modelStructured = null;
+  let modelNormalization = null;
+  let usage = null;
+
+  const parseLexical = () => {
+    lexicalParsed = parseIntakePayload({
+      rawMessage: lineMessage,
+      userTimeZone,
+    });
+    if (!lexicalParsed?.ok) {
+      return null;
+    }
+    const enforced = enforceExplicitTemporalFromRawMessage({
+      rawMessage: lineMessage,
+      userTimeZone,
+      parsed: lexicalParsed,
+    });
+    const aligned = parsedItemsAlignWithUserInput({
+      rawMessage: alignmentInput,
+      parsedItems: enforced?.items || [],
+    });
+    if (!aligned) return null;
+    return enforced;
+  };
+
+  if (preferLexicalFirst) {
+    parsed = parseLexical();
+  }
+
+  if (!parsed) {
+    try {
+      modelStructured = await parseStructuredIntakeWithModel({
+        openai,
+        modelCandidates,
+        rawMessage: lineMessage,
+        userTimeZone,
+        catalogRows: catalogRowsForParsing,
+        userDefaultRows,
+        userCatalogHistoryRows,
+      });
+      usage = mergeUsageSnapshots(usage, modelStructured?.usage);
+    } catch (structuredError) {
+      console.error('[nutrition-runtime] structured intake parser failed', structuredError);
+    }
+  }
+
+  if (!parsed && modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
+    const parsedFromStructured = buildParsedIntakeFromStructured({
+      userId,
+      rawMessage: lineMessage,
+      userTimeZone,
+      structured: modelStructured,
+      catalogRows: catalogRowsForParsing,
+      userDefaultRows,
+      inferenceSource: 'text_structured',
+    });
+    if (parsedFromStructured.ok) {
+      parsed = enforceExplicitTemporalFromRawMessage({
+        rawMessage: lineMessage,
+        userTimeZone,
+        parsed: parsedFromStructured,
+      });
+    }
+  }
+
+  if (!parsed) {
+    try {
+      modelNormalization = await normalizeIntakeWithModel({
+        openai,
+        modelCandidates,
+        rawMessage: lineMessage,
+        userTimeZone,
+        catalogCandidates: catalogRowsForNormalization,
+      });
+      usage = mergeUsageSnapshots(usage, modelNormalization?.usage);
+    } catch (normalizationError) {
+      console.error('[nutrition-runtime] intake normalization failed', normalizationError);
+    }
+  }
+
+  if (!parsed && modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
+    const parsedFromModel = parseIntakePayload({
+      rawMessage: modelNormalization.normalizedText,
+      userTimeZone,
+    });
+    if (parsedFromModel.ok) {
+      parsed = enforceExplicitTemporalFromRawMessage({
+        rawMessage: lineMessage,
+        userTimeZone,
+        parsed: parsedFromModel,
+      });
+    }
+  }
+
+  if (!parsed && !preferLexicalFirst) {
+    parsed = parseLexical();
+  }
+
+  if (!parsed && !lexicalParsed?.ok) {
+    lexicalParsed = parseIntakePayload({
+      rawMessage: lineMessage,
+      userTimeZone,
+    });
+  }
+
+  if (!parsed) {
+    return {
+      ok: false,
+      error: String(lexicalParsed?.error || 'parse_failed').trim() || 'parse_failed',
+      usage,
+      modelStructured,
+      modelNormalization,
+      lexicalParsed,
+    };
+  }
+
+  const alignedWithUserInput = parsedItemsAlignWithUserInput({
+    rawMessage: alignmentInput,
+    parsedItems: parsed?.items || [],
+  });
+  if (!alignedWithUserInput) {
+    const repaired = tryRepairParsedFromStructured({
+      rawMessage: lineMessage,
+      userTimeZone,
+      modelStructured,
+      userId,
+      catalogRows: catalogRowsForParsing,
+      userDefaultRows,
+    });
+    if (repaired?.ok) {
+      parsed = repaired;
+    } else {
+      return {
+        ok: false,
+        error: 'semantic_mismatch',
+        usage,
+        modelStructured,
+        modelNormalization,
+        lexicalParsed,
+      };
+    }
+  }
+
+  let shouldRequestLabelPhotoHint = Boolean(
+    modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto
+  );
+  const includeConfidenceInReply = parsedHasEstimatedRows(parsed);
+  if (!shouldRequestLabelPhotoHint && includeConfidenceInReply) {
+    shouldRequestLabelPhotoHint = parsed.items.some((item) =>
+      looksLikePackagedAlias(item?.inputAlias || item?.foodItem)
+    );
+  }
+
+  return {
+    ok: true,
+    parsed,
+    usage,
+    modelStructured,
+    modelNormalization,
+    lexicalParsed,
+    includeConfidenceInReply,
+    shouldRequestLabelPhotoHint,
+  };
+}
+
+function normalizeBatchFailureHint(result = null) {
+  const structuredAction = normalizeCatalogToken(result?.modelStructured?.action || '');
+  const normalizationAction = normalizeCatalogToken(result?.modelNormalization?.action || '');
+  if (structuredAction === 'ask_label_photo' || normalizationAction === 'ask_label_photo') {
+    return 'label_photo';
+  }
+  if (structuredAction === 'ask_clarification' || normalizationAction === 'ask_clarification') {
+    return 'clarification';
+  }
+  return 'generic';
+}
+
+function buildBatchIntakeFailureReply(failed = []) {
+  const unresolvedPreview = failed
+    .slice(0, 6)
+    .map((row) => `- ${row?.line || '(línea vacía)'}`)
+    .join('\n');
+  const hint = failed.some((row) => row?.hint === 'label_photo')
+    ? 'Al menos una línea parece producto de paquete: si querés precisión, mandá foto de la etiqueta nutricional.'
+    : 'Mandamelo de nuevo por línea en formato simple: `13:30 200g pollo + 150g arroz`.';
+  return [
+    'No pude interpretar todas las líneas y no registré nada para evitar errores.',
+    `Líneas con problema:\n${unresolvedPreview}`,
+    hint,
+    buildPhotoHintLine(),
+  ].join('\n');
+}
+
+async function parseBatchIntakeTextWithModels({
+  openai,
+  modelCandidates = [],
+  rawMessage = '',
+  userId = '',
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+  catalogRowsForParsing = [],
+  userDefaultRows = [],
+  userCatalogHistoryRows = [],
+  catalogRowsForNormalization = [],
+} = {}) {
+  const lines = extractBatchIntakeLines(rawMessage);
+  if (lines.length < 2) {
+    return { ok: false, error: 'not_batch', lines: [] };
+  }
+
+  const baseTemporal = resolveTemporalContext({
+    rawMessage,
+    userTimeZone,
+  });
+
+  const entries = [];
+  const failedLines = [];
+  let usage = null;
+  let includeConfidenceInReply = false;
+  let shouldRequestLabelPhotoHint = false;
+
+  for (const line of lines) {
+    const lineMessage = applyBatchDateContextToLine(line, baseTemporal.localDate);
+    const parsedLine = await parseSingleIntakeTextWithModels({
+      openai,
+      modelCandidates,
+      rawMessage: lineMessage,
+      alignmentMessage: line,
+      userId,
+      userTimeZone,
+      catalogRowsForParsing,
+      userDefaultRows,
+      userCatalogHistoryRows,
+      catalogRowsForNormalization,
+      preferLexicalFirst: true,
+    });
+    usage = mergeUsageSnapshots(usage, parsedLine.usage);
+
+    if (!parsedLine.ok || !parsedLine.parsed?.ok) {
+      failedLines.push({
+        line,
+        hint: normalizeBatchFailureHint(parsedLine),
+      });
+      continue;
+    }
+
+    const temporal = parsedLine.parsed.temporal || {};
+    const rowsWithTemporal = (parsedLine.parsed.items || []).map((item) => ({
+      ...item,
+      localDate: temporal.localDate,
+      localTime: temporal.localTime,
+    }));
+
+    entries.push({
+      sourceLine: line,
+      temporal,
+      items: parsedLine.parsed.items || [],
+      rowsWithTemporal,
+    });
+    includeConfidenceInReply = includeConfidenceInReply || Boolean(parsedLine.includeConfidenceInReply);
+    shouldRequestLabelPhotoHint =
+      shouldRequestLabelPhotoHint || Boolean(parsedLine.shouldRequestLabelPhotoHint);
+  }
+
+  if (!entries.length) {
+    return {
+      ok: false,
+      error: 'batch_parse_failed',
+      usage,
+      failedLines,
+    };
+  }
+
+  if (failedLines.length) {
+    return {
+      ok: false,
+      error: 'batch_partial_resolution',
+      usage,
+      failedLines,
+      entries,
+    };
+  }
+
+  const rows = entries.flatMap((entry) => entry.rowsWithTemporal || []);
+  return {
+    ok: true,
+    usage,
+    entries,
+    rows,
+    includeConfidenceInReply,
+    shouldRequestLabelPhotoHint,
+  };
+}
+
 function scoreCatalogCandidate(entry = {}, nameHint = '', brandHint = '') {
   const normalizedNameHint = normalizeCatalogToken(nameHint);
   if (!normalizedNameHint) return 0;
@@ -1463,6 +1903,14 @@ export function __testResolveTemporalFromStructured({
     temporal,
     now,
   });
+}
+
+export function __testExtractBatchIntakeLines(rawMessage = '') {
+  return extractBatchIntakeLines(rawMessage);
+}
+
+export function __testIsLikelyBatchIntakeMessage(rawMessage = '') {
+  return isLikelyBatchIntakeMessage(rawMessage);
 }
 
 
@@ -2580,12 +3028,13 @@ function formatRecentIntakesReply({
 
   const lines = [title];
   for (const row of rows.slice(0, 8)) {
+    const intakeId = toPositiveIntOrNull(row?.id);
     const qValue = Number(row?.quantityValue);
     const quantity = Number.isFinite(qValue)
       ? `${qValue}${row?.quantityUnit ? ` ${row.quantityUnit}` : ''}`
       : row?.quantityUnit || 'porcion';
     lines.push(
-      `- ${row.localDate} ${row.localTime} | ${row.foodItem} (${quantity}) | ${Math.round(
+      `- ${intakeId ? `ID ${intakeId} | ` : ''}${row.localDate} ${row.localTime} | ${row.foodItem} (${quantity}) | ${Math.round(
         Number(row.caloriesKcal) || 0
       )} kcal`
     );
@@ -3100,7 +3549,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
               `📅 Ingestas del ${temporal.localDate}:`,
               ...byDate.slice(0, 15).map((r) => {
                 const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
-                return `- ${r.localTime || ''} ${r.foodItem}${qty ? ' ' + qty : ''} | ${Math.round(r.caloriesKcal || 0)} kcal`;
+                return `- ${toPositiveIntOrNull(r.id) ? `ID ${toPositiveIntOrNull(r.id)} | ` : ''}${r.localTime || ''} ${r.foodItem}${qty ? ' ' + qty : ''} | ${Math.round(r.caloriesKcal || 0)} kcal`;
               }),
               byDate.length > 15 ? `... y ${byDate.length - 15} más` : null,
               '',
@@ -3599,56 +4048,68 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
       } else {
         // log_intake handler
         if (!hasMedia && cleanMessage && looksLikeIntakeModifyIntent(cleanMessage)) {
+          const explicitIntakeId = parseIntakeIdFromText(cleanMessage);
           const temporalHint = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
           if (!temporalHint.hadExplicitDate && !temporalHint.hadExplicitTime) {
             return [
               'Para modificar una ingesta, pasame al menos fecha u hora real.',
-              'Ejemplos: `modificar fernet con coca cola fecha 03 de abril` o `modificar la última ingesta hora 23:30`.',
+              'Ejemplos: `modificar fernet con coca cola fecha 03 de abril`, `modificar la última ingesta hora 23:30` o `modificar ingesta ID 123 hora 23:30`.',
             ].join('\n');
           }
 
-          const recentRows = listRecentNutritionIntakes(userId, { limit: 30 });
-          if (!recentRows.length) {
+          const targetById = explicitIntakeId
+            ? findNutritionIntakeById(userId, explicitIntakeId)
+            : null;
+          if (explicitIntakeId && !targetById) {
+            return `No encontré la ingesta ID ${explicitIntakeId}.`;
+          }
+
+          const recentRows = explicitIntakeId ? [] : listRecentNutritionIntakes(userId, { limit: 30 });
+          if (!explicitIntakeId && !recentRows.length) {
             return 'No tengo ingestas recientes para modificar.';
           }
 
-          const modifyTarget = await resolveDeleteTargetWithModel({
-            openai,
-            modelCandidates: smartModelCandidates,
-            rawMessage: cleanMessage,
-            candidateRows: recentRows,
-            entityType: 'intake',
-            rowsLabel: 'recientes',
-            intentLabel: 'modificar',
-          });
-          usageSnapshot = mergeUsageSnapshots(usageSnapshot, modifyTarget.usage);
+          let targetId = explicitIntakeId || null;
+          let targetRow = targetById || null;
+          if (!targetRow) {
+            const modifyTarget = await resolveDeleteTargetWithModel({
+              openai,
+              modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage,
+              candidateRows: recentRows,
+              entityType: 'intake',
+              rowsLabel: 'recientes',
+              intentLabel: 'modificar',
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, modifyTarget.usage);
 
-          if (modifyTarget.action === 'cannot_identify') {
-            const list = recentRows
-              .slice(0, 8)
-              .map((r) => {
-                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
-                return `- ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
-              })
-              .join('\n');
-            return [
-              'No pude identificar cuál ingesta querés modificar.',
-              'Referenciá el item y, si podés, la hora.',
-              'Ejemplo: `modificar fernet de las 23:30 fecha 03 de abril`.',
-              '',
-              `Ingestas recientes:\n${list}`,
-            ].join('\n');
+            if (modifyTarget.action === 'cannot_identify') {
+              const list = recentRows
+                .slice(0, 8)
+                .map((r) => {
+                  const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                  return `- ID ${r.id} | ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
+                })
+                .join('\n');
+              return [
+                'No pude identificar cuál ingesta querés modificar.',
+                'Referenciá el ID, item o la hora.',
+                'Ejemplo: `modificar ingesta ID 123 fecha 03 de abril`.',
+                '',
+                `Ingestas recientes:\n${list}`,
+              ].join('\n');
+            }
+
+            targetId =
+              modifyTarget.action === 'delete_last'
+                ? Number(recentRows[0]?.id)
+                : Number(modifyTarget.targetId);
+            targetRow = recentRows.find((row) => Number(row?.id) === targetId) || null;
           }
 
-          const targetId =
-            modifyTarget.action === 'delete_last'
-              ? Number(recentRows[0]?.id)
-              : Number(modifyTarget.targetId);
           if (!targetId) {
             return 'No pude identificar el registro a modificar. Intentá con más detalle.';
           }
-
-          const targetRow = recentRows.find((row) => Number(row?.id) === targetId);
           if (!targetRow) {
             return 'No pude encontrar esa ingesta para modificar. Puede que ya no exista.';
           }
@@ -3686,6 +4147,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           const status = calculateProfileStatus(profile, summary.today);
           replyText = [
             '✅ Ingesta modificada.',
+            `- ID: ${targetId}`,
             `- Item: ${targetRow.foodItem}${quantity ? ` (${quantity})` : ''}`,
             `- Nueva fecha/hora: ${nextLocalDate} ${nextLocalTime}`,
             formatMacroLine('📊 Día actualizado: ', summary.today),
@@ -3693,42 +4155,58 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           ].join('\n');
           shouldCharge = true;
         } else if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
-          const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
-          const todayRows = getTodayNutritionIntakes(userId, temporal.localDate, { limit: 20 });
-          if (!todayRows.length) {
-            return 'No tenés ingestas registradas hoy para eliminar.';
+          const explicitIntakeId = parseIntakeIdFromText(cleanMessage);
+          let targetId = explicitIntakeId || null;
+          let targetRow = explicitIntakeId ? findNutritionIntakeById(userId, explicitIntakeId) : null;
+
+          if (explicitIntakeId && !targetRow) {
+            return `No encontré la ingesta ID ${explicitIntakeId}.`;
           }
-          const deleteResult = await resolveDeleteTargetWithModel({
-            openai, modelCandidates: smartModelCandidates,
-            rawMessage: cleanMessage, todayRows, entityType: 'intake',
-          });
-          usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
-          if (deleteResult.action === 'cannot_identify') {
-            const list = todayRows
-              .slice(0, 8)
-              .map((r) => {
-                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
-                return `- ${r.localTime || '?'} → ${r.foodItem}${qty ? ' ' + qty : ''}`;
-              })
-              .join('\n');
-            return `No identifiqué cuál borrar. Ingestas de hoy:\n${list}\nDecime cuál: "borrá el pollo de las 13:30" o "borrá la última".`;
+
+          if (!targetRow) {
+            const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+            const todayRows = getTodayNutritionIntakes(userId, temporal.localDate, { limit: 20 });
+            if (!todayRows.length) {
+              return 'No tenés ingestas registradas hoy para eliminar.';
+            }
+            const deleteResult = await resolveDeleteTargetWithModel({
+              openai, modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage, todayRows, entityType: 'intake',
+            });
+            usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
+            if (deleteResult.action === 'cannot_identify') {
+              const list = todayRows
+                .slice(0, 8)
+                .map((r) => {
+                  const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                  return `- ID ${r.id} | ${r.localTime || '?'} → ${r.foodItem}${qty ? ' ' + qty : ''}`;
+                })
+                .join('\n');
+              return `No identifiqué cuál borrar. Ingestas de hoy:\n${list}\nDecime cuál: "borrá ingesta ID 123", "borrá el pollo de las 13:30" o "borrá la última".`;
+            }
+            targetId =
+              deleteResult.action === 'delete_last'
+                ? Number(todayRows[0]?.id)
+                : Number(deleteResult.targetId);
+            targetRow = todayRows.find((row) => Number(row?.id) === Number(targetId)) || null;
           }
-          const targetId =
-            deleteResult.action === 'delete_last'
-              ? Number(todayRows[0]?.id)
-              : Number(deleteResult.targetId);
-          if (!targetId) {
+
+          if (!targetId || !targetRow) {
             return 'No pude identificar el registro. Intentá con más detalle.';
           }
           const deleted = deleteNutritionIntake(userId, targetId);
           if (!deleted?.ok || !deleted.deleted) {
             return '❌ No pude eliminar ese registro. Puede que ya no exista.';
           }
-          const summary = getNutritionSummary(userId, temporal.localDate);
+          const summary = getNutritionSummary(userId, String(targetRow.localDate || '').trim());
           const status = calculateProfileStatus(profile, summary.today);
+          const quantity = [targetRow.quantityValue, targetRow.quantityUnit].filter(Boolean).join(' ');
           replyText = [
             '✅ Registro eliminado.',
-            formatMacroLine('📊 Hoy actualizado: ', summary.today),
+            `- ID: ${targetId}`,
+            `- Item: ${targetRow.foodItem}${quantity ? ` (${quantity})` : ''}`,
+            `- Fecha/hora: ${targetRow.localDate || '?'} ${targetRow.localTime || '?'}`,
+            formatMacroLine(`📊 ${targetRow.localDate || 'día'} actualizado: `, summary.today),
             `🎯 Estado vs objetivo: ${status}`,
           ].join('\n');
           shouldCharge = true;
@@ -3782,6 +4260,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         let modelNormalization = null;
         let shouldRequestLabelPhotoHint = false;
         let includeConfidenceInReply = false;
+        let parsedBatch = null;
 
         if (!hasMedia && cleanMessage) {
           const pendingDraft = getPendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId);
@@ -3799,8 +4278,41 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
+        if (!parsed && !hasMedia && cleanMessage && isLikelyBatchIntakeMessage(cleanMessage)) {
+          parsedBatch = await parseBatchIntakeTextWithModels({
+            openai,
+            modelCandidates: smartModelCandidates,
+            rawMessage: cleanMessage,
+            userId,
+            userTimeZone,
+            catalogRowsForParsing,
+            userDefaultRows,
+            userCatalogHistoryRows,
+            catalogRowsForNormalization,
+          });
+          usageSnapshot = mergeUsageSnapshots(usageSnapshot, parsedBatch?.usage);
+          if (parsedBatch?.usage) {
+            addNutritionUsageRecord(userId, {
+              guidedAction: 'log_intake_batch_parser',
+              model: 'mixed_batch',
+              inputTokens: parsedBatch.usage.inputTokens,
+              outputTokens: parsedBatch.usage.outputTokens,
+              totalTokens: parsedBatch.usage.totalTokens,
+              reasoningTokens: parsedBatch.usage.reasoningTokens,
+              cachedTokens: parsedBatch.usage.cachedTokens,
+              rawUsage: parsedBatch.usage.rawUsage,
+            });
+          }
+          if (!parsedBatch?.ok) {
+            return buildBatchIntakeFailureReply(parsedBatch.failedLines || []);
+          }
+          includeConfidenceInReply = includeConfidenceInReply || Boolean(parsedBatch.includeConfidenceInReply);
+          shouldRequestLabelPhotoHint =
+            shouldRequestLabelPhotoHint || Boolean(parsedBatch.shouldRequestLabelPhotoHint);
+        }
+
         let imageMealResult = null;
-        if (!parsed && hasMedia) {
+        if (!parsedBatch && !parsed && hasMedia) {
           try {
             imageMealResult = await inferMealIntakeFromImage({
               openai,
@@ -3830,7 +4342,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         const shouldTryLabelExtraction =
           hasMedia &&
           (looksLikeLabelIntent(cleanMessage) || imageMealResult?.action === 'nutrition_label');
-        if (!parsed && shouldTryLabelExtraction) {
+        if (!parsedBatch && !parsed && shouldTryLabelExtraction) {
           try {
             const labelResult = await extractNutritionLabelFromImage({
               openai,
@@ -3912,6 +4424,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         }
 
         if (
+          !parsedBatch &&
           !parsed &&
           imageMealResult &&
           (imageMealResult.action === 'meal_log_ready' || imageMealResult.action === 'meal_needs_confirmation') &&
@@ -3958,14 +4471,14 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (!parsed && hasMedia && !cleanMessage && imageMealResult?.action === 'not_food') {
+        if (!parsedBatch && !parsed && hasMedia && !cleanMessage && imageMealResult?.action === 'not_food') {
           return [
             'No detecté una comida registrable en la foto.',
             'Si querés, mandame otra foto más clara o texto simple: `hora + lo ingerido`.',
           ].join('\n');
         }
 
-        if (!parsed?.ok && cleanMessage) {
+        if (!parsedBatch && !parsed?.ok && cleanMessage) {
           try {
             modelStructured = await parseStructuredIntakeWithModel({
               openai,
@@ -3994,7 +4507,12 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (!parsed?.ok && modelStructured?.action === 'log_intake' && modelStructured.items?.length) {
+        if (
+          !parsedBatch &&
+          !parsed?.ok &&
+          modelStructured?.action === 'log_intake' &&
+          modelStructured.items?.length
+        ) {
           const parsedFromStructured = buildParsedIntakeFromStructured({
             userId,
             rawMessage: cleanMessage,
@@ -4013,7 +4531,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (!parsed?.ok && cleanMessage) {
+        if (!parsedBatch && !parsed?.ok && cleanMessage) {
           try {
             modelNormalization = await normalizeIntakeWithModel({
               openai,
@@ -4040,7 +4558,12 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (!parsed?.ok && modelNormalization?.action === 'normalize_intake' && modelNormalization.normalizedText) {
+        if (
+          !parsedBatch &&
+          !parsed?.ok &&
+          modelNormalization?.action === 'normalize_intake' &&
+          modelNormalization.normalizedText
+        ) {
           const parsedFromModel = parseIntakePayload({
             rawMessage: modelNormalization.normalizedText,
             userTimeZone,
@@ -4054,7 +4577,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (!parsed?.ok && cleanMessage) {
+        if (!parsedBatch && !parsed?.ok && cleanMessage) {
           lexicalParsed = parseIntakePayload({
             rawMessage: cleanMessage,
             userTimeZone,
@@ -4070,11 +4593,11 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto) {
+        if (!parsedBatch && (modelStructured?.shouldRequestLabelPhoto || modelNormalization?.shouldRequestLabelPhoto)) {
           shouldRequestLabelPhotoHint = true;
         }
 
-        if (!parsed?.ok) {
+        if (!parsedBatch && !parsed?.ok) {
           if (
             modelStructured?.action === 'ask_label_photo' ||
             (modelStructured?.shouldRequestLabelPhoto && !lexicalParsed?.ok)
@@ -4121,7 +4644,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           ].join('\n');
         }
 
-        if (parsed?.ok && cleanMessage) {
+        if (!parsedBatch && parsed?.ok && cleanMessage) {
           parsed = enforceExplicitTemporalFromRawMessage({
             rawMessage: cleanMessage,
             userTimeZone,
@@ -4154,7 +4677,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        if (parsedHasEstimatedRows(parsed)) {
+        if (!parsedBatch && parsedHasEstimatedRows(parsed)) {
           includeConfidenceInReply = true;
           if (!shouldRequestLabelPhotoHint) {
             shouldRequestLabelPhotoHint = parsed.items.some((item) =>
@@ -4163,29 +4686,76 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        const intakeWrite = addNutritionIntakes(
-          userId,
-          {
-            loggedAt: parsed.temporal.loggedAt,
-            localDate: parsed.temporal.localDate,
-            localTime: parsed.temporal.localTime,
-            timezone: parsed.temporal.timeZone,
-            rawInput: cleanMessage,
-            items: parsed.items,
-          },
-          {
-            idempotency: {
-              sourceMessageId,
-              operationType: 'log_intake',
-            },
+        const intakeWrites = [];
+        let intakeRowsForReply = [];
+        if (parsedBatch?.ok) {
+          const entries = Array.isArray(parsedBatch.entries) ? parsedBatch.entries : [];
+          for (let index = 0; index < entries.length; index += 1) {
+            const entry = entries[index];
+            const writeResult = addNutritionIntakes(
+              userId,
+              {
+                loggedAt: entry?.temporal?.loggedAt,
+                localDate: entry?.temporal?.localDate,
+                localTime: entry?.temporal?.localTime,
+                timezone: entry?.temporal?.timeZone,
+                rawInput: entry?.sourceLine || cleanMessage,
+                items: entry?.items || [],
+              },
+              {
+                idempotency: {
+                  sourceMessageId,
+                  operationType: `log_intake_batch_${index}`,
+                },
+              }
+            );
+            if (!writeResult?.ok) {
+              return formatWriteFailureReply('log_intake', writeResult?.error || 'db_write_failed');
+            }
+            const entryRowsWithTemporal = Array.isArray(entry?.rowsWithTemporal)
+              ? entry.rowsWithTemporal
+              : [];
+            const entryRowsWithIds = attachInsertedIdsToRows(
+              entryRowsWithTemporal,
+              writeResult.insertedIds
+            );
+            intakeRowsForReply.push(...entryRowsWithIds);
+            intakeWrites.push(writeResult);
           }
-        );
-        if (!intakeWrite?.ok) {
-          return formatWriteFailureReply('log_intake', intakeWrite?.error || 'db_write_failed');
+        } else {
+          const intakeWrite = addNutritionIntakes(
+            userId,
+            {
+              loggedAt: parsed.temporal.loggedAt,
+              localDate: parsed.temporal.localDate,
+              localTime: parsed.temporal.localTime,
+              timezone: parsed.temporal.timeZone,
+              rawInput: cleanMessage,
+              items: parsed.items,
+            },
+            {
+              idempotency: {
+                sourceMessageId,
+                operationType: 'log_intake',
+              },
+            }
+          );
+          if (!intakeWrite?.ok) {
+            return formatWriteFailureReply('log_intake', intakeWrite?.error || 'db_write_failed');
+          }
+          intakeRowsForReply = attachInsertedIdsToRows(parsed.items || [], intakeWrite.insertedIds);
+          intakeWrites.push(intakeWrite);
         }
         pendingImageIntakeDraftByUser.delete(userId);
+        if (!intakeRowsForReply.length) {
+          intakeRowsForReply = parsedBatch?.ok
+            ? parsedBatch.rows || []
+            : Array.isArray(parsed?.items)
+              ? parsed.items
+              : [];
+        }
 
-        for (const parsedItem of Array.isArray(parsed.items) ? parsed.items : []) {
+        for (const parsedItem of intakeRowsForReply) {
           const catalogItemId = Number(parsedItem?.catalogItemId);
           if (!Number.isFinite(catalogItemId) || catalogItemId <= 0) continue;
           const aliasCandidate = sanitizeUserAliasCandidate(
@@ -4219,42 +4789,86 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           }
         }
 
-        const summary = getNutritionSummary(userId, parsed.temporal.localDate);
-        const status = calculateProfileStatus(profile, summary.today);
-        if (shouldTrackOutlier(summary)) {
+        const affectedDateRows = parsedBatch?.ok
+          ? (parsedBatch.entries || []).map((entry) => ({
+              localDate: String(entry?.temporal?.localDate || '').trim(),
+              localTime: String(entry?.temporal?.localTime || '').trim(),
+            }))
+          : [
+              {
+                localDate: String(parsed?.temporal?.localDate || '').trim(),
+                localTime: String(parsed?.temporal?.localTime || '').trim(),
+              },
+            ];
+        const uniqueDates = [...new Set(affectedDateRows.map((row) => row.localDate).filter(Boolean))];
+        const summariesByDate = new Map(
+          uniqueDates.map((localDate) => [localDate, getNutritionSummary(userId, localDate)])
+        );
+        for (const dateRow of affectedDateRows) {
+          const summaryForDate = summariesByDate.get(dateRow.localDate);
+          if (!summaryForDate || !shouldTrackOutlier(summaryForDate)) continue;
           appendNutritionJournal(userId, {
-            localDate: parsed.temporal.localDate,
-            localTime: parsed.temporal.localTime,
+            localDate: dateRow.localDate,
+            localTime: dateRow.localTime || '00:00',
             event: 'calorie_outlier',
-            notes: `Hoy ${Math.round(summary.today.caloriesKcal)} kcal vs rolling7 ${Math.round(
-              summary.rolling7d.caloriesKcal
+            notes: `Hoy ${Math.round(summaryForDate.today.caloriesKcal)} kcal vs rolling7 ${Math.round(
+              summaryForDate.rolling7d.caloriesKcal
             )} kcal`,
           });
         }
 
+        const primaryTemporal = parsedBatch?.ok
+          ? parsedBatch.entries[parsedBatch.entries.length - 1]?.temporal || {}
+          : parsed.temporal;
+        const primaryDate = String(primaryTemporal?.localDate || '').trim();
+        const summary = summariesByDate.get(primaryDate) || getNutritionSummary(userId, primaryDate);
+        const status = calculateProfileStatus(profile, summary.today);
+        const idempotencyNotice = [...new Set(
+          intakeWrites
+            .map((write) => formatIdempotencyNotice(write?.idempotencyStatus))
+            .filter(Boolean)
+        )].join('\n');
+        const isBatchFlow = Boolean(parsedBatch?.ok);
+        const summaryLines =
+          uniqueDates.length <= 1
+            ? [
+                formatMacroLine('📊 Hoy: ', summary.today),
+                formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
+                formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
+              ]
+            : uniqueDates.map((localDate) => {
+                const localSummary = summariesByDate.get(localDate);
+                return formatMacroLine(`📊 ${localDate}: `, localSummary?.today || {});
+              });
+
         replyText = [
-          `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
-          'OK, quedó anotado.',
+          isBatchFlow
+            ? `✅ OK, quedaron anotadas ${parsedBatch.entries.length} ingestas.`
+            : `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
+          isBatchFlow ? `Fecha base: ${primaryDate}` : 'OK, quedó anotado.',
           ...buildIntakeDetailsBlock({
-            title: '🧾 Detalle registrado',
-            rows: parsed.items,
-            includeTime: false,
+            title: isBatchFlow ? '🧾 Detalle registrado (por línea)' : '🧾 Detalle registrado',
+            rows: intakeRowsForReply,
+            includeTime: isBatchFlow,
             includeConfidence:
               includeConfidenceInReply ||
-              parsed.items.some((item) => String(item?.inferenceSource || '') === 'image'),
+              intakeRowsForReply.some((item) => String(item?.inferenceSource || '') === 'image'),
             chronological: false,
           }),
-          formatMacroLine('📊 Hoy: ', summary.today),
-          formatMacroLine('📅 Rolling 7d: ', summary.rolling7d),
-          formatMacroLine('🗓️ Rolling 14d: ', summary.rolling14d),
+          ...summaryLines,
           `🎯 Estado: ${status}`,
-          parsedHasEstimatedRows(parsed)
+          (isBatchFlow
+            ? intakeRowsForReply.some((item) => itemUsesEstimatedResolution(item))
+            : parsedHasEstimatedRows(parsed))
             ? '🧠 Registré al menos un item con valores estimados. Si querés más precisión, mandame foto del frente + tabla nutricional.'
+            : null,
+          intakeRowsForReply.some((row) => toPositiveIntOrNull(row?.id))
+            ? '🆔 Para borrar/modificar: `borrar ingesta ID <id>` o `modificar ingesta ID <id> hora 23:30`.'
             : null,
           shouldRequestLabelPhotoHint
             ? '📦 Si es un producto de paquete, mandame foto de la etiqueta nutricional y lo agrego a INFO_NUTRICIONAL.'
             : null,
-          formatIdempotencyNotice(intakeWrite.idempotencyStatus),
+          idempotencyNotice,
         ]
           .filter(Boolean)
           .join('\n');

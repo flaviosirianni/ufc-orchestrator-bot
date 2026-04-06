@@ -1247,6 +1247,7 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
 
   const transaction = getDb().transaction((rows) => {
     let inserted = 0;
+    const insertedIds = [];
     for (const row of rows) {
       const result = stmt.run({
         userId: normalizedUserId,
@@ -1283,11 +1284,16 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
         createdAt: new Date().toISOString(),
       });
       inserted += Number(result?.changes) || 0;
+      const rowId = Number(result?.lastInsertRowid);
+      insertedIds.push(Number.isFinite(rowId) && rowId > 0 ? rowId : null);
     }
     if (inserted !== rows.length) {
       throw new Error('insert_count_mismatch');
     }
-    return inserted;
+    return {
+      insertedCount: inserted,
+      insertedIds,
+    };
   });
 
   const mutationResult = withOperationReceipt({
@@ -1304,8 +1310,7 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
       items: sanitizedRows,
     },
     applyMutation: () => {
-      const insertedCount = transaction(sanitizedRows);
-      return { insertedCount };
+      return transaction(sanitizedRows);
     },
   });
 
@@ -1317,6 +1322,12 @@ export function addNutritionIntakes(userId = '', payload = {}, options = {}) {
     ok: true,
     idempotencyStatus: mutationResult.idempotencyStatus || null,
     insertedCount: Number(mutationResult.insertedCount) || 0,
+    insertedIds: Array.isArray(mutationResult.insertedIds)
+      ? mutationResult.insertedIds.map((value) => {
+          const id = Number(value);
+          return Number.isFinite(id) && id > 0 ? id : null;
+        })
+      : [],
   };
 }
 
@@ -1890,6 +1901,46 @@ export function deleteNutritionIntake(userId = '', intakeId = null) {
     .prepare(`DELETE FROM nutrition_intakes WHERE id = ? AND telegram_user_id = ?`)
     .run(id, normalizedUserId);
   return { ok: true, deleted: result.changes > 0 };
+}
+
+export function findNutritionIntakeById(userId = '', intakeId = null) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const id = Number(intakeId);
+  if (!normalizedUserId || !Number.isFinite(id) || id <= 0) {
+    return null;
+  }
+
+  return (
+    getDb()
+      .prepare(
+        `
+      SELECT
+        id,
+        logged_at AS loggedAt,
+        local_date AS localDate,
+        local_time AS localTime,
+        timezone,
+        food_item AS foodItem,
+        quantity_value AS quantityValue,
+        quantity_unit AS quantityUnit,
+        calories_kcal AS caloriesKcal,
+        protein_g AS proteinG,
+        carbs_g AS carbsG,
+        fat_g AS fatG,
+        catalog_item_id AS catalogItemId,
+        input_alias AS inputAlias,
+        resolution_mode AS resolutionMode,
+        match_confidence AS matchConfidence,
+        confidence,
+        source
+      FROM nutrition_intakes
+      WHERE telegram_user_id = ? AND id = ?
+      LIMIT 1
+    `
+      )
+      .get(normalizedUserId, id) || null
+  );
 }
 
 export function updateNutritionIntakeTemporal(

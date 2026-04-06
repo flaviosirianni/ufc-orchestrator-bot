@@ -6,6 +6,7 @@ import {
   bumpNutritionUserProductDefaultUsage,
   findNutritionUserPreferredCatalogEntries,
   ensureNutritionSchema,
+  findNutritionIntakeById,
   findFoodCatalogCandidates,
   getNutritionSummary,
   listNutritionIntakesByDate,
@@ -23,7 +24,9 @@ import {
   resolveTemporalContext,
 } from '../src/bots/nutrition/nutritionDomain.js';
 import {
+  __testExtractBatchIntakeLines,
   __testEnforceExplicitTemporalFromRawMessage,
+  __testIsLikelyBatchIntakeMessage,
   __testNormalizeVisualWeighinPayload,
   __testParsedItemsHaveAnyUserOverlap,
   __testParsedItemsAlignWithUserInput,
@@ -315,8 +318,18 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(intakeInsertA.ok, true);
   assert.equal(intakeInsertA.idempotencyStatus, 'new');
+  assert.equal(Array.isArray(intakeInsertA.insertedIds), true);
+  assert.equal(intakeInsertA.insertedIds.length, idempotentPayload.items.length);
   assert.equal(intakeInsertB.ok, true);
   assert.equal(intakeInsertB.idempotencyStatus, 'replayed');
+  assert.equal(Array.isArray(intakeInsertB.insertedIds), true);
+  assert.equal(intakeInsertB.insertedIds.length, idempotentPayload.items.length);
+
+  const insertedIntakeId = Number(intakeInsertA.insertedIds[0]);
+  assert.equal(Number.isFinite(insertedIntakeId) && insertedIntakeId > 0, true);
+  const intakeById = findNutritionIntakeById(userId, insertedIntakeId);
+  assert.equal(Number(intakeById?.id), insertedIntakeId);
+  assert.equal(String(intakeById?.foodItem || '').toLowerCase(), 'arroz cocido');
 
   const conflictingPayload = parseIntakePayload({
     rawMessage: '2026-03-22 13:30 200g arroz cocido',
@@ -641,6 +654,24 @@ export async function runNutritionDomainTests() {
   });
   assert.equal(structuredTemporalNoExplicitDate.localDate, '2026-04-02');
   assert.equal(structuredTemporalNoExplicitDate.localTime, '22:49');
+
+  const batchInput = `ingestas del sabado 04 de abril:
+12:30hs 2 platos de ravioles de ricota con tuco y estufado
+13:30hs 3 bochas de helado de chocolate y frambuesa
+13:00hs 100ml de vino tinto malbec
+14:00hs 1 porcion de budin de manzana
+21:00hs 200ml de coca cola
+22:00hs 1 scoop de whey protein ahora
+cena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco`;
+  const batchLines = __testExtractBatchIntakeLines(batchInput);
+  assert.equal(batchLines.length, 7);
+  assert.equal(batchLines[0], '12:30hs 2 platos de ravioles de ricota con tuco y estufado');
+  assert.equal(batchLines[6], 'cena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco');
+  assert.equal(__testIsLikelyBatchIntakeMessage(batchInput), true);
+  assert.equal(
+    __testIsLikelyBatchIntakeMessage('13:30 200g pollo + 150g arroz'),
+    false
+  );
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',
