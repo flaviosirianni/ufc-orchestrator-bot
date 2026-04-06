@@ -49,6 +49,8 @@ const GUIDED_INPUT_ACTIONS = new Set([
   'update_profile',
   'view_summary',
   'learning_chat',
+  'report_bug',
+  'submit_feature_request',
 ]);
 
 const MAIN_MENU_ROWS = [
@@ -158,6 +160,12 @@ const NUTRITION_ESTADISTICAS_ROWS = [
 const NUTRITION_APRENDIZAJE_ROWS = [
   [{ text: '📚 Tutoriales', callback_data: 'qa:nutrition_tutorials' }],
   [{ text: '🔬 Análisis personalizado', callback_data: 'qa:nutrition_analysis' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const NUTRITION_HELP_ROWS = [
+  [{ text: '🐞 Reportar bug', callback_data: 'qa:nutrition_report_bug' }],
+  [{ text: '💡 Proponer feature', callback_data: 'qa:nutrition_feature_request' }],
   [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
@@ -466,6 +474,31 @@ const QUICK_ACTION_HINTS = {
     '',
     'Fuera de `Aprendizaje`, el bot no toma chat ambiguo: te reencauza al modulo activo.',
   ].join('\n'),
+  nutrition_help_feedback: [
+    '🆘 Ayuda y feedback',
+    'Podés contarnos problemas o mejoras del bot con los botones de abajo.',
+    '- `🐞 Reportar bug`: errores, comportamientos raros, algo que no funciona.',
+    '- `💡 Proponer feature`: ideas de mejora o nuevas funciones.',
+  ].join('\n'),
+  nutrition_report_bug: [
+    '🐞 Reportar bug',
+    'Escribime en 1 mensaje:',
+    '- Qué intentaste hacer',
+    '- Qué esperabas',
+    '- Qué pasó realmente',
+  ].join('\n'),
+  nutrition_feature_request: [
+    '💡 Proponer feature',
+    'Escribime en 1 mensaje:',
+    '- Qué querés poder hacer',
+    '- Para qué te serviría',
+    '- Ejemplo de uso (si aplica)',
+  ].join('\n'),
+  nutrition_reencauce_feedback: [
+    '📌 Modo feedback activo.',
+    'Mandame un mensaje de texto con el detalle del bug o feature.',
+    'En esta etapa no tomo imágenes/audios para feedback.',
+  ].join('\n'),
   nutrition_welcome: [
     '🥗 Menú principal',
     '- 📋 Registro — ingesta y pesaje',
@@ -551,6 +584,7 @@ const QUICK_ACTION_HINTS = {
 const MENU_SCOPES = new Set([
   'main', 'ledger', 'ufc_analysis', 'ufc_event', 'ufc_config', 'bets', 'event', 'config',
   'nutrition_registro', 'nutrition_perfil', 'nutrition_estadisticas', 'nutrition_aprendizaje',
+  'nutrition_help',
   'nutrition_registro_leaf', 'nutrition_perfil_leaf', 'nutrition_estadisticas_leaf', 'nutrition_aprendizaje_leaf',
 ]);
 const GUIDED_ALLOWED_CALLBACKS = new Set([
@@ -588,6 +622,8 @@ const NUTRITION_GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:nutrition_perfil',
   'menu:nutrition_estadisticas',
   'menu:nutrition_aprendizaje',
+  'qa:nutrition_report_bug',
+  'qa:nutrition_feature_request',
   'qa:nutrition_log_intake',
   'qa:nutrition_log_weighin',
   'qa:nutrition_modify_delete_intake',
@@ -861,6 +897,20 @@ function resolveNutritionGuidedMessageDecision({
     return { action: 'block', guidedAction: null, inputType: null };
   }
 
+  if (guidedAction === 'report_bug' || guidedAction === 'submit_feature_request') {
+    if (hasMedia) {
+      return { action: 'block', guidedAction: null, inputType: null };
+    }
+    if (normalizedText) {
+      return {
+        action: 'route',
+        guidedAction,
+        inputType: 'text_feedback',
+      };
+    }
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
   if (hasMedia) {
     return {
       action: 'route',
@@ -1106,6 +1156,9 @@ function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc
     if (action === 'learning_chat') {
       return QUICK_ACTION_HINTS.nutrition_learning;
     }
+    if (action === 'report_bug' || action === 'submit_feature_request') {
+      return QUICK_ACTION_HINTS.nutrition_reencauce_feedback;
+    }
     return QUICK_ACTION_HINTS.nutrition_reencauce_intake;
   }
 
@@ -1127,12 +1180,18 @@ function guidedMenuScopeForAction(guidedAction = '', { guidedMenuId = 'ufc_v1' }
     if (action === 'update_profile') return 'nutrition_perfil_leaf';
     if (action === 'view_summary') return 'nutrition_estadisticas_leaf';
     if (action === 'learning_chat' || action === 'view_analysis') return 'nutrition_aprendizaje_leaf';
+    if (action === 'report_bug' || action === 'submit_feature_request') return 'nutrition_help';
     return 'nutrition_registro_leaf';
   }
   const action = normalizeGuidedAction(guidedAction, {
     defaultAction: 'analyze_quotes',
   });
   return action === 'record_bet' || action === 'settle_bet' ? 'ledger' : 'ufc_analysis';
+}
+
+function isOneShotNutritionFeedbackAction(action = '') {
+  const normalized = normalizeGuidedAction(action, { defaultAction: 'log_intake' });
+  return normalized === 'report_bug' || normalized === 'submit_feature_request';
 }
 
 function pickLargestPhoto(photos = []) {
@@ -1471,6 +1530,7 @@ export function startTelegramBot(router, options = {}) {
         if (scope === 'nutrition_perfil') return { inline_keyboard: NUTRITION_PERFIL_ROWS };
         if (scope === 'nutrition_estadisticas') return { inline_keyboard: NUTRITION_ESTADISTICAS_ROWS };
         if (scope === 'nutrition_aprendizaje') return { inline_keyboard: NUTRITION_APRENDIZAJE_ROWS };
+        if (scope === 'nutrition_help') return { inline_keyboard: NUTRITION_HELP_ROWS };
         if (scope === 'nutrition_registro_leaf') return { inline_keyboard: NUTRITION_REGISTRO_LEAF_ROWS };
         if (scope === 'nutrition_perfil_leaf') return { inline_keyboard: NUTRITION_PERFIL_LEAF_ROWS };
         if (scope === 'nutrition_estadisticas_leaf') return { inline_keyboard: NUTRITION_ESTADISTICAS_LEAF_ROWS };
@@ -1808,6 +1868,9 @@ export function startTelegramBot(router, options = {}) {
         setGuidedAction(chatId, decision.guidedAction);
       }
 
+      const shouldResetFeedbackMode =
+        guidedMenuId === 'nutrition_v1' &&
+        isOneShotNutritionFeedbackAction(decision.guidedAction);
       await deliverToRouter({
         msg,
         userMessage,
@@ -1816,6 +1879,9 @@ export function startTelegramBot(router, options = {}) {
         guidedAction: decision.guidedAction,
         guidedInputType: decision.inputType,
       });
+      if (shouldResetFeedbackMode) {
+        setGuidedAction(chatId, 'log_intake');
+      }
       return;
     }
 
@@ -1914,6 +1980,9 @@ export function startTelegramBot(router, options = {}) {
         setGuidedAction(chatId, decision.guidedAction);
       }
 
+      const shouldResetFeedbackMode =
+        guidedMenuId === 'nutrition_v1' &&
+        isOneShotNutritionFeedbackAction(decision.guidedAction);
       await deliverToRouter({
         msg: first,
         userMessage,
@@ -1923,6 +1992,9 @@ export function startTelegramBot(router, options = {}) {
         guidedAction: decision.guidedAction,
         guidedInputType: decision.inputType,
       });
+      if (shouldResetFeedbackMode) {
+        setGuidedAction(chatId, 'log_intake');
+      }
       return;
     }
 
@@ -2029,6 +2101,22 @@ export function startTelegramBot(router, options = {}) {
           setGuidedAction(chatId, 'learning_chat');
           await sendBotMessage(chatId, '🎓 Aprendizaje\n¿Qué querés hacer?', {
             menuScope: 'nutrition_aprendizaje',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_report_bug') {
+          setGuidedAction(chatId, 'report_bug');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_report_bug, {
+            menuScope: 'nutrition_help',
+          });
+          return;
+        }
+
+        if (data === 'qa:nutrition_feature_request') {
+          setGuidedAction(chatId, 'submit_feature_request');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_feature_request, {
+            menuScope: 'nutrition_help',
           });
           return;
         }
@@ -2356,11 +2444,15 @@ export function startTelegramBot(router, options = {}) {
       }
 
       if (data === 'qa:help') {
+        if (guidedMenuId === 'nutrition_v1') {
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_help_feedback, {
+            menuScope: 'nutrition_help',
+          });
+          return;
+        }
         await sendBotMessage(
           chatId,
-          guidedMenuId === 'nutrition_v1'
-            ? QUICK_ACTION_HINTS.nutrition_help_guided
-            : QUICK_ACTION_HINTS.help_guided,
+          QUICK_ACTION_HINTS.help_guided,
           { menuScope: 'main' }
         );
         return;

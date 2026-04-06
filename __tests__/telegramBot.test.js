@@ -578,6 +578,145 @@ export async function runTelegramBotTests() {
     await fakeBot.emit(
       'callback_query',
       createBaseCallback({
+        data: 'qa:help',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /ayuda y feedback/i);
+    const flatCallbacks = extractCallbackDataList(out);
+    assert.ok(flatCallbacks.includes('qa:nutrition_report_bug'));
+    assert.ok(flatCallbacks.includes('qa:nutrition_feature_request'));
+    assert.ok(flatCallbacks.includes('menu:main'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_report_bug',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'al registrar pesaje 81.4 kg, en algunos casos me devuelve error de timeout',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'report_bug');
+    assert.equal(router.calls[0].inputType, 'text_feedback');
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '14:30 yogur con banana',
+      })
+    );
+
+    assert.equal(router.calls.length, 2);
+    assert.equal(router.calls[1].guidedAction, 'log_intake');
+    assert.equal(router.calls[1].inputType, 'text_intake');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_report_bug',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '',
+        photo: [{ file_id: 'feedback_photo_1', file_size: 1000 }],
+      })
+    );
+
+    assert.equal(router.calls.length, 0);
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /modo feedback activo|mensaje de texto/i);
+    const flatCallbacks = extractCallbackDataList(out);
+    assert.ok(flatCallbacks.includes('qa:nutrition_report_bug'));
+    assert.ok(flatCallbacks.includes('qa:nutrition_feature_request'));
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:nutrition_feature_request',
+      })
+    );
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: 'me gustaría exportar el resumen semanal a PDF con macros y tendencia',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'submit_feature_request');
+    assert.equal(router.calls[0].inputType, 'text_feedback');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
         data: 'qa:nutrition_view_summary',
       })
     );

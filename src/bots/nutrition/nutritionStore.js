@@ -498,6 +498,32 @@ export function ensureNutritionSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_nutrition_user_defaults_user
       ON nutrition_user_product_defaults (telegram_user_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS nutrition_bug_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      chat_id TEXT,
+      source_message_id TEXT NOT NULL,
+      message_text TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nutrition_bug_reports_user_time
+      ON nutrition_bug_reports (telegram_user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS nutrition_feature_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      chat_id TEXT,
+      source_message_id TEXT NOT NULL,
+      message_text TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nutrition_feature_requests_user_time
+      ON nutrition_feature_requests (telegram_user_id, created_at DESC);
   `);
 
   const seedStmt = db.prepare(`
@@ -1416,6 +1442,118 @@ export function addNutritionWeighin(userId = '', weighin = {}, options = {}) {
     ok: true,
     idempotencyStatus: mutationResult.idempotencyStatus || null,
     weighinId: Number(mutationResult.weighinId) || null,
+  };
+}
+
+export function addNutritionBugReport(userId = '', payload = {}, options = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const messageText = String(payload.messageText || '').trim();
+  const chatId = String(payload.chatId || '').trim() || null;
+  const sourceMessageId = String(options?.idempotency?.sourceMessageId || '').trim();
+  if (!normalizedUserId || !messageText || !sourceMessageId) {
+    return { ok: false, error: 'missing_bug_report_payload' };
+  }
+
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_bug_report'),
+    sourceMessageId,
+    payloadForHash: {
+      userId: normalizedUserId,
+      chatId,
+      sourceMessageId,
+      messageText,
+      status: 'new',
+    },
+    applyMutation: () => {
+      const createdAt = new Date().toISOString();
+      const result = getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_bug_reports (
+          telegram_user_id, chat_id, source_message_id, message_text, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `
+        )
+        .run(normalizedUserId, chatId, sourceMessageId, messageText, 'new', createdAt);
+
+      if ((Number(result?.changes) || 0) !== 1) {
+        throw new Error('insert_bug_report_failed');
+      }
+
+      return {
+        reportId: Number(result?.lastInsertRowid) || null,
+        createdAt,
+      };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    reportId: Number(mutationResult.reportId) || null,
+    createdAt: String(mutationResult.createdAt || ''),
+  };
+}
+
+export function addNutritionFeatureRequest(userId = '', payload = {}, options = {}) {
+  ensureNutritionSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const messageText = String(payload.messageText || '').trim();
+  const chatId = String(payload.chatId || '').trim() || null;
+  const sourceMessageId = String(options?.idempotency?.sourceMessageId || '').trim();
+  if (!normalizedUserId || !messageText || !sourceMessageId) {
+    return { ok: false, error: 'missing_feature_request_payload' };
+  }
+
+  const mutationResult = withOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_feature_request'),
+    sourceMessageId,
+    payloadForHash: {
+      userId: normalizedUserId,
+      chatId,
+      sourceMessageId,
+      messageText,
+      status: 'new',
+    },
+    applyMutation: () => {
+      const createdAt = new Date().toISOString();
+      const result = getDb()
+        .prepare(
+          `
+        INSERT INTO nutrition_feature_requests (
+          telegram_user_id, chat_id, source_message_id, message_text, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `
+        )
+        .run(normalizedUserId, chatId, sourceMessageId, messageText, 'new', createdAt);
+
+      if ((Number(result?.changes) || 0) !== 1) {
+        throw new Error('insert_feature_request_failed');
+      }
+
+      return {
+        requestId: Number(result?.lastInsertRowid) || null,
+        createdAt,
+      };
+    },
+  });
+
+  if (!mutationResult?.ok) {
+    return mutationResult;
+  }
+
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    requestId: Number(mutationResult.requestId) || null,
+    createdAt: String(mutationResult.createdAt || ''),
   };
 }
 

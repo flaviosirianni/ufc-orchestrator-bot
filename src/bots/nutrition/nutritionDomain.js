@@ -948,6 +948,26 @@ export function parseProfileUpdatePayload(rawMessage = '') {
   return { ok: true, updates };
 }
 
+export function parseFeedbackPayload(rawMessage = '', { minLength = 10 } = {}) {
+  const normalizedMessage = String(rawMessage || '').replace(/\s+/g, ' ').trim();
+  if (!normalizedMessage) {
+    return {
+      ok: false,
+      error: 'empty_feedback_payload',
+    };
+  }
+  if (normalizedMessage.length < Math.max(1, Number(minLength) || 1)) {
+    return {
+      ok: false,
+      error: 'feedback_too_short',
+    };
+  }
+  return {
+    ok: true,
+    messageText: normalizedMessage,
+  };
+}
+
 export function resolveNutritionModuleFromAction(guidedAction = '') {
   const action = String(guidedAction || '').trim();
   if (action === 'log_intake') return 'ingesta';
@@ -957,6 +977,7 @@ export function resolveNutritionModuleFromAction(guidedAction = '') {
   if (action === 'learning_chat') return 'aprendizaje';
   if (action === 'view_credits') return 'creditos';
   if (action === 'view_analysis') return 'aprendizaje';
+  if (action === 'report_bug' || action === 'submit_feature_request') return 'ayuda';
   return 'ingesta';
 }
 

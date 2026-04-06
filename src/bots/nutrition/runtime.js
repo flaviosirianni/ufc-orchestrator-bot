@@ -19,6 +19,8 @@ import { createBillingUserStoreBridge } from '../../platform/billing/billingBrid
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
 import { enforcePolicyPack } from '../../platform/policy/policyGuard.js';
 import {
+  addNutritionBugReport,
+  addNutritionFeatureRequest,
   addNutritionIntakes,
   addNutritionUsageRecord,
   addNutritionWeighin,
@@ -53,6 +55,7 @@ import {
 import { startNutritionDbReliabilityLoop } from './nutritionReliability.js';
 import {
   formatMacroLine,
+  parseFeedbackPayload,
   parseIntakePayload,
   parseProfileUpdatePayload,
   parseWeighinPayload,
@@ -3858,6 +3861,12 @@ function resolveDbFirstLearningReply({
 
 function formatWriteFailureReply(action = '', errorCode = '') {
   const suffix = errorCode ? ` (detalle: ${errorCode})` : '';
+  if (action === 'report_bug') {
+    return `❌ No pude guardar tu reporte de bug${suffix}. Reintentá con una descripción breve en texto.`;
+  }
+  if (action === 'submit_feature_request') {
+    return `❌ No pude guardar tu feature request${suffix}. Reintentá con una descripción breve en texto.`;
+  }
   if (action === 'log_intake') {
     return `❌ No pude guardar la ingesta en la DB${suffix}. Reintentá en formato: \`13:30 200g pollo + 150g arroz\`.`;
   }
@@ -3994,8 +4003,10 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
         manifest,
         mediaStats,
       });
+      const isNonBillableAction =
+        guidedAction === 'report_bug' || guidedAction === 'submit_feature_request';
 
-      if (CREDIT_ENFORCE && estimatedCost > 0) {
+      if (CREDIT_ENFORCE && estimatedCost > 0 && !isNonBillableAction) {
         const state = await billingBridge.refreshCreditState(userId);
         const available = Number(state?.availableCredits) || 0;
         if (available < estimatedCost) {
@@ -4033,6 +4044,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       // Never block functional guidedActions (log_intake, log_weighin, view_summary, etc.)
       const FUNCTIONAL_GUIDED_ACTIONS = new Set([
         'log_intake', 'log_weighin', 'view_summary', 'view_profile', 'learning_chat', 'view_credits', 'view_analysis',
+        'report_bug', 'submit_feature_request',
       ]);
       const isOnboarding =
         !FUNCTIONAL_GUIDED_ACTIONS.has(guidedAction) &&
@@ -4129,8 +4141,86 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
       let usageSnapshot = null;
 
       try {
+      if (guidedAction === 'report_bug' || guidedAction === 'submit_feature_request') {
+        if (!cleanMessage || hasMedia) {
+          return [
+            'Necesito un mensaje de texto para guardar tu feedback.',
+            guidedAction === 'report_bug'
+              ? 'Ejemplo: `En Registro de pesaje, al enviar 81.4 kg me devuelve error.`'
+              : 'Ejemplo: `Me gustaría tener exportación semanal a PDF del resumen nutricional.`',
+          ].join('\n');
+        }
 
-      if (guidedAction === 'update_profile') {
+        const parsedFeedback = parseFeedbackPayload(cleanMessage, { minLength: 10 });
+        if (!parsedFeedback.ok) {
+          if (parsedFeedback.error === 'feedback_too_short') {
+            return 'Tu mensaje es muy corto. Sumá un poco más de detalle para poder revisarlo bien.';
+          }
+          return 'No pude leer tu feedback. Reintentá con un mensaje de texto.';
+        }
+
+        const feedbackSourceMessageId =
+          String(sourceMessageId || '').trim() || `feedback_${crypto.randomUUID()}`;
+        const temporalNow = resolveTemporalContext({ rawMessage: 'hoy', userTimeZone });
+
+        if (guidedAction === 'report_bug') {
+          const saved = addNutritionBugReport(
+            userId,
+            {
+              chatId,
+              messageText: parsedFeedback.messageText,
+            },
+            {
+              idempotency: {
+                sourceMessageId: feedbackSourceMessageId,
+                operationType: 'report_bug',
+              },
+            }
+          );
+          if (!saved?.ok) {
+            return formatWriteFailureReply('report_bug', saved?.error || 'db_write_failed');
+          }
+          const idempotencyNotice = formatIdempotencyNotice(saved.idempotencyStatus);
+          replyText = [
+            '✅ Gracias, guardé tu reporte de bug.',
+            `- ID: ${saved.reportId || 'N/D'}`,
+            `- Fecha: ${temporalNow.localDate} ${temporalNow.localTime} (${userTimeZone})`,
+            idempotencyNotice,
+          ]
+            .filter(Boolean)
+            .join('\n');
+        } else {
+          const saved = addNutritionFeatureRequest(
+            userId,
+            {
+              chatId,
+              messageText: parsedFeedback.messageText,
+            },
+            {
+              idempotency: {
+                sourceMessageId: feedbackSourceMessageId,
+                operationType: 'submit_feature_request',
+              },
+            }
+          );
+          if (!saved?.ok) {
+            return formatWriteFailureReply(
+              'submit_feature_request',
+              saved?.error || 'db_write_failed'
+            );
+          }
+          const idempotencyNotice = formatIdempotencyNotice(saved.idempotencyStatus);
+          replyText = [
+            '✅ Gracias, guardé tu feature request.',
+            `- ID: ${saved.requestId || 'N/D'}`,
+            `- Fecha: ${temporalNow.localDate} ${temporalNow.localTime} (${userTimeZone})`,
+            idempotencyNotice,
+          ]
+            .filter(Boolean)
+            .join('\n');
+        }
+        shouldCharge = false;
+      } else if (guidedAction === 'update_profile') {
         if (!cleanMessage) {
           return [
             '🧭 Pasame al menos un campo para actualizar tu perfil.',
@@ -5871,7 +5961,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         } // end else (not delete intent)
       }
 
-      if (CREDIT_ENFORCE && estimatedCost > 0 && shouldCharge) {
+      if (CREDIT_ENFORCE && estimatedCost > 0 && shouldCharge && !isNonBillableAction) {
         const idempotencyKey = buildSpendIdempotencyKey({
           botId,
           userId,

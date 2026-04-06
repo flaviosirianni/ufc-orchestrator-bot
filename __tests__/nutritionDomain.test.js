@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { getDb } from '../src/core/sqliteStore.js';
 import {
+  addNutritionBugReport,
+  addNutritionFeatureRequest,
   addNutritionIntakes,
   addNutritionWeighin,
   bumpNutritionUserProductDefaultUsage,
@@ -51,12 +53,92 @@ function cleanupUserData(userId = '') {
   db
     .prepare('DELETE FROM nutrition_user_product_defaults WHERE telegram_user_id = ?')
     .run(normalizedUserId);
+  db.prepare('DELETE FROM nutrition_bug_reports WHERE telegram_user_id = ?').run(normalizedUserId);
+  db
+    .prepare('DELETE FROM nutrition_feature_requests WHERE telegram_user_id = ?')
+    .run(normalizedUserId);
 }
 
 export async function runNutritionDomainTests() {
   ensureNutritionSchema();
   const userId = `nutrition_test_${Date.now()}`;
   cleanupUserData(userId);
+
+  const bugReport = addNutritionBugReport(
+    userId,
+    {
+      chatId: `${userId}_chat`,
+      messageText: 'en registro de pesaje a veces queda cargando y no confirma',
+    },
+    {
+      idempotency: {
+        sourceMessageId: `${userId}_bug_msg_1`,
+        operationType: 'report_bug',
+      },
+    }
+  );
+  assert.equal(bugReport.ok, true);
+  assert.equal(Number.isFinite(Number(bugReport.reportId)), true);
+
+  const bugReportReplay = addNutritionBugReport(
+    userId,
+    {
+      chatId: `${userId}_chat`,
+      messageText: 'en registro de pesaje a veces queda cargando y no confirma',
+    },
+    {
+      idempotency: {
+        sourceMessageId: `${userId}_bug_msg_1`,
+        operationType: 'report_bug',
+      },
+    }
+  );
+  assert.equal(bugReportReplay.ok, true);
+  assert.equal(bugReportReplay.idempotencyStatus, 'replayed');
+  assert.equal(bugReportReplay.reportId, bugReport.reportId);
+
+  const featureRequest = addNutritionFeatureRequest(
+    userId,
+    {
+      chatId: `${userId}_chat`,
+      messageText: 'quiero exportar el resumen nutricional semanal a PDF',
+    },
+    {
+      idempotency: {
+        sourceMessageId: `${userId}_feature_msg_1`,
+        operationType: 'submit_feature_request',
+      },
+    }
+  );
+  assert.equal(featureRequest.ok, true);
+  assert.equal(Number.isFinite(Number(featureRequest.requestId)), true);
+
+  const featureReplay = addNutritionFeatureRequest(
+    userId,
+    {
+      chatId: `${userId}_chat`,
+      messageText: 'quiero exportar el resumen nutricional semanal a PDF',
+    },
+    {
+      idempotency: {
+        sourceMessageId: `${userId}_feature_msg_1`,
+        operationType: 'submit_feature_request',
+      },
+    }
+  );
+  assert.equal(featureReplay.ok, true);
+  assert.equal(featureReplay.idempotencyStatus, 'replayed');
+  assert.equal(featureReplay.requestId, featureRequest.requestId);
+
+  const db = getDb();
+  const bugRows = db
+    .prepare('SELECT COUNT(*) AS total FROM nutrition_bug_reports WHERE telegram_user_id = ?')
+    .get(userId);
+  const featureRows = db
+    .prepare('SELECT COUNT(*) AS total FROM nutrition_feature_requests WHERE telegram_user_id = ?')
+    .get(userId);
+  assert.equal(Number(bugRows?.total || 0), 1);
+  assert.equal(Number(featureRows?.total || 0), 1);
 
   const parsedIntake = parseIntakePayload({
     rawMessage: '2026-03-20 13:30 200g arroz cocido',
