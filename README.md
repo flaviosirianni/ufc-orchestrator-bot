@@ -340,6 +340,9 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 - `Registrar ingesta` y `Aprendizaje` usan la familia de modelos configurada en `NUTRITION_SMART_MODELS` (fallback automático por disponibilidad).
 - En `Registrar ingesta` el pipeline de texto es **model-first**: primero parser estructurado con LLM, y parser léxico solo como fallback de resiliencia.
 - Si detecta desalineación semántica entre lo escrito y lo parseado, no persiste un producto incorrecto: intenta reparar con contexto del modelo o pide aclaración breve.
+- Antes de parsear ingestas se aplica una capa de intención/entidades (`ID`, `modificar`, `borrar`, `batch`, consulta) para priorizar acciones determinísticas y reducir ambigüedad.
+- `Modificar/Borrar ingesta` prioriza resolución determinística por `ID`, fecha/hora y tokens de item; usa LLM solo como fallback.
+- En batch de ingestas se guarda en forma parcial segura: líneas válidas se persisten y líneas inválidas se devuelven para corrección.
 - El historial de ingestas ahora guarda metadata de resolución (`catalog_item_id`, alias escrito por usuario, modo `catalog|estimate`, confianza) para mejorar memoria de producto por usuario.
 - En `Aprendizaje`, si el mensaje pide datos personales (`resumen`, `cómo vengo`, `qué comí`, `perfil`, `último peso`), se responde **DB-first** con datos reales de SQLite antes de usar chat libre.
 - V1 no incluye OCR de platos/comidas generales ni lookup online automático de productos de marca.
@@ -348,6 +351,7 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 - Si no se informa hora/fecha en ingesta o pesaje, usa hora local del usuario (`DEFAULT_USER_TIMEZONE` o perfil).
 - Escrituras de `ingesta`, `pesaje` y `perfil` tienen idempotencia por mensaje Telegram (`user_id + operation + message_id`) para evitar duplicados por reintentos.
 - Si una escritura falla, el bot devuelve error explícito y no confirma “anotado”.
+- Trazas de parseo nutricional (`guidedAction=log_intake_parse_trace`) quedan en `nutrition_usage_records` con etapa/razón/latencia en `raw_usage_json`.
 
 #### Nutrition DB Reliability
 
@@ -362,6 +366,9 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 - Comandos manuales:
   - `npm run nutrition:db:verify`
   - `npm run nutrition:db:backup`
+  - `npm run nutrition:baseline` (replay corpus + métricas base de parseo/intención)
+  - `npm run nutrition:metrics` (resumen diario + alerta por tasa de fallos de parseo)
+  - `npm run nutrition:smoke` (smoke operativo: `/health` y opcional envío `/start` + probe por Telegram)
 
 #### UFC DB Reliability
 

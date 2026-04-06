@@ -12,8 +12,64 @@ function normalizeText(value = '') {
     .trim();
 }
 
+const NAME_STOPWORDS = new Set([
+  'de',
+  'del',
+  'la',
+  'el',
+  'los',
+  'las',
+  'con',
+  'sin',
+  'por',
+  'para',
+  'y',
+  'e',
+  'en',
+  'al',
+  'a',
+  'un',
+  'una',
+  'unos',
+  'unas',
+  'me',
+  'mi',
+  'mis',
+  'tu',
+  'tus',
+  'registrame',
+  'registrar',
+  'anotame',
+  'anotar',
+  'sumame',
+  'sumar',
+  'desayuno',
+  'desayune',
+  'almuerzo',
+  'almorce',
+  'cena',
+  'cene',
+  'merienda',
+  'colacion',
+  'colacion',
+]);
+
+const QUANTITY_TOKEN_PATTERN =
+  '\\d+(?:\\s*\\/\\s*\\d+)?(?:[.,]\\d+)?|media|medio|un\\s+medio|una\\s+media|un\\s+cuarto|una\\s+cuarta|cuarto|un\\s+tercio|tercio|tres\\s+cuartos';
+const QUANTITY_UNIT_PATTERN =
+  'kg|kilos?|kilogramos?|g|gr|gramos?|ml|cc|l|litros?|u|unidad(?:es)?|porciones?|platos?|bochas?|tazas?|vasos?|scoops?|huevos?|rodajas?|cucharadas?|cucharaditas?';
+
+function stripLeadingIntakeContext(value = '') {
+  return String(value || '')
+    .replace(
+      /^\s*(?:registr(?:a|á)(?:me)?|anot(?:a|á)(?:me)?|sum(?:a|á)(?:me)?|agreg(?:a|á)(?:me)?|comi|me\s+comi|desayun(?:e|é)|almorc(?:e|é)|cen(?:e|é)|desayuno|almuerzo|cena|merienda|colacion|colación)\b[:\s-]*/i,
+      ''
+    )
+    .trim();
+}
+
 function sanitizeNameHint(value = '') {
-  const text = String(value || '');
+  const text = stripLeadingIntakeContext(String(value || ''));
   if (!text.trim()) return '';
   return text
     .replace(
@@ -24,6 +80,9 @@ function sanitizeNameHint(value = '') {
     .replace(/\ben\s+info\s+nutricional\b/gi, ' ')
     .replace(/\bde\s+info\s+nutricional\b/gi, ' ')
     .replace(/\b(info\s+nutricional)\b/gi, ' ')
+    .replace(/^[\s,:;.-]+|[\s,:;.-]+$/g, ' ')
+    .replace(/^(?:de|del|la|el|los|las|con|sin|y|e)\s+/i, ' ')
+    .replace(/\s+(?:de|del|la|el|los|las|con|sin|y|e)$/i, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -32,6 +91,106 @@ function parseNumber(value) {
   const normalized = String(value || '').replace(',', '.').trim();
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseFlexibleQuantityToken(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = normalizeText(raw).replace(/\s+/g, ' ');
+
+  const normalizedCompact = normalized.replace(/\s+/g, '');
+  if (/^\d+\/\d+$/.test(normalizedCompact)) {
+    const [numeratorRaw, denominatorRaw] = normalizedCompact.split('/');
+    const numerator = Number(numeratorRaw);
+    const denominator = Number(denominatorRaw);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0) {
+      return numerator / denominator;
+    }
+  }
+
+  const byWords = {
+    media: 0.5,
+    medio: 0.5,
+    'un medio': 0.5,
+    'una media': 0.5,
+    'un cuarto': 0.25,
+    'una cuarta': 0.25,
+    cuarto: 0.25,
+    'un tercio': 1 / 3,
+    tercio: 1 / 3,
+    'tres cuartos': 0.75,
+  };
+  if (Object.prototype.hasOwnProperty.call(byWords, normalized)) {
+    return byWords[normalized];
+  }
+
+  const numeric = parseNumber(raw);
+  if (Number.isFinite(numeric)) return numeric;
+  return null;
+}
+
+function normalizeQuantityUnit(value = '') {
+  const normalized = normalizeText(value);
+  if (!normalized) return '';
+  const aliases = {
+    kilo: 'kg',
+    kilos: 'kg',
+    kilogramo: 'kg',
+    kilogramos: 'kg',
+    kg: 'kg',
+    gr: 'g',
+    gramo: 'g',
+    gramos: 'g',
+    g: 'g',
+    litro: 'l',
+    litros: 'l',
+    l: 'l',
+    ml: 'ml',
+    cc: 'cc',
+    u: 'unidad',
+    unidad: 'unidad',
+    unidades: 'unidad',
+    porcion: 'porcion',
+    porciones: 'porcion',
+    plato: 'plato',
+    platos: 'plato',
+    bocha: 'bocha',
+    bochas: 'bocha',
+    taza: 'taza',
+    tazas: 'taza',
+    vaso: 'vaso',
+    vasos: 'vaso',
+    scoop: 'scoop',
+    scoops: 'scoop',
+    huevo: 'huevo',
+    huevos: 'huevo',
+    rodaja: 'rodaja',
+    rodajas: 'rodaja',
+    cucharada: 'cucharada',
+    cucharadas: 'cucharada',
+    cucharadita: 'cucharadita',
+    cucharaditas: 'cucharadita',
+  };
+  return aliases[normalized] || normalized;
+}
+
+function tokenOverlapCount(valueA = '', valueB = '') {
+  const aTokens = normalizeText(valueA)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !NAME_STOPWORDS.has(token));
+  const bTokens = new Set(
+    normalizeText(valueB)
+      .split(' ')
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !NAME_STOPWORDS.has(token))
+  );
+  if (!aTokens.length || !bTokens.size) return 0;
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap += 1;
+  }
+  return overlap;
 }
 
 function normalizeTimeZone(value = '', fallback = 'America/Argentina/Buenos_Aires') {
@@ -274,15 +433,21 @@ function stripTemporalTokens(message = '', tokens = []) {
 function splitIntakeCandidates(cleanText = '') {
   const raw = String(cleanText || '').trim();
   if (!raw) return [];
-  const canonical = raw.replace(/\s+\+\s+/g, '\n');
+  const andFollowedByAmount = new RegExp(
+    `\\s+y\\s+(?=(?:${QUANTITY_TOKEN_PATTERN})(?:\\s*(?:${QUANTITY_UNIT_PATTERN}))?\\b)`,
+    'gi'
+  );
+  const canonical = raw
+    .replace(/\s+\+\s+/g, '\n')
+    .replace(andFollowedByAmount, '\n');
   return canonical
     .split(/\n|,|;/g)
-    .map((part) => part.trim())
+    .map((part) => stripLeadingIntakeContext(part.trim()))
     .filter(Boolean);
 }
 
 function parseQuantityAndUnit(rawPart = '') {
-  const text = String(rawPart || '').trim();
+  const text = stripLeadingIntakeContext(String(rawPart || '').trim());
   if (!text) {
     return {
       quantityValue: null,
@@ -292,14 +457,18 @@ function parseQuantityAndUnit(rawPart = '') {
   }
 
   const explicit = text.match(
-    /\b(\d+(?:[.,]\d+)?)\s*(kg|kilos?|g|gr|gramos?|ml|cc|l|litros?|u|unidad(?:es)?|porciones?)\b/i
+    new RegExp(`\\b(${QUANTITY_TOKEN_PATTERN})\\s*(${QUANTITY_UNIT_PATTERN})\\b`, 'i')
   );
   if (explicit) {
-    const quantityValue = parseNumber(explicit[1]);
-    const quantityUnit = normalizeText(explicit[2]);
-    const nameHint = sanitizeNameHint(
+    const quantityValue = parseFlexibleQuantityToken(explicit[1]);
+    const quantityUnit = normalizeQuantityUnit(explicit[2]);
+    let nameHint = sanitizeNameHint(
       text.replace(explicit[0], ' ').replace(/\s+/g, ' ').trim()
     );
+    if (quantityUnit === 'huevo') {
+      const augmented = sanitizeNameHint(`${quantityUnit} ${nameHint}`.trim());
+      nameHint = augmented || 'huevo';
+    }
     return {
       quantityValue,
       quantityUnit,
@@ -307,10 +476,12 @@ function parseQuantityAndUnit(rawPart = '') {
     };
   }
 
-  const leading = text.match(/^(\d+(?:[.,]\d+)?)\s+(.+)$/);
+  const leading = text.match(
+    /^(\d+(?:\s*\/\s*\d+)?(?:[.,]\d+)?|media|medio|un\s+medio|una\s+media|un\s+cuarto|una\s+cuarta|cuarto|un\s+tercio|tercio|tres\s+cuartos)\s+(.+)$/i
+  );
   if (leading) {
     return {
-      quantityValue: parseNumber(leading[1]),
+      quantityValue: parseFlexibleQuantityToken(leading[1]),
       quantityUnit: 'unidad',
       nameHint: sanitizeNameHint(String(leading[2] || '').trim()),
     };
@@ -337,27 +508,100 @@ function scoreCatalogMatch(entry = {}, normalizedNameHint = '') {
   return overlap * 10;
 }
 
+function buildNameHintVariants(normalizedNameHint = '') {
+  const base = normalizeText(normalizedNameHint);
+  if (!base) return [];
+  const variants = new Set([base]);
+  variants.add(base.replace(/^(?:de|del|la|el|los|las|con|sin)\s+/i, '').trim());
+  variants.add(base.replace(/\s+y\s+.+$/i, '').trim());
+  variants.add(base.replace(/\s+e\s+.+$/i, '').trim());
+  variants.add(base.replace(/\s+con\s+.+$/i, '').trim());
+  return [...variants].filter((variant) => variant && variant.length >= 3);
+}
+
+function mergeCatalogPools(...pools) {
+  const merged = [];
+  const seen = new Set();
+  for (const pool of pools) {
+    for (const entry of Array.isArray(pool) ? pool : []) {
+      const key = String(entry?.id || entry?.productName || '').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
+
 function resolveCatalogEntry(nameHint = '') {
   const normalizedNameHint = toCatalogNormalizedToken(nameHint);
   if (!normalizedNameHint) return null;
+  const hintVariants = buildNameHintVariants(normalizedNameHint);
+  if (!hintVariants.length) return null;
 
-  const candidates = findFoodCatalogCandidates(normalizedNameHint, { limit: 40 });
-  let pool = Array.isArray(candidates) ? candidates : [];
+  const tokenCandidates = [];
+  const hintTokens = [...new Set(
+    normalizedNameHint
+      .split(' ')
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 4 && !NAME_STOPWORDS.has(token))
+  )];
+  for (const token of hintTokens.slice(0, 5)) {
+    tokenCandidates.push(...findFoodCatalogCandidates(token, { limit: 20 }));
+  }
+
+  const candidates = findFoodCatalogCandidates(normalizedNameHint, { limit: 80 });
+  let pool = mergeCatalogPools(candidates, tokenCandidates);
   if (!pool.length) {
-    pool = listFoodCatalogEntries().slice(0, 120);
+    pool = listFoodCatalogEntries().slice(0, 1200);
   }
 
   let best = null;
   let bestScore = 0;
-  for (const entry of pool) {
-    const score = scoreCatalogMatch(entry, normalizedNameHint);
-    if (score > bestScore) {
-      bestScore = score;
-      best = entry;
+  let bestOverlap = 0;
+  for (const hintVariant of hintVariants) {
+    for (const entry of pool) {
+      const entryName = normalizeText(entry?.productName || entry?.normalizedName || '');
+      const overlap = tokenOverlapCount(hintVariant, entryName);
+      const hasStrongStringMatch =
+        entryName === hintVariant ||
+        hintVariant.includes(entryName) ||
+        entryName.includes(hintVariant);
+      if (!hasStrongStringMatch && overlap <= 0) {
+        continue;
+      }
+      const score = scoreCatalogMatch(entry, hintVariant);
+      if (score > bestScore || (score === bestScore && overlap > bestOverlap)) {
+        bestScore = score;
+        bestOverlap = overlap;
+        best = entry;
+      }
     }
   }
-  if (!best || bestScore < 20) return null;
-  return best;
+  if (best && bestScore >= 20) return best;
+
+  let looseBest = null;
+  let looseScore = 0;
+  let looseOverlap = 0;
+  for (const hintVariant of hintVariants) {
+    for (const entry of pool) {
+      const entryName = normalizeText(entry?.productName || entry?.normalizedName || '');
+      const overlap = tokenOverlapCount(hintVariant, entryName);
+      if (overlap <= 0) continue;
+      const isDirectHint =
+        entryName === hintVariant ||
+        hintVariant.includes(entryName) ||
+        entryName.includes(hintVariant);
+      const score = overlap * 12 + (isDirectHint ? 8 : 0);
+      if (score > looseScore || (score === looseScore && overlap > looseOverlap)) {
+        looseScore = score;
+        looseOverlap = overlap;
+        looseBest = entry;
+      }
+    }
+  }
+  if (looseBest && looseScore >= 12) return looseBest;
+  return null;
 }
 
 function quantityInPortions(quantityValue = null, quantityUnit = '', portionG = 100) {
@@ -383,6 +627,53 @@ function quantityInPortions(quantityValue = null, quantityUnit = '', portionG = 
 
 function round(value = 0) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function estimateItemFromNameHint({
+  nameHint = '',
+  quantityValue = null,
+  quantityUnit = '',
+} = {}) {
+  const normalized = normalizeText(nameHint);
+  if (!normalized) return null;
+
+  const presets = [
+    {
+      pattern: /\braviol(?:es)?\b/,
+      foodItem: 'ravioles de ricota con tuco',
+      portionG: 280,
+      caloriesKcal: 320,
+      proteinG: 12,
+      carbsG: 52,
+      fatG: 8,
+      source: 'estimacion_lexica',
+    },
+  ];
+
+  const preset = presets.find((candidate) => candidate.pattern.test(normalized));
+  if (!preset) return null;
+
+  const finalQuantityValue =
+    Number.isFinite(Number(quantityValue)) && Number(quantityValue) > 0 ? Number(quantityValue) : 1;
+  const finalQuantityUnit = String(quantityUnit || 'porcion').trim() || 'porcion';
+  const factor = quantityInPortions(finalQuantityValue, finalQuantityUnit, preset.portionG);
+
+  return {
+    foodItem: preset.foodItem,
+    quantityValue: finalQuantityValue,
+    quantityUnit: finalQuantityUnit,
+    caloriesKcal: round((Number(preset.caloriesKcal) || 0) * factor),
+    proteinG: round((Number(preset.proteinG) || 0) * factor),
+    carbsG: round((Number(preset.carbsG) || 0) * factor),
+    fatG: round((Number(preset.fatG) || 0) * factor),
+    confidence: 'baja',
+    source: preset.source,
+    brandOrNotes: null,
+    catalogItemId: null,
+    inputAlias: nameHint,
+    resolutionMode: 'estimate',
+    matchConfidence: 'baja',
+  };
 }
 
 export function resolveTemporalContext({
@@ -449,6 +740,15 @@ export function parseIntakePayload({
     const quantity = parseQuantityAndUnit(chunk);
     const entry = resolveCatalogEntry(quantity.nameHint || chunk);
     if (!entry) {
+      const estimated = estimateItemFromNameHint({
+        nameHint: quantity.nameHint || chunk,
+        quantityValue: quantity.quantityValue,
+        quantityUnit: quantity.quantityUnit,
+      });
+      if (estimated) {
+        items.push(estimated);
+        continue;
+      }
       unresolvedItems.push(chunk);
       continue;
     }

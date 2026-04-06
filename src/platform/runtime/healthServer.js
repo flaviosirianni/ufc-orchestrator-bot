@@ -131,6 +131,7 @@ export function createHealthServer(
     billingClient = null,
     onTopupApplied = null,
     legacyTopup = null,
+    statusProvider = null,
   } = {}
 ) {
   const server = http.createServer(async (req, res) => {
@@ -140,6 +141,21 @@ export function createHealthServer(
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(`${appName} (${botId}) running.`);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/health') {
+      const runtimeStatus =
+        typeof statusProvider === 'function'
+          ? await Promise.resolve(statusProvider()).catch(() => null)
+          : null;
+      sendJson(res, 200, {
+        ok: true,
+        app_name: appName,
+        bot_id: botId,
+        now: new Date().toISOString(),
+        runtime: runtimeStatus,
+      });
       return;
     }
 

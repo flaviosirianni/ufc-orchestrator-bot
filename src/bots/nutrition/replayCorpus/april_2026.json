@@ -1,0 +1,82 @@
+[
+  {
+    "id": "c1",
+    "message": "registrame el 04 de abril a las 12:30hs 2 platos de ravioles de ricota con tuco y estufado",
+    "expected": {
+      "intent": "log_intake_single",
+      "shouldParse": true
+    }
+  },
+  {
+    "id": "c2",
+    "message": "ingestas del sabado 04 de abril:\n12:30hs 2 platos de ravioles de ricota con tuco y estufado\n13:30hs 3 bochas de helado de chocolate y frambuesa\n13:00hs 100ml de vino tinto malbec\n14:00hs 1 porcion de budin de manzana\n21:00hs 200ml de coca cola\n22:00hs 1 scoop de whey protein ahora\ncena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco",
+    "expected": {
+      "intent": "log_intake_batch",
+      "shouldParse": true
+    }
+  },
+  {
+    "id": "c3",
+    "message": "modificar fernet con coca cola fecha real 03 de abril",
+    "expected": {
+      "intent": "modify_intake",
+      "shouldParse": false
+    }
+  },
+  {
+    "id": "c4",
+    "message": "modificar ingesta ID 123 hora 23:30",
+    "expected": {
+      "intent": "modify_intake",
+      "shouldParse": false
+    }
+  },
+  {
+    "id": "c5",
+    "message": "borrar ingesta ID 123",
+    "expected": {
+      "intent": "delete_intake",
+      "shouldParse": false
+    }
+  },
+  {
+    "id": "c6",
+    "message": "borrá la última ingesta",
+    "expected": {
+      "intent": "delete_intake",
+      "shouldParse": false
+    }
+  },
+  {
+    "id": "c7",
+    "message": "ingestas de hoy",
+    "expected": {
+      "intent": "query_intakes",
+      "shouldParse": false
+    }
+  },
+  {
+    "id": "c8",
+    "message": "13:30 200g pollo + 150g arroz",
+    "expected": {
+      "intent": "log_intake_single",
+      "shouldParse": true
+    }
+  },
+  {
+    "id": "c9",
+    "message": "cena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco",
+    "expected": {
+      "intent": "log_intake_single",
+      "shouldParse": true
+    }
+  },
+  {
+    "id": "c10",
+    "message": "suma 1 scoop de whey protein ahora",
+    "expected": {
+      "intent": "log_intake_single",
+      "shouldParse": true
+    }
+  }
+]

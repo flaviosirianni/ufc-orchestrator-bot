@@ -7,6 +7,8 @@ class FakeTelegramBot {
     this.sentMessages = [];
     this.chatActions = [];
     this.answeredCallbacks = [];
+    this.startPollingCalls = 0;
+    this.stopPollingCalls = 0;
   }
 
   on(event, handler) {
@@ -36,6 +38,14 @@ class FakeTelegramBot {
 
   async answerCallbackQuery(id) {
     this.answeredCallbacks.push(id);
+  }
+
+  async startPolling() {
+    this.startPollingCalls += 1;
+  }
+
+  async stopPolling() {
+    this.stopPollingCalls += 1;
   }
 }
 
@@ -91,6 +101,10 @@ function extractCallbackDataList(message = null) {
     .filter(Boolean);
 }
 
+function sleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function runTelegramBotTests() {
   const tests = [];
 
@@ -98,6 +112,37 @@ export async function runTelegramBotTests() {
     assert.equal(normalizeGuidedMenuId('ufc_default'), 'ufc_v1');
     assert.equal(normalizeGuidedMenuId('default'), 'ufc_v1');
     assert.equal(normalizeGuidedMenuId('nutrition_v1'), 'nutrition_v1');
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 120000,
+      pollingWatchdogIntervalMs: 10000,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        text: '/start',
+      })
+    );
+    const statusAfterMessage = runtime.getRuntimeStatus();
+    assert.ok(Number(statusAfterMessage.lastMessageAt) > 0);
+    assert.ok(Number(statusAfterMessage.lastUpdateAt) > 0);
+
+    await fakeBot.emit('polling_error', new Error('ETIMEDOUT: socket hang up'));
+    await sleep(10);
+    const statusAfterError = runtime.getRuntimeStatus();
+    assert.match(String(statusAfterError.lastErrorMessage || ''), /etimedout/i);
+    assert.ok(fakeBot.stopPollingCalls >= 1);
+    assert.ok(fakeBot.startPollingCalls >= 1);
+    runtime.close();
   });
 
   tests.push(async () => {

@@ -70,6 +70,7 @@ const DEFAULT_USER_TIMEZONE =
   process.env.DEFAULT_USER_TIMEZONE || 'America/Argentina/Buenos_Aires';
 const IMAGE_INTAKE_DRAFT_TTL_MS = 20 * 60 * 1000;
 const IMAGE_WEIGHIN_DRAFT_TTL_MS = 20 * 60 * 1000;
+const INTAKE_OPERATION_CONTEXT_TTL_MS = 20 * 60 * 1000;
 const SPANISH_MONTH_HINT_PATTERN =
   'enero|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?';
 
@@ -332,6 +333,25 @@ function mergeUsageSnapshots(current = null, next = null) {
       parts: [current.rawUsage || null, next.rawUsage || null].filter(Boolean),
     },
   };
+}
+
+function recordIntakeParseTrace(userId = '', trace = {}) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return;
+  addNutritionUsageRecord(normalizedUserId, {
+    guidedAction: 'log_intake_parse_trace',
+    model: String(trace.stage || 'unknown').trim() || 'unknown',
+    rawUsage: {
+      ok: Boolean(trace.ok),
+      stage: String(trace.stage || 'unknown').trim() || 'unknown',
+      reasonCode: String(trace.reasonCode || '').trim() || null,
+      latencyMs: Number.isFinite(Number(trace.latencyMs)) ? Math.round(Number(trace.latencyMs)) : null,
+      hasMedia: Boolean(trace.hasMedia),
+      isBatch: Boolean(trace.isBatch),
+      unresolvedCount: Number(trace.unresolvedCount) || 0,
+      at: new Date().toISOString(),
+    },
+  });
 }
 
 function stripCodeFence(text = '') {
@@ -798,6 +818,172 @@ function looksLikeIntakeModifyIntent(text = '') {
   );
 }
 
+function looksLikeFirstReference(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(el primero|la primera|primer registro|primera ingesta)\b/.test(normalized);
+}
+
+function looksLikeLastReference(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return /\b(el ultimo|la ultima|lo ultimo|recien|recien cargada|ultima ingesta)\b/.test(normalized);
+}
+
+function extractTargetItemTokens(text = '') {
+  const normalized = normalizeText(text)
+    .replace(
+      /\b(modificar|modifica|modif|editar|edita|ajustar|ajusta|corregir|corregi|corrige|borrar|borra|borro|eliminar|elimina|deshacer|deshace|undo|ingesta|comida|registro|fecha|hora|real|del|de|las|los|la|el)\b/g,
+      ' '
+    )
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/\b\d{1,2}[:h.]\d{2}\b/g, ' ')
+    .replace(/\b(?:a\s+las?\s*)?\d{1,2}\s*(?:hs?|h)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return tokenizeForIntakeMatch(normalized);
+}
+
+function resolveIntakeTargetDeterministic({
+  rawMessage = '',
+  candidateRows = [],
+  explicitIntakeId = null,
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const rows = Array.isArray(candidateRows) ? candidateRows : [];
+  if (!rows.length) {
+    return { action: 'cannot_identify', reason: 'no_candidate_rows' };
+  }
+
+  if (Number.isFinite(Number(explicitIntakeId)) && Number(explicitIntakeId) > 0) {
+    const id = Number(explicitIntakeId);
+    const direct = rows.find((row) => Number(row?.id) === id);
+    if (direct) {
+      return { action: 'delete_single', targetId: id, reason: 'explicit_id' };
+    }
+    return { action: 'cannot_identify', reason: 'explicit_id_not_found' };
+  }
+
+  if (looksLikeLastReference(rawMessage)) {
+    const lastId = toPositiveIntOrNull(rows[0]?.id);
+    if (lastId) return { action: 'delete_last', targetId: lastId, reason: 'relative_last' };
+  }
+  if (looksLikeFirstReference(rawMessage)) {
+    const firstId = toPositiveIntOrNull(rows[rows.length - 1]?.id);
+    if (firstId) return { action: 'delete_single', targetId: firstId, reason: 'relative_first' };
+  }
+
+  const temporal = resolveTemporalContext({ rawMessage, userTimeZone });
+  const itemTokens = extractTargetItemTokens(rawMessage);
+  const hasItemTokens = itemTokens.length > 0;
+  const hasExplicitDate = Boolean(temporal.hadExplicitDate);
+  const hasExplicitTime = Boolean(temporal.hadExplicitTime);
+
+  const scoredRows = rows
+    .map((row) => {
+      const rowDate = String(row?.localDate || '').trim();
+      const rowTime = String(row?.localTime || '').trim();
+      const rowFood = String(row?.foodItem || '').trim();
+      const rowTokens = tokenizeForIntakeMatch(rowFood);
+      const itemOverlapCount = countTokenOverlap(itemTokens, rowTokens);
+
+      let score = 0;
+      if (hasExplicitDate && rowDate === temporal.localDate) score += 3;
+      if (hasExplicitTime && rowTime === temporal.localTime) score += 3;
+      if (!hasExplicitTime && hasExplicitDate && rowDate === temporal.localDate) score += 1;
+      if (itemOverlapCount > 0) score += itemOverlapCount * 2;
+      if (!hasExplicitDate && !hasExplicitTime && itemOverlapCount > 0) score += 1;
+
+      return {
+        row,
+        score,
+        itemOverlapCount,
+        dateMatch: hasExplicitDate && rowDate === temporal.localDate,
+        timeMatch: hasExplicitTime && rowTime === temporal.localTime,
+      };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (!scoredRows.length) {
+    return { action: 'cannot_identify', reason: 'no_deterministic_match' };
+  }
+
+  const winner = scoredRows[0];
+  const second = scoredRows[1];
+  const winnerId = toPositiveIntOrNull(winner?.row?.id);
+  if (!winnerId) {
+    return { action: 'cannot_identify', reason: 'winner_missing_id' };
+  }
+
+  const hasCloseTie =
+    second &&
+    Number.isFinite(Number(second.score)) &&
+    Number(second.score) > 0 &&
+    Number(winner.score) - Number(second.score) <= 1;
+  const winnerIsWeak =
+    winner.score < 3 &&
+    !(winner.dateMatch && winner.timeMatch) &&
+    (!hasItemTokens || winner.itemOverlapCount <= 0);
+  if (hasCloseTie || winnerIsWeak) {
+    return {
+      action: 'cannot_identify',
+      reason: hasCloseTie ? 'tie' : 'weak_match',
+      candidateIds: scoredRows.slice(0, 5).map((entry) => toPositiveIntOrNull(entry?.row?.id)).filter(Boolean),
+    };
+  }
+
+  return {
+    action: 'delete_single',
+    targetId: winnerId,
+    reason: 'deterministic_match',
+  };
+}
+
+function planNutritionAction({
+  rawMessage = '',
+  hasMedia = false,
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  const cleanMessage = String(rawMessage || '').trim();
+  const explicitIntakeId = parseIntakeIdFromText(cleanMessage);
+  const modifyIntent = !hasMedia && looksLikeIntakeModifyIntent(cleanMessage);
+  const deleteIntent = !hasMedia && !modifyIntent && looksLikeDeleteIntent(cleanMessage);
+  const queryIntent =
+    !hasMedia &&
+    !modifyIntent &&
+    !deleteIntent &&
+    looksLikeRecentIntakesQuestion(normalizeText(cleanMessage));
+  const batchIntent = !hasMedia && !modifyIntent && !deleteIntent && isLikelyBatchIntakeMessage(cleanMessage);
+  const temporalHints = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
+
+  let intent = 'log_intake_single';
+  if (explicitIntakeId && (modifyIntent || deleteIntent)) {
+    intent = modifyIntent ? 'modify_intake' : 'delete_intake';
+  } else if (explicitIntakeId && !hasMedia) {
+    intent = 'intake_reference';
+  } else if (modifyIntent) {
+    intent = 'modify_intake';
+  } else if (deleteIntent) {
+    intent = 'delete_intake';
+  } else if (batchIntent) {
+    intent = 'log_intake_batch';
+  } else if (queryIntent) {
+    intent = 'query_intakes';
+  } else if (hasMedia) {
+    intent = 'log_intake_media';
+  }
+
+  return {
+    intent,
+    explicitIntakeId,
+    temporalHints,
+    hasExplicitTemporal: Boolean(temporalHints.hadExplicitDate || temporalHints.hadExplicitTime),
+    payload: cleanMessage,
+    hasMedia: Boolean(hasMedia),
+  };
+}
+
 async function resolveDeleteTargetWithModel({
   openai,
   modelCandidates = [],
@@ -1256,6 +1442,29 @@ function tokenizeForIntakeMatch(value = '') {
     .filter((token) => token.length >= 3 && !NUTRITION_MATCH_STOPWORDS.has(token));
 }
 
+function countTokenOverlap(itemTokens = [], messageTokens = []) {
+  if (!Array.isArray(itemTokens) || !itemTokens.length) return 0;
+  if (!Array.isArray(messageTokens) || !messageTokens.length) return 0;
+  let overlap = 0;
+  for (const itemToken of itemTokens) {
+    for (const messageToken of messageTokens) {
+      if (itemToken === messageToken) {
+        overlap += 1;
+        break;
+      }
+      if (
+        itemToken.length >= 4 &&
+        messageToken.length >= 4 &&
+        (itemToken.startsWith(messageToken) || messageToken.startsWith(itemToken))
+      ) {
+        overlap += 1;
+        break;
+      }
+    }
+  }
+  return overlap;
+}
+
 function hasApproxTokenOverlap(itemTokens = [], messageTokens = []) {
   if (!Array.isArray(itemTokens) || !itemTokens.length) return false;
   if (!Array.isArray(messageTokens) || !messageTokens.length) return false;
@@ -1275,37 +1484,217 @@ function hasApproxTokenOverlap(itemTokens = [], messageTokens = []) {
   return false;
 }
 
-function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {}) {
+function parseCompactNumber(value = '') {
+  const parsed = Number(String(value || '').replace(',', '.').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function quantityMatchesWithTolerance(messageQuantity = null, itemQuantity = null) {
+  const left = Number(messageQuantity);
+  const right = Number(itemQuantity);
+  if (!Number.isFinite(left) || !Number.isFinite(right) || right <= 0) return false;
+  const delta = Math.abs(left - right);
+  const relative = delta / Math.max(Math.abs(left), Math.abs(right), 1);
+  return delta <= 0.15 || relative <= 0.1;
+}
+
+function extractQuantityHints(rawMessage = '') {
+  const raw = String(rawMessage || '');
+  if (!raw.trim()) return [];
+  const quantityRegex =
+    /\b(\d+(?:\s*\/\s*\d+)?(?:[.,]\d+)?|media|medio|un\s+medio|una\s+media|un\s+cuarto|una\s+cuarta|cuarto|un\s+tercio|tercio|tres\s+cuartos)\s*(kg|kilos?|kilogramos?|g|gr|gramos?|ml|cc|l|litros?|u|unidad(?:es)?|porciones?|platos?|bochas?|tazas?|vasos?|scoops?|huevos?|rodajas?|cucharadas?|cucharaditas?)\b/giu;
+  const normalizedMap = {
+    kilo: 'kg',
+    kilos: 'kg',
+    kilogramo: 'kg',
+    kilogramos: 'kg',
+    kg: 'kg',
+    gr: 'g',
+    gramo: 'g',
+    gramos: 'g',
+    g: 'g',
+    litro: 'l',
+    litros: 'l',
+    l: 'l',
+    ml: 'ml',
+    cc: 'cc',
+    u: 'unidad',
+    unidad: 'unidad',
+    unidades: 'unidad',
+    porcion: 'porcion',
+    porciones: 'porcion',
+    plato: 'plato',
+    platos: 'plato',
+    bocha: 'bocha',
+    bochas: 'bocha',
+    taza: 'taza',
+    tazas: 'taza',
+    vaso: 'vaso',
+    vasos: 'vaso',
+    scoop: 'scoop',
+    scoops: 'scoop',
+    huevo: 'huevo',
+    huevos: 'huevo',
+    rodaja: 'rodaja',
+    rodajas: 'rodaja',
+    cucharada: 'cucharada',
+    cucharadas: 'cucharada',
+    cucharadita: 'cucharadita',
+    cucharaditas: 'cucharadita',
+  };
+  const fractionMap = {
+    media: 0.5,
+    medio: 0.5,
+    'un medio': 0.5,
+    'una media': 0.5,
+    'un cuarto': 0.25,
+    'una cuarta': 0.25,
+    cuarto: 0.25,
+    'un tercio': 1 / 3,
+    tercio: 1 / 3,
+    'tres cuartos': 0.75,
+  };
+  const hints = [];
+  for (const match of raw.matchAll(quantityRegex)) {
+    const quantityRaw = String(match?.[1] || '').trim();
+    const unitRaw = normalizeText(match?.[2] || '');
+    if (!quantityRaw || !unitRaw) continue;
+    let quantity = fractionMap[normalizeText(quantityRaw)];
+    if (!Number.isFinite(Number(quantity))) {
+      const compact = normalizeText(quantityRaw).replace(/\s+/g, '');
+      if (/^\d+\/\d+$/.test(compact)) {
+        const [numRaw, denRaw] = compact.split('/');
+        const num = Number(numRaw);
+        const den = Number(denRaw);
+        quantity = Number.isFinite(num) && Number.isFinite(den) && den > 0 ? num / den : null;
+      } else {
+        quantity = parseCompactNumber(quantityRaw);
+      }
+    }
+    if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0) continue;
+    hints.push({
+      quantity: Number(quantity),
+      unit: normalizedMap[unitRaw] || unitRaw,
+    });
+  }
+  return hints;
+}
+
+function evaluateParsedItemsAlignment({ rawMessage = '', parsedItems = [] } = {}) {
   const messageTokens = tokenizeForIntakeMatch(rawMessage);
-  if (!messageTokens.length) return true;
-  if (!Array.isArray(parsedItems) || !parsedItems.length) return false;
+  if (!messageTokens.length) {
+    return {
+      aligned: true,
+      score: 1,
+      reason: 'no_message_tokens',
+      tokenOverlapRatio: 1,
+      quantityMatchRatio: 1,
+    };
+  }
+  if (!Array.isArray(parsedItems) || !parsedItems.length) {
+    return {
+      aligned: false,
+      score: 0,
+      reason: 'no_parsed_items',
+      tokenOverlapRatio: 0,
+      quantityMatchRatio: 0,
+    };
+  }
+
+  const quantityHints = extractQuantityHints(rawMessage);
+  const hasQuantityHints = quantityHints.length > 0;
+  let rowsWithTokenOverlap = 0;
+  let catalogRowsWithoutOverlap = 0;
+  let rowsWithQuantityMatch = 0;
+  let hasCatalogAliasResolvedMismatch = false;
+  let parsedItemsWithQuantity = 0;
 
   for (const item of parsedItems) {
     const aliasTokens = tokenizeForIntakeMatch(String(item?.inputAlias || '').trim());
     const resolvedTokens = tokenizeForIntakeMatch(String(item?.foodItem || '').trim());
-    const aliasOverlap = hasApproxTokenOverlap(aliasTokens, messageTokens);
-    const resolvedOverlap = hasApproxTokenOverlap(resolvedTokens, messageTokens);
+    const aliasOverlapCount = countTokenOverlap(aliasTokens, messageTokens);
+    const resolvedOverlapCount = countTokenOverlap(resolvedTokens, messageTokens);
+    const maxOverlapCount = Math.max(aliasOverlapCount, resolvedOverlapCount);
     const hasCatalogResolution =
       Number.isFinite(Number(item?.catalogItemId)) && Number(item?.catalogItemId) > 0
         ? true
         : normalizeCatalogToken(item?.resolutionMode || '') === 'catalog';
 
-    if (hasCatalogResolution) {
-      if (aliasTokens.length && !aliasOverlap) return false;
-      if (resolvedTokens.length && !resolvedOverlap) return false;
-      if (!aliasTokens.length && !resolvedTokens.length) return false;
-      continue;
+    const catalogAliasResolvedMismatch =
+      hasCatalogResolution &&
+      aliasTokens.length > 0 &&
+      resolvedTokens.length > 0 &&
+      aliasOverlapCount > 0 &&
+      resolvedOverlapCount === 0;
+
+    if (maxOverlapCount > 0) {
+      rowsWithTokenOverlap += 1;
+    } else if (hasCatalogResolution) {
+      catalogRowsWithoutOverlap += 1;
+    }
+    if (catalogAliasResolvedMismatch) {
+      hasCatalogAliasResolvedMismatch = true;
+      catalogRowsWithoutOverlap += 1;
     }
 
-    if (aliasTokens.length) {
-      if (!aliasOverlap) return false;
-      continue;
-    }
-    if (resolvedTokens.length && !resolvedOverlap) {
-      return false;
+    if (hasQuantityHints) {
+      const itemQuantity = Number(item?.quantityValue);
+      const itemUnit = normalizeCatalogToken(item?.quantityUnit || '');
+      if (Number.isFinite(itemQuantity) && itemQuantity > 0) {
+        parsedItemsWithQuantity += 1;
+      }
+      const matchedQuantity = quantityHints.some((hint) => {
+        const hintUnit = normalizeCatalogToken(hint.unit || '');
+        const compatibleUnit =
+          !hintUnit ||
+          !itemUnit ||
+          hintUnit === itemUnit ||
+          (hintUnit === 'g' && itemUnit === 'gramo') ||
+          (hintUnit === 'unidad' && itemUnit === 'porcion');
+        if (!compatibleUnit) return false;
+        return quantityMatchesWithTolerance(hint.quantity, itemQuantity);
+      });
+      if (matchedQuantity) {
+        rowsWithQuantityMatch += 1;
+      }
     }
   }
-  return true;
+
+  const tokenOverlapRatio = rowsWithTokenOverlap / Math.max(parsedItems.length, 1);
+  const canValidateQuantity = parsedItemsWithQuantity > 0;
+  const quantityMatchRatio = hasQuantityHints && canValidateQuantity
+    ? rowsWithQuantityMatch / Math.max(quantityHints.length, 1)
+    : 1;
+  const penalizedByCatalogHijack = catalogRowsWithoutOverlap > 0;
+  const baseScore = hasQuantityHints
+    ? tokenOverlapRatio * 0.7 + quantityMatchRatio * 0.3
+    : tokenOverlapRatio;
+  const score = Math.max(0, baseScore - (penalizedByCatalogHijack ? 0.25 : 0));
+  const aligned =
+    score >= 0.55 &&
+    rowsWithTokenOverlap > 0 &&
+    !hasCatalogAliasResolvedMismatch &&
+    (!hasQuantityHints || !canValidateQuantity || rowsWithQuantityMatch > 0 || quantityHints.length > 1);
+
+  return {
+    aligned,
+    score,
+    reason: aligned
+      ? 'ok'
+      : hasCatalogAliasResolvedMismatch
+        ? 'catalog_alias_resolved_mismatch'
+      : penalizedByCatalogHijack
+        ? 'catalog_without_overlap'
+        : hasQuantityHints && rowsWithQuantityMatch === 0
+          ? 'quantity_mismatch'
+          : 'low_overlap',
+    tokenOverlapRatio,
+    quantityMatchRatio,
+  };
+}
+
+function parsedItemsAlignWithUserInput({ rawMessage = '', parsedItems = [] } = {}) {
+  return evaluateParsedItemsAlignment({ rawMessage, parsedItems }).aligned;
 }
 
 function parsedItemsHaveAnyUserOverlap({ rawMessage = '', parsedItems = [] } = {}) {
@@ -1354,10 +1743,9 @@ function enforceExplicitTemporalFromRawMessage({
 
 function buildIntakeSemanticMismatchReply() {
   return [
-    'Necesito confirmar esa ingesta para no registrar algo distinto a lo que escribiste.',
-    'Decimelo en formato directo por item, por ejemplo:',
-    '`13:40 1 taza granola natural`',
-    'Si querés, también podés mandar foto de etiqueta para guardarlo exacto.',
+    'No quiero registrar algo distinto a lo que escribiste.',
+    'Reenviamelo en una sola línea por item, por ejemplo: `13:40 1 taza granola natural`.',
+    'Si fue un producto de paquete, podés mandar foto de etiqueta para mayor precisión.',
   ].join('\n');
 }
 
@@ -1875,6 +2263,10 @@ export function __testParsedItemsAlignWithUserInput(rawMessage = '', parsedItems
   return parsedItemsAlignWithUserInput({ rawMessage, parsedItems });
 }
 
+export function __testEvaluateParsedItemsAlignment(rawMessage = '', parsedItems = []) {
+  return evaluateParsedItemsAlignment({ rawMessage, parsedItems });
+}
+
 export function __testParsedItemsHaveAnyUserOverlap(rawMessage = '', parsedItems = []) {
   return parsedItemsHaveAnyUserOverlap({ rawMessage, parsedItems });
 }
@@ -1911,6 +2303,32 @@ export function __testExtractBatchIntakeLines(rawMessage = '') {
 
 export function __testIsLikelyBatchIntakeMessage(rawMessage = '') {
   return isLikelyBatchIntakeMessage(rawMessage);
+}
+
+export function __testPlanNutritionAction({
+  rawMessage = '',
+  hasMedia = false,
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  return planNutritionAction({
+    rawMessage,
+    hasMedia,
+    userTimeZone,
+  });
+}
+
+export function __testResolveIntakeTargetDeterministic({
+  rawMessage = '',
+  candidateRows = [],
+  explicitIntakeId = null,
+  userTimeZone = DEFAULT_USER_TIMEZONE,
+} = {}) {
+  return resolveIntakeTargetDeterministic({
+    rawMessage,
+    candidateRows,
+    explicitIntakeId,
+    userTimeZone,
+  });
 }
 
 
@@ -2988,6 +3406,34 @@ function clearRecentImageWeighinAction(draftsByUser, userId = '') {
   draftsByUser.delete(key);
 }
 
+function getPendingIntakeOperationContext(contextByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return null;
+  const context = contextByUser.get(key) || null;
+  if (!context) return null;
+  if (Number(context.expiresAt || 0) <= Date.now()) {
+    contextByUser.delete(key);
+    return null;
+  }
+  return context;
+}
+
+function setPendingIntakeOperationContext(contextByUser, userId = '', context = {}) {
+  const key = String(userId || '').trim();
+  if (!key || !context || typeof context !== 'object') return;
+  contextByUser.set(key, {
+    ...context,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + INTAKE_OPERATION_CONTEXT_TTL_MS,
+  });
+}
+
+function clearPendingIntakeOperationContext(contextByUser, userId = '') {
+  const key = String(userId || '').trim();
+  if (!key) return;
+  contextByUser.delete(key);
+}
+
 function looksLikeSummaryQuestion(text = '') {
   return /\b(resumen|summary|rolling|promedio|hoy|como vengo|totales|macros|progreso|mis datos)\b/.test(
     text
@@ -3174,6 +3620,7 @@ export async function bootstrapNutritionBot({ manifest = {} } = {}) {
   const chatIdByUser = new Map();
   const pendingImageIntakeDraftByUser = new Map();
   const recentImageWeighinActionByUser = new Map();
+  const pendingIntakeOperationContextByUser = new Map();
   const dbPath = String(process.env.DB_PATH || manifest?.storage?.db_path || '').trim();
   const defaultBackupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : '';
   const nutritionDbReliability = startNutritionDbReliabilityLoop({
@@ -4047,78 +4494,135 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         } // end else (not tutorial)
       } else {
         // log_intake handler
-        if (!hasMedia && cleanMessage && looksLikeIntakeModifyIntent(cleanMessage)) {
-          const explicitIntakeId = parseIntakeIdFromText(cleanMessage);
-          const temporalHint = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
-          if (!temporalHint.hadExplicitDate && !temporalHint.hadExplicitTime) {
+        const intakeActionPlan = planNutritionAction({
+          rawMessage: cleanMessage,
+          hasMedia,
+          userTimeZone,
+        });
+        const pendingIntakeContext = getPendingIntakeOperationContext(
+          pendingIntakeOperationContextByUser,
+          userId
+        );
+        let resolvedIntakeIntent = intakeActionPlan.intent;
+        if (resolvedIntakeIntent === 'intake_reference' && pendingIntakeContext?.operation === 'modify') {
+          resolvedIntakeIntent = 'modify_intake';
+        } else if (
+          resolvedIntakeIntent === 'intake_reference' &&
+          pendingIntakeContext?.operation === 'delete'
+        ) {
+          resolvedIntakeIntent = 'delete_intake';
+        }
+
+        if (resolvedIntakeIntent === 'query_intakes') {
+          const temporal = resolveTemporalContext({
+            rawMessage: cleanMessage || 'hoy',
+            userTimeZone,
+          });
+          const rows = listNutritionIntakesByDate(userId, temporal.localDate, { limit: 80 });
+          replyText = formatRecentIntakesReply({
+            title: `🧾 Ingestas del ${temporal.localDate}`,
+            rows,
+            localDate: temporal.localDate,
+          });
+          shouldCharge = false;
+        } else if (resolvedIntakeIntent === 'modify_intake') {
+          const explicitIntakeId = intakeActionPlan.explicitIntakeId;
+          const recentRows = listRecentNutritionIntakes(userId, { limit: 40 });
+          if (!recentRows.length) {
+            clearPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId);
+            return 'No tengo ingestas recientes para modificar.';
+          }
+
+          const contextTemporal =
+            pendingIntakeContext?.operation === 'modify' ? pendingIntakeContext.requestedTemporal || null : null;
+          const effectiveTemporalHint = intakeActionPlan.hasExplicitTemporal
+            ? intakeActionPlan.temporalHints
+            : contextTemporal || null;
+          if (
+            !effectiveTemporalHint ||
+            (!effectiveTemporalHint.hadExplicitDate && !effectiveTemporalHint.hadExplicitTime)
+          ) {
             return [
               'Para modificar una ingesta, pasame al menos fecha u hora real.',
               'Ejemplos: `modificar fernet con coca cola fecha 03 de abril`, `modificar la última ingesta hora 23:30` o `modificar ingesta ID 123 hora 23:30`.',
             ].join('\n');
           }
 
-          const targetById = explicitIntakeId
-            ? findNutritionIntakeById(userId, explicitIntakeId)
-            : null;
-          if (explicitIntakeId && !targetById) {
+          let targetId = explicitIntakeId || null;
+          let targetRow = explicitIntakeId ? findNutritionIntakeById(userId, explicitIntakeId) : null;
+          if (explicitIntakeId && !targetRow) {
             return `No encontré la ingesta ID ${explicitIntakeId}.`;
           }
 
-          const recentRows = explicitIntakeId ? [] : listRecentNutritionIntakes(userId, { limit: 30 });
-          if (!explicitIntakeId && !recentRows.length) {
-            return 'No tengo ingestas recientes para modificar.';
+          const contextRows =
+            pendingIntakeContext?.operation === 'modify' && Array.isArray(pendingIntakeContext.candidateRows)
+              ? pendingIntakeContext.candidateRows
+              : [];
+          const candidateRows = contextRows.length ? contextRows : recentRows;
+          if (!targetRow) {
+            const deterministic = resolveIntakeTargetDeterministic({
+              rawMessage: cleanMessage,
+              candidateRows,
+              explicitIntakeId: null,
+              userTimeZone,
+            });
+            if (deterministic.action !== 'cannot_identify') {
+              targetId =
+                deterministic.action === 'delete_last'
+                  ? Number(candidateRows[0]?.id)
+                  : Number(deterministic.targetId);
+              targetRow = recentRows.find((row) => Number(row?.id) === Number(targetId)) || null;
+            }
           }
 
-          let targetId = explicitIntakeId || null;
-          let targetRow = targetById || null;
           if (!targetRow) {
             const modifyTarget = await resolveDeleteTargetWithModel({
               openai,
               modelCandidates: smartModelCandidates,
               rawMessage: cleanMessage,
-              candidateRows: recentRows,
+              candidateRows,
               entityType: 'intake',
               rowsLabel: 'recientes',
               intentLabel: 'modificar',
             });
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, modifyTarget.usage);
-
-            if (modifyTarget.action === 'cannot_identify') {
-              const list = recentRows
-                .slice(0, 8)
-                .map((r) => {
-                  const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
-                  return `- ID ${r.id} | ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
-                })
-                .join('\n');
-              return [
-                'No pude identificar cuál ingesta querés modificar.',
-                'Referenciá el ID, item o la hora.',
-                'Ejemplo: `modificar ingesta ID 123 fecha 03 de abril`.',
-                '',
-                `Ingestas recientes:\n${list}`,
-              ].join('\n');
+            if (modifyTarget.action !== 'cannot_identify') {
+              targetId =
+                modifyTarget.action === 'delete_last'
+                  ? Number(candidateRows[0]?.id)
+                  : Number(modifyTarget.targetId);
+              targetRow = recentRows.find((row) => Number(row?.id) === Number(targetId)) || null;
             }
-
-            targetId =
-              modifyTarget.action === 'delete_last'
-                ? Number(recentRows[0]?.id)
-                : Number(modifyTarget.targetId);
-            targetRow = recentRows.find((row) => Number(row?.id) === targetId) || null;
           }
 
-          if (!targetId) {
-            return 'No pude identificar el registro a modificar. Intentá con más detalle.';
-          }
-          if (!targetRow) {
-            return 'No pude encontrar esa ingesta para modificar. Puede que ya no exista.';
+          if (!targetId || !targetRow) {
+            const list = recentRows
+              .slice(0, 8)
+              .map((r) => {
+                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                return `- ID ${r.id} | ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
+              })
+              .join('\n');
+            setPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId, {
+              operation: 'modify',
+              candidateRows: recentRows.slice(0, 20),
+              requestedTemporal: effectiveTemporalHint,
+            });
+            return [
+              'No pude identificar cuál ingesta querés modificar.',
+              'Referenciá el ID, item o la hora (por ejemplo: `la de las 23:30`).',
+              'Ejemplo: `modificar ingesta ID 123 fecha 03 de abril`.',
+              '',
+              `Ingestas recientes:\n${list}`,
+            ].join('\n');
           }
 
-          const nextLocalDate = temporalHint.hadExplicitDate
-            ? temporalHint.localDate
+          clearPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId);
+          const nextLocalDate = effectiveTemporalHint.hadExplicitDate
+            ? effectiveTemporalHint.localDate
             : String(targetRow.localDate || '').trim();
-          const nextLocalTime = temporalHint.hadExplicitTime
-            ? temporalHint.localTime
+          const nextLocalTime = effectiveTemporalHint.hadExplicitTime
+            ? effectiveTemporalHint.localTime
             : String(targetRow.localTime || '').trim();
           if (!nextLocalDate || !nextLocalTime) {
             return 'No pude resolver la fecha/hora destino de la modificación.';
@@ -4152,48 +4656,80 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             `- Nueva fecha/hora: ${nextLocalDate} ${nextLocalTime}`,
             formatMacroLine('📊 Día actualizado: ', summary.today),
             `🎯 Estado vs objetivo: ${status}`,
+            '🆔 Tip: `modificar ingesta ID <id> ...` o `borrar ingesta ID <id>`.',
           ].join('\n');
           shouldCharge = true;
-        } else if (!hasMedia && cleanMessage && looksLikeDeleteIntent(cleanMessage)) {
-          const explicitIntakeId = parseIntakeIdFromText(cleanMessage);
+        } else if (resolvedIntakeIntent === 'delete_intake') {
+          const explicitIntakeId = intakeActionPlan.explicitIntakeId;
+          const recentRows = listRecentNutritionIntakes(userId, { limit: 40 });
+          if (!recentRows.length) {
+            clearPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId);
+            return 'No tengo ingestas recientes para eliminar.';
+          }
+
           let targetId = explicitIntakeId || null;
           let targetRow = explicitIntakeId ? findNutritionIntakeById(userId, explicitIntakeId) : null;
-
           if (explicitIntakeId && !targetRow) {
             return `No encontré la ingesta ID ${explicitIntakeId}.`;
           }
 
+          const contextRows =
+            pendingIntakeContext?.operation === 'delete' && Array.isArray(pendingIntakeContext.candidateRows)
+              ? pendingIntakeContext.candidateRows
+              : [];
+          const candidateRows = contextRows.length ? contextRows : recentRows;
           if (!targetRow) {
-            const temporal = resolveTemporalContext({ rawMessage: cleanMessage, userTimeZone });
-            const todayRows = getTodayNutritionIntakes(userId, temporal.localDate, { limit: 20 });
-            if (!todayRows.length) {
-              return 'No tenés ingestas registradas hoy para eliminar.';
+            const deterministic = resolveIntakeTargetDeterministic({
+              rawMessage: cleanMessage,
+              candidateRows,
+              explicitIntakeId: null,
+              userTimeZone,
+            });
+            if (deterministic.action !== 'cannot_identify') {
+              targetId =
+                deterministic.action === 'delete_last'
+                  ? Number(candidateRows[0]?.id)
+                  : Number(deterministic.targetId);
+              targetRow = recentRows.find((row) => Number(row?.id) === Number(targetId)) || null;
             }
+          }
+
+          if (!targetRow) {
             const deleteResult = await resolveDeleteTargetWithModel({
-              openai, modelCandidates: smartModelCandidates,
-              rawMessage: cleanMessage, todayRows, entityType: 'intake',
+              openai,
+              modelCandidates: smartModelCandidates,
+              rawMessage: cleanMessage,
+              candidateRows,
+              entityType: 'intake',
+              rowsLabel: 'recientes',
+              intentLabel: 'borrar',
             });
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, deleteResult.usage);
-            if (deleteResult.action === 'cannot_identify') {
-              const list = todayRows
-                .slice(0, 8)
-                .map((r) => {
-                  const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
-                  return `- ID ${r.id} | ${r.localTime || '?'} → ${r.foodItem}${qty ? ' ' + qty : ''}`;
-                })
-                .join('\n');
-              return `No identifiqué cuál borrar. Ingestas de hoy:\n${list}\nDecime cuál: "borrá ingesta ID 123", "borrá el pollo de las 13:30" o "borrá la última".`;
+            if (deleteResult.action !== 'cannot_identify') {
+              targetId =
+                deleteResult.action === 'delete_last'
+                  ? Number(candidateRows[0]?.id)
+                  : Number(deleteResult.targetId);
+              targetRow = recentRows.find((row) => Number(row?.id) === Number(targetId)) || null;
             }
-            targetId =
-              deleteResult.action === 'delete_last'
-                ? Number(todayRows[0]?.id)
-                : Number(deleteResult.targetId);
-            targetRow = todayRows.find((row) => Number(row?.id) === Number(targetId)) || null;
           }
 
           if (!targetId || !targetRow) {
-            return 'No pude identificar el registro. Intentá con más detalle.';
+            const list = recentRows
+              .slice(0, 8)
+              .map((r) => {
+                const qty = [r.quantityValue, r.quantityUnit].filter(Boolean).join(' ');
+                return `- ID ${r.id} | ${r.localDate} ${r.localTime || '?'} → ${r.foodItem}${qty ? ` ${qty}` : ''}`;
+              })
+              .join('\n');
+            setPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId, {
+              operation: 'delete',
+              candidateRows: recentRows.slice(0, 20),
+            });
+            return `No identifiqué cuál borrar.\n${list}\nDecime cuál: "borrá ingesta ID 123", "borrá el pollo de las 13:30" o "borrá la última".`;
           }
+
+          clearPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId);
           const deleted = deleteNutritionIntake(userId, targetId);
           if (!deleted?.ok || !deleted.deleted) {
             return '❌ No pude eliminar ese registro. Puede que ya no exista.';
@@ -4261,6 +4797,25 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
         let shouldRequestLabelPhotoHint = false;
         let includeConfidenceInReply = false;
         let parsedBatch = null;
+        let intakeParseStage = 'none';
+        const parseStartedAtMs = Date.now();
+        const emitIntakeParseTrace = ({
+          ok = false,
+          reasonCode = '',
+          stage = intakeParseStage,
+          unresolvedCount = 0,
+          isBatch = false,
+        } = {}) => {
+          recordIntakeParseTrace(userId, {
+            ok,
+            stage,
+            reasonCode,
+            unresolvedCount,
+            latencyMs: Date.now() - parseStartedAtMs,
+            hasMedia,
+            isBatch,
+          });
+        };
 
         if (!hasMedia && cleanMessage) {
           const pendingDraft = getPendingImageIntakeDraft(pendingImageIntakeDraftByUser, userId);
@@ -4274,11 +4829,17 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
               parsed = consumedDraft.parsed;
               shouldRequestLabelPhotoHint = Boolean(consumedDraft.shouldRequestLabelPhotoHint);
               includeConfidenceInReply = true;
+              intakeParseStage = 'image_draft_confirm';
             }
           }
         }
 
-        if (!parsed && !hasMedia && cleanMessage && isLikelyBatchIntakeMessage(cleanMessage)) {
+        if (
+          !parsed &&
+          !hasMedia &&
+          cleanMessage &&
+          (resolvedIntakeIntent === 'log_intake_batch' || isLikelyBatchIntakeMessage(cleanMessage))
+        ) {
           parsedBatch = await parseBatchIntakeTextWithModels({
             openai,
             modelCandidates: smartModelCandidates,
@@ -4304,7 +4865,34 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             });
           }
           if (!parsedBatch?.ok) {
-            return buildBatchIntakeFailureReply(parsedBatch.failedLines || []);
+            if (
+              parsedBatch?.error === 'batch_partial_resolution' &&
+              Array.isArray(parsedBatch.entries) &&
+              parsedBatch.entries.length
+            ) {
+              parsedBatch = {
+                ...parsedBatch,
+                ok: true,
+                partial: true,
+                rows: Array.isArray(parsedBatch.rows)
+                  ? parsedBatch.rows
+                  : parsedBatch.entries.flatMap((entry) => entry?.rowsWithTemporal || []),
+              };
+              intakeParseStage = 'batch_partial';
+            } else {
+              emitIntakeParseTrace({
+                ok: false,
+                stage: 'batch',
+                reasonCode: String(parsedBatch?.error || 'batch_parse_failed'),
+                unresolvedCount: Array.isArray(parsedBatch?.failedLines)
+                  ? parsedBatch.failedLines.length
+                  : 0,
+                isBatch: true,
+              });
+              return buildBatchIntakeFailureReply(parsedBatch.failedLines || []);
+            }
+          } else {
+            intakeParseStage = 'batch';
           }
           includeConfidenceInReply = includeConfidenceInReply || Boolean(parsedBatch.includeConfidenceInReply);
           shouldRequestLabelPhotoHint =
@@ -4468,6 +5056,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
               ].join('\n');
             }
             parsed = parsedFromImage;
+            intakeParseStage = 'image_meal';
           }
         }
 
@@ -4528,6 +5117,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
               userTimeZone,
               parsed: parsedFromStructured,
             });
+            intakeParseStage = 'structured';
           }
         }
 
@@ -4574,6 +5164,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
               userTimeZone,
               parsed: parsedFromModel,
             });
+            intakeParseStage = 'normalized';
           }
         }
 
@@ -4588,6 +5179,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
               userTimeZone,
               parsed: lexicalParsed,
             });
+            intakeParseStage = 'lexical';
           } else {
             parsed = lexicalParsed;
           }
@@ -4602,6 +5194,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             modelStructured?.action === 'ask_label_photo' ||
             (modelStructured?.shouldRequestLabelPhoto && !lexicalParsed?.ok)
           ) {
+            emitIntakeParseTrace({ ok: false, stage: intakeParseStage, reasonCode: 'ask_label_photo' });
             return [
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
               'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
@@ -4610,9 +5203,11 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             ].join('\n');
           }
           if (modelStructured?.action === 'ask_clarification' && modelStructured.clarificationQuestion) {
+            emitIntakeParseTrace({ ok: false, stage: intakeParseStage, reasonCode: 'ask_clarification_structured' });
             return [modelStructured.clarificationQuestion, buildPhotoHintLine()].join('\n');
           }
           if (modelNormalization?.action === 'ask_label_photo') {
+            emitIntakeParseTrace({ ok: false, stage: intakeParseStage, reasonCode: 'ask_label_photo_normalized' });
             return [
               'Para registrar ese producto con buena precision necesito la etiqueta nutricional.',
               'Mandame foto clara de la tabla (porción, kcal, proteínas, carbos, grasas).',
@@ -4621,9 +5216,16 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             ].join('\n');
           }
           if (modelNormalization?.action === 'ask_clarification' && modelNormalization.clarificationQuestion) {
+            emitIntakeParseTrace({ ok: false, stage: intakeParseStage, reasonCode: 'ask_clarification_normalized' });
             return [modelNormalization.clarificationQuestion, buildPhotoHintLine()].join('\n');
           }
           if (parsed?.error === 'partial_resolution' && parsed.unresolvedItems?.length) {
+            emitIntakeParseTrace({
+              ok: false,
+              stage: intakeParseStage,
+              reasonCode: 'partial_resolution',
+              unresolvedCount: parsed.unresolvedItems.length,
+            });
             return [
               'Necesito aclarar algunos items antes de registrar.',
               `No pude interpretar: ${parsed.unresolvedItems.join(', ')}`,
@@ -4632,11 +5234,17 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             ].join('\n');
           }
           if (hasMedia && !cleanMessage) {
+            emitIntakeParseTrace({ ok: false, stage: intakeParseStage, reasonCode: 'unclear_image' });
             return [
               'No pude inferir la comida con suficiente claridad.',
               'Si querés, mandame otra foto más nítida o texto simple: `hora + lo ingerido`.',
             ].join('\n');
           }
+          emitIntakeParseTrace({
+            ok: false,
+            stage: intakeParseStage,
+            reasonCode: String(parsed?.error || 'parse_failed'),
+          });
           return [
             'No pude detectar una ingesta registrable.',
             'Formato recomendado: `13:30 200g pollo + 150g arroz`.',
@@ -4651,15 +5259,19 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             parsed,
           });
           const strictAlignmentRequired = !hasMedia;
-          const alignedWithUserInput = strictAlignmentRequired
-            ? parsedItemsAlignWithUserInput({
+          const alignmentEvaluation = strictAlignmentRequired
+            ? evaluateParsedItemsAlignment({
                 rawMessage: cleanMessage,
                 parsedItems: parsed?.items || [],
               })
-            : parsedItemsHaveAnyUserOverlap({
-                rawMessage: cleanMessage,
-                parsedItems: parsed?.items || [],
-              });
+            : {
+                aligned: parsedItemsHaveAnyUserOverlap({
+                  rawMessage: cleanMessage,
+                  parsedItems: parsed?.items || [],
+                }),
+                reason: 'non_strict_media_alignment',
+              };
+          const alignedWithUserInput = Boolean(alignmentEvaluation?.aligned);
           if (!alignedWithUserInput) {
             const repaired = tryRepairParsedFromStructured({
               rawMessage: cleanMessage,
@@ -4672,6 +5284,11 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             if (repaired?.ok) {
               parsed = repaired;
             } else {
+              emitIntakeParseTrace({
+                ok: false,
+                stage: intakeParseStage,
+                reasonCode: `semantic_mismatch:${String(alignmentEvaluation?.reason || 'unknown')}`,
+              });
               return buildIntakeSemanticMismatchReply();
             }
           }
@@ -4747,6 +5364,7 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
           intakeWrites.push(intakeWrite);
         }
         pendingImageIntakeDraftByUser.delete(userId);
+        clearPendingIntakeOperationContext(pendingIntakeOperationContextByUser, userId);
         if (!intakeRowsForReply.length) {
           intakeRowsForReply = parsedBatch?.ok
             ? parsedBatch.rows || []
@@ -4829,6 +5447,17 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
             .filter(Boolean)
         )].join('\n');
         const isBatchFlow = Boolean(parsedBatch?.ok);
+        const hasPartialBatchFailures = Boolean(
+          parsedBatch?.partial &&
+            Array.isArray(parsedBatch?.failedLines) &&
+            parsedBatch.failedLines.length
+        );
+        const unresolvedBatchPreview = hasPartialBatchFailures
+          ? parsedBatch.failedLines
+              .slice(0, 6)
+              .map((row) => `- ${row?.line || '(línea vacía)'}`)
+              .join('\n')
+          : '';
         const summaryLines =
           uniqueDates.length <= 1
             ? [
@@ -4841,11 +5470,24 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
                 return formatMacroLine(`📊 ${localDate}: `, localSummary?.today || {});
               });
 
+        emitIntakeParseTrace({
+          ok: true,
+          stage: intakeParseStage || (isBatchFlow ? 'batch' : 'unknown'),
+          reasonCode: parsedBatch?.partial ? 'batch_partial_saved' : 'saved',
+          unresolvedCount:
+            parsedBatch?.partial && Array.isArray(parsedBatch?.failedLines)
+              ? parsedBatch.failedLines.length
+              : 0,
+          isBatch: isBatchFlow,
+        });
         replyText = [
           isBatchFlow
             ? `✅ OK, quedaron anotadas ${parsedBatch.entries.length} ingestas.`
             : `Fecha: ${parsed.temporal.localDate} | Hora: ${parsed.temporal.localTime}`,
           isBatchFlow ? `Fecha base: ${primaryDate}` : 'OK, quedó anotado.',
+          hasPartialBatchFailures
+            ? `⚠️ Algunas líneas no se pudieron registrar:\n${unresolvedBatchPreview}\nCorregilas en texto simple (ej: \`13:30 200g pollo + 150g arroz\`).`
+            : null,
           ...buildIntakeDetailsBlock({
             title: isBatchFlow ? '🧾 Detalle registrado (por línea)' : '🧾 Detalle registrado',
             rows: intakeRowsForReply,
@@ -4931,6 +5573,12 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
     appName: displayName,
     botId,
     billingClient,
+    statusProvider: () => ({
+      telegram: typeof telegram?.getRuntimeStatus === 'function' ? telegram.getRuntimeStatus() : null,
+      nutritionDbReliability: typeof nutritionDbReliability?.getStatus === 'function'
+        ? nutritionDbReliability.getStatus()
+        : null,
+    }),
     onTopupApplied: async (event = {}) => {
       if (!telegram?.sendSystemMessage) return;
       const userId = String(event.user_id || '').trim();

@@ -25,11 +25,14 @@ import {
 } from '../src/bots/nutrition/nutritionDomain.js';
 import {
   __testExtractBatchIntakeLines,
+  __testEvaluateParsedItemsAlignment,
   __testEnforceExplicitTemporalFromRawMessage,
   __testIsLikelyBatchIntakeMessage,
   __testNormalizeVisualWeighinPayload,
+  __testPlanNutritionAction,
   __testParsedItemsHaveAnyUserOverlap,
   __testParsedItemsAlignWithUserInput,
+  __testResolveIntakeTargetDeterministic,
   __testResolveTemporalFromStructured,
 } from '../src/bots/nutrition/runtime.js';
 
@@ -108,6 +111,54 @@ export async function runNutritionDomainTests() {
   });
   assert.equal(twoItemsWithPlusSeparator.ok, true);
   assert.equal(twoItemsWithPlusSeparator.items.length, 2);
+
+  const colloquialUnitParsed = parseIntakePayload({
+    rawMessage: '13:30 2 platos arroz cocido',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(colloquialUnitParsed.ok, true);
+  assert.equal(colloquialUnitParsed.items[0].quantityUnit, 'plato');
+  assert.equal(colloquialUnitParsed.items[0].quantityValue, 2);
+
+  const fractionUnitParsed = parseIntakePayload({
+    rawMessage: '13:30 1/3 taza arroz cocido',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(fractionUnitParsed.ok, true);
+  assert.equal(Number(fractionUnitParsed.items[0].quantityValue).toFixed(2), '0.33');
+  assert.equal(fractionUnitParsed.items[0].quantityUnit, 'taza');
+
+  const parsedRealWorldRavioles = parseIntakePayload({
+    rawMessage: 'registrame el 04 de abril a las 12:30hs 2 platos de ravioles de ricota con tuco y estofado',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+    now: new Date('2026-04-10T03:00:00.000Z'),
+  });
+  assert.equal(parsedRealWorldRavioles.ok, true);
+  assert.equal(parsedRealWorldRavioles.temporal.localDate, '2026-04-04');
+  assert.equal(parsedRealWorldRavioles.temporal.localTime, '12:30');
+  assert.equal(parsedRealWorldRavioles.items.length >= 1, true);
+  assert.match(String(parsedRealWorldRavioles.items[0].foodItem || ''), /raviol/i);
+  assert.equal(parsedRealWorldRavioles.items[0].quantityValue, 2);
+  assert.equal(parsedRealWorldRavioles.items[0].quantityUnit, 'plato');
+
+  const parsedCompoundSingleLine = parseIntakePayload({
+    rawMessage: 'cena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco',
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(parsedCompoundSingleLine.ok, true);
+  assert.equal(parsedCompoundSingleLine.items.length >= 2, true);
+  assert.equal(
+    parsedCompoundSingleLine.items.some((item) =>
+      /huevo/i.test(String(item?.foodItem || ''))
+    ),
+    true
+  );
+  assert.equal(
+    parsedCompoundSingleLine.items.some((item) =>
+      /arroz/i.test(String(item?.foodItem || ''))
+    ),
+    true
+  );
 
   const parsedRelative = parseIntakePayload({
     rawMessage: 'ayer 20:15 100g pechuga de pollo cocida',
@@ -584,6 +635,38 @@ export async function runNutritionDomainTests() {
   );
   assert.equal(strictImageAlignment, false);
 
+  const weightedAlignment = __testEvaluateParsedItemsAlignment(
+    '13:30 2 platos arroz cocido',
+    [
+      {
+        foodItem: 'arroz cocido',
+        inputAlias: 'arroz cocido',
+        quantityValue: 2,
+        quantityUnit: 'plato',
+        catalogItemId: 11,
+        resolutionMode: 'catalog',
+      },
+    ]
+  );
+  assert.equal(weightedAlignment.aligned, true);
+  assert.equal(weightedAlignment.reason, 'ok');
+
+  const weightedQuantityMismatch = __testEvaluateParsedItemsAlignment(
+    '13:30 2 platos arroz cocido',
+    [
+      {
+        foodItem: 'arroz cocido',
+        inputAlias: 'arroz cocido',
+        quantityValue: 1,
+        quantityUnit: 'plato',
+        catalogItemId: 11,
+        resolutionMode: 'catalog',
+      },
+    ]
+  );
+  assert.equal(weightedQuantityMismatch.aligned, false);
+  assert.equal(weightedQuantityMismatch.reason, 'quantity_mismatch');
+
   const softImageAlignment = __testParsedItemsHaveAnyUserOverlap(
     'mi cena: milanesa de pollo y ensalada de tomate con palta',
     [
@@ -672,6 +755,42 @@ cena 23:30hs 4 huevos duros y 1/3 taza de arroz blanco`;
     __testIsLikelyBatchIntakeMessage('13:30 200g pollo + 150g arroz'),
     false
   );
+
+  const actionPlanBatch = __testPlanNutritionAction({
+    rawMessage: batchInput,
+    hasMedia: false,
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(actionPlanBatch.intent, 'log_intake_batch');
+
+  const actionPlanModify = __testPlanNutritionAction({
+    rawMessage: 'modificar ingesta ID 321 hora 23:30',
+    hasMedia: false,
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(actionPlanModify.intent, 'modify_intake');
+  assert.equal(actionPlanModify.explicitIntakeId, 321);
+
+  const deterministicTarget = __testResolveIntakeTargetDeterministic({
+    rawMessage: 'modificar la de las 23:30',
+    candidateRows: [
+      {
+        id: 101,
+        localDate: '2026-04-04',
+        localTime: '12:30',
+        foodItem: 'ravioles de ricota',
+      },
+      {
+        id: 102,
+        localDate: '2026-04-04',
+        localTime: '23:30',
+        foodItem: 'huevos duros',
+      },
+    ],
+    userTimeZone: 'America/Argentina/Buenos_Aires',
+  });
+  assert.equal(deterministicTarget.action, 'delete_single');
+  assert.equal(deterministicTarget.targetId, 102);
 
   const temporal = resolveTemporalContext({
     rawMessage: '13:05 pollo',

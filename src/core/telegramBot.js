@@ -18,6 +18,12 @@ const MAX_AUDIO_TRANSCRIPT_CHARS = Number(
 const MEDIA_GROUP_FLUSH_MS = Number(process.env.MEDIA_GROUP_FLUSH_MS ?? '900');
 const FFMPEG_BINARY = ffmpegPath || 'ffmpeg';
 const TYPING_ACTION_INTERVAL_MS = Number(process.env.TYPING_ACTION_INTERVAL_MS ?? '4500');
+const POLLING_IDLE_WATCHDOG_MS = Number(
+  process.env.TELEGRAM_POLLING_IDLE_WATCHDOG_MS ?? String(4 * 60 * 1000)
+);
+const POLLING_WATCHDOG_INTERVAL_MS = Number(
+  process.env.TELEGRAM_POLLING_WATCHDOG_INTERVAL_MS ?? '30000'
+);
 const CALLBACK_DEDUP_WINDOW_MS = Number(
   process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ?? '2500'
 );
@@ -1267,6 +1273,18 @@ export function startTelegramBot(router, options = {}) {
       CALLBACK_DEDUP_MAX_KEYS_PER_CHAT,
     CALLBACK_DEDUP_MAX_KEYS_PER_CHAT
   );
+  const pollingIdleWatchdogMs = toPositiveInt(
+    options.pollingIdleWatchdogMs ??
+      process.env.TELEGRAM_POLLING_IDLE_WATCHDOG_MS ??
+      POLLING_IDLE_WATCHDOG_MS,
+    POLLING_IDLE_WATCHDOG_MS
+  );
+  const pollingWatchdogIntervalMs = toPositiveInt(
+    options.pollingWatchdogIntervalMs ??
+      process.env.TELEGRAM_POLLING_WATCHDOG_INTERVAL_MS ??
+      POLLING_WATCHDOG_INTERVAL_MS,
+    POLLING_WATCHDOG_INTERVAL_MS
+  );
   const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : Date.now;
   const defaultGuidedAction = getDefaultGuidedAction({
     guidedMenuId,
@@ -1285,6 +1303,25 @@ export function startTelegramBot(router, options = {}) {
     lastAttemptAt: 0,
     cooldownMs: 30_000,
   };
+  const pollingStatus = {
+    startedAt: Date.now(),
+    lastUpdateAt: Date.now(),
+    lastMessageAt: 0,
+    lastCallbackAt: 0,
+    lastPollingErrorAt: 0,
+    lastRecoveryAt: 0,
+    recoveryCount: 0,
+    lastRecoveryReason: '',
+    lastErrorMessage: '',
+    watchdogChecks: 0,
+  };
+
+  function touchPollingActivity(kind = 'update') {
+    const nowMs = Date.now();
+    pollingStatus.lastUpdateAt = nowMs;
+    if (kind === 'message') pollingStatus.lastMessageAt = nowMs;
+    if (kind === 'callback') pollingStatus.lastCallbackAt = nowMs;
+  }
 
   async function recoverPolling(reason = '') {
     if (typeof bot.stopPolling !== 'function' || typeof bot.startPolling !== 'function') {
@@ -1296,6 +1333,7 @@ export function startTelegramBot(router, options = {}) {
 
     pollingRecovery.inFlight = true;
     pollingRecovery.lastAttemptAt = nowMs;
+    pollingStatus.lastRecoveryReason = String(reason || '').slice(0, 240);
     try {
       await bot.stopPolling({ cancel: true });
     } catch (stopError) {
@@ -1303,12 +1341,30 @@ export function startTelegramBot(router, options = {}) {
     }
     try {
       await bot.startPolling();
+      touchPollingActivity('update');
+      pollingStatus.lastRecoveryAt = Date.now();
+      pollingStatus.recoveryCount += 1;
       console.log(`[telegram] polling recovered${reason ? ` (${reason})` : ''}`);
     } catch (startError) {
+      pollingStatus.lastErrorMessage = String(startError?.message || startError || '').slice(0, 500);
       console.error('[telegram] polling recovery start failed', startError?.message || startError);
     } finally {
       pollingRecovery.inFlight = false;
     }
+  }
+
+  const pollingWatchdogTimer =
+    pollingIdleWatchdogMs > 0 && pollingWatchdogIntervalMs > 0
+      ? setInterval(() => {
+          pollingStatus.watchdogChecks += 1;
+          const nowMs = Date.now();
+          const idleMs = nowMs - Number(pollingStatus.lastUpdateAt || nowMs);
+          if (idleMs < pollingIdleWatchdogMs) return;
+          void recoverPolling(`watchdog_idle_${idleMs}ms`);
+        }, pollingWatchdogIntervalMs)
+      : null;
+  if (pollingWatchdogTimer && typeof pollingWatchdogTimer.unref === 'function') {
+    pollingWatchdogTimer.unref();
   }
 
   function getMenuScope(chatId) {
@@ -1658,6 +1714,7 @@ export function startTelegramBot(router, options = {}) {
 
   async function processSingleMessage(msg) {
     const chatId = msg.chat.id;
+    touchPollingActivity('message');
     let userMessage = msg.text || msg.caption || '';
 
     const inputItems = [];
@@ -1766,6 +1823,7 @@ export function startTelegramBot(router, options = {}) {
   }
 
   function enqueueMediaGroup(msg) {
+    touchPollingActivity('message');
     const groupId = msg.media_group_id;
     if (!groupId) return;
 
@@ -1892,6 +1950,7 @@ export function startTelegramBot(router, options = {}) {
     if (!chatId) {
       return;
     }
+    touchPollingActivity('callback');
     const safeUserId = query?.from?.id ? String(query.from.id) : '';
 
     if (
@@ -2561,6 +2620,8 @@ export function startTelegramBot(router, options = {}) {
 
   bot.on('polling_error', (error) => {
     const message = String(error?.message || error || '').trim() || 'unknown_polling_error';
+    pollingStatus.lastPollingErrorAt = Date.now();
+    pollingStatus.lastErrorMessage = message.slice(0, 500);
     console.error('[telegram] polling_error', message);
     const lowered = message.toLowerCase();
     if (
@@ -2575,6 +2636,7 @@ export function startTelegramBot(router, options = {}) {
 
   bot.on('error', (error) => {
     const message = String(error?.message || error || '').trim() || 'unknown_telegram_error';
+    pollingStatus.lastErrorMessage = message.slice(0, 500);
     console.error('[telegram] error', message);
   });
 
@@ -2583,9 +2645,33 @@ export function startTelegramBot(router, options = {}) {
   return {
     bot,
     interactionMode,
+    getRuntimeStatus() {
+      const nowMs = Date.now();
+      return {
+        startedAt: pollingStatus.startedAt,
+        lastUpdateAt: pollingStatus.lastUpdateAt,
+        lastMessageAt: pollingStatus.lastMessageAt,
+        lastCallbackAt: pollingStatus.lastCallbackAt,
+        lastPollingErrorAt: pollingStatus.lastPollingErrorAt,
+        lastRecoveryAt: pollingStatus.lastRecoveryAt,
+        recoveryCount: pollingStatus.recoveryCount,
+        lastRecoveryReason: pollingStatus.lastRecoveryReason,
+        lastErrorMessage: pollingStatus.lastErrorMessage,
+        watchdogChecks: pollingStatus.watchdogChecks,
+        idleMs: nowMs - Number(pollingStatus.lastUpdateAt || nowMs),
+        watchdogIdleThresholdMs: pollingIdleWatchdogMs,
+        watchdogIntervalMs: pollingWatchdogIntervalMs,
+        pollingRecoveryInFlight: Boolean(pollingRecovery.inFlight),
+      };
+    },
     async sendSystemMessage({ chatId, text } = {}) {
       if (!chatId || !text) return null;
       return sendBotMessage(chatId, text);
+    },
+    close() {
+      if (pollingWatchdogTimer) {
+        clearInterval(pollingWatchdogTimer);
+      }
     },
   };
 }
