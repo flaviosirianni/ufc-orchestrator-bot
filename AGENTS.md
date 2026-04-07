@@ -41,7 +41,8 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
 ### Flujo estandar de deploy (si el usuario no indica otra cosa)
 
 1. Validar local:
-   - Ejecutar tests relevantes (ideal: `npm test`).
+   - Ejecutar gate obligatorio de paridad Nutrition antes de push: `npm run prepush:nutrition`.
+   - Si falla, no continuar con commit/push hasta resolver `code_parity`, `env_parity` o `test_matrix`.
 2. Preparar commit:
    - No incluir `data/bot.db-wal` ni `data/bot.db-shm` en commit.
    - Incluir solo archivos funcionales/documentacion/tests requeridos.
@@ -50,6 +51,7 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
    - `git commit -m "<mensaje claro>"`
    - `git push origin main`
 4. Refrescar servidor:
+   - Antes de refresh, volver a correr `npm run prepush:nutrition` si hubo cambios locales desde la ultima corrida.
    - `ssh ufc-oci 'cd /home/ubuntu/apps/bot-factory && git pull --ff-only && sudo systemctl restart billing-service && sudo systemctl restart bot-factory@ufc && sudo systemctl status bot-factory@ufc --no-pager -l | sed -n "1,25p"'`
 5. Verificacion post-restart:
    - Logs recientes:

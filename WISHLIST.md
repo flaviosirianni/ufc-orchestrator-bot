@@ -1073,7 +1073,16 @@ Revision de estado: `2026-04-02` (post migracion a arquitectura Core + Bots, dep
      - Decision abierta: definir si dev comparte `SHEET_ID` productivo o usa sandbox.
      - Decision abierta: definir politica de seeds/mocks para creditos y pagos en dev.
    - **Prioridad:** media.
-   - **Estado:** pendiente.
+   - **Estado:** en progreso.
+   - **Avance (2026-04-06):**
+     - baseline de paridad Nutrition versionado en `ops/parity/*` (required keys, invariants, local safety).
+     - gate obligatorio antes de push/deploy (`npm run prepush:nutrition`) con code parity local↔origin↔live + matrix prod-like.
+     - hook versionado `.githooks/pre-push` y setup `ops/scripts/setup-git-hooks.sh`.
+     - plantilla local segura `.env.nutrition.local.example` para evitar uso accidental de recursos prod.
+   - **Proximos pasos fase 2 (UFC parity):**
+     - replicar `ops/parity/*.json` para `ufc`.
+     - agregar `parity:env:ufc` y `qa:parity:ufc` con matrix UFC equivalente.
+     - extender hook para ejecutar gate segun `BOT_ID` objetivo o doble gate (`nutrition` + `ufc`) cuando aplique.
 
 34. **Nuevo esquema de recargas y creditos (packs flexibles en ARS)**
    - **Objetivo de negocio/UX:** ofrecer opciones de recarga mas naturales para el usuario final y una equivalencia ARS->creditos consistente, simple de entender y sostenible.

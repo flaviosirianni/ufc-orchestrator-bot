@@ -20,6 +20,16 @@ function parseLine(line) {
   return [key, value];
 }
 
+function expandCommonEnvVars(rawValue = '') {
+  const value = String(rawValue || '').trim();
+  if (!value) return value;
+  const home = String(process.env.HOME || '').trim();
+  if (!home) return value;
+  return value
+    .replace(/^\$HOME\b/, home)
+    .replace(/^\$\{HOME\}/, home);
+}
+
 function resolveEnvPath() {
   const currentModulePath = fileURLToPath(import.meta.url);
   const projectRoot = path.resolve(path.dirname(currentModulePath), '..', '..');
@@ -86,7 +96,7 @@ export function loadEnv() {
         if (externalEnvKeys.has(key)) {
           return;
         }
-        process.env[key] = value;
+        process.env[key] = expandCommonEnvVars(value);
       });
   }
 }

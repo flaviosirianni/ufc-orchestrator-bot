@@ -1,0 +1,20 @@
+{
+  "bot": "nutrition",
+  "source": "/etc/bot-factory/nutrition.env",
+  "required_keys": [
+    "APP_PUBLIC_URL",
+    "BILLING_API_TOKEN",
+    "BILLING_BASE_URL",
+    "BILLING_FREE_WEEKLY",
+    "BOT_ALLOWED_TELEGRAM_USER_IDS",
+    "BOT_ID",
+    "BOT_POLICY_PACK",
+    "DB_PATH",
+    "DEFAULT_USER_TIMEZONE",
+    "INTERACTION_MODE",
+    "NUTRITION_TELEGRAM_BOT_TOKEN",
+    "OPENAI_API_KEY",
+    "PORT",
+    "TELEGRAM_INTERACTION_MODE"
+  ]
+}

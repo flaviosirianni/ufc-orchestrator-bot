@@ -1,0 +1,13 @@
+{
+  "bot": "nutrition",
+  "db_path": {
+    "required": true,
+    "forbidden_prefixes": [
+      "/home/ubuntu/"
+    ]
+  },
+  "token_diff": {
+    "local_env_key": "NUTRITION_TELEGRAM_BOT_TOKEN",
+    "live_env_key": "NUTRITION_TELEGRAM_BOT_TOKEN"
+  }
+}

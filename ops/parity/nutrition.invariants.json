@@ -1,0 +1,10 @@
+{
+  "bot": "nutrition",
+  "invariants": {
+    "BOT_ID": "nutrition",
+    "INTERACTION_MODE": "guided_strict",
+    "TELEGRAM_INTERACTION_MODE": "guided_strict",
+    "BOT_POLICY_PACK": "nutrition_guidance_non_clinical",
+    "DEFAULT_USER_TIMEZONE": "America/Argentina/Buenos_Aires"
+  }
+}

@@ -47,6 +47,28 @@ BOT_ID=nutrition npm run start:bot
 BOT_ID=medical_reader npm run start:bot
 ```
 
+### Local Development (prod-like safe, Nutrition)
+
+Para trabajar Nutrition en local sin riesgo sobre prod:
+
+1. Crear perfil local:
+```bash
+cp .env.nutrition.local.example .env.nutrition
+```
+2. Completar secretos dev en `.env.nutrition` (token Telegram dev, OpenAI key, billing token dev).
+3. Ejecutar gate de paridad + matrix prod-like:
+```bash
+npm run qa:parity:nutrition
+```
+4. Activar hook versionado para no saltearse el gate antes de push:
+```bash
+./ops/scripts/setup-git-hooks.sh
+```
+
+Diferencia clave:
+- `prod-like safe`: replica invariantes y checks de prod, pero con `DB_PATH`, token y secretos de desarrollo aislados.
+- `prod real`: usa secretos y paths del server (`/etc/bot-factory/*.env`, `/home/ubuntu/bot-data/...`) y no debe ejecutarse desde la laptop.
+
 ### Scaffold de nuevos bots
 
 Generador:
@@ -369,6 +391,8 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
   - `npm run nutrition:baseline` (replay corpus + métricas base de parseo/intención)
   - `npm run nutrition:metrics` (resumen diario + alerta por tasa de fallos de parseo)
   - `npm run nutrition:smoke` (smoke operativo: `/health` y opcional envío `/start` + probe por Telegram)
+  - `npm run parity:env:nutrition` (doctor de paridad env local↔live, sin exponer secretos)
+  - `npm run qa:parity:nutrition` (gate completo: code parity + env parity + test matrix prod-like)
 
 #### UFC DB Reliability
 
