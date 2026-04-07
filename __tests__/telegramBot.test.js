@@ -1070,6 +1070,113 @@ export async function runTelegramBotTests() {
     assert.deepEqual(extractCallbackDataList(out), ['menu:nutrition_aprendizaje']);
   });
 
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const calls = [];
+    let releaseRoute;
+    const routeLock = new Promise((resolve) => {
+      releaseRoute = resolve;
+    });
+    const router = {
+      calls,
+      async routeMessage(payload) {
+        calls.push(payload);
+        await routeLock;
+        return 'ROUTED_OK';
+      },
+    };
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      messageDedupWindowMs: 5000,
+      busyNoticeCooldownMs: 60000,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    const duplicated = createBaseMessage({
+      messageId: 1501,
+      text: '16:30 1 yogur proteico + 1 scoop whey',
+    });
+
+    const first = fakeBot.emit('message', duplicated);
+    await sleep(5);
+    await fakeBot.emit('message', { ...duplicated });
+    await sleep(5);
+
+    assert.equal(router.calls.length, 1);
+    const busyCount = fakeBot.sentMessages.filter((row) =>
+      /estoy respondiendo tu mensaje anterior/i.test(String(row?.text || ''))
+    ).length;
+    assert.equal(busyCount, 0);
+
+    releaseRoute();
+    await first;
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const calls = [];
+    let releaseRoute;
+    const routeLock = new Promise((resolve) => {
+      releaseRoute = resolve;
+    });
+    const router = {
+      calls,
+      async routeMessage(payload) {
+        calls.push(payload);
+        await routeLock;
+        return 'ROUTED_OK';
+      },
+    };
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedMenuId: 'nutrition_v1',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      busyNoticeCooldownMs: 60000,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    const first = fakeBot.emit(
+      'message',
+      createBaseMessage({
+        messageId: 1601,
+        text: '17:00 1 yogur natural',
+      })
+    );
+    await sleep(5);
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        messageId: 1602,
+        text: '17:01 1 manzana',
+      })
+    );
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        messageId: 1603,
+        text: '17:02 1 banana',
+      })
+    );
+
+    assert.equal(router.calls.length, 1);
+    const busyCount = fakeBot.sentMessages.filter((row) =>
+      /estoy respondiendo tu mensaje anterior/i.test(String(row?.text || ''))
+    ).length;
+    assert.equal(busyCount, 1);
+
+    releaseRoute();
+    await first;
+  });
+
 
   tests.push(async () => {
     const fakeBot = new FakeTelegramBot();

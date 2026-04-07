@@ -30,6 +30,15 @@ const CALLBACK_DEDUP_WINDOW_MS = Number(
 const CALLBACK_DEDUP_MAX_KEYS_PER_CHAT = Number(
   process.env.TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT ?? '80'
 );
+const MESSAGE_DEDUP_WINDOW_MS = Number(
+  process.env.TELEGRAM_MESSAGE_DEDUP_WINDOW_MS ?? '15000'
+);
+const MESSAGE_DEDUP_MAX_KEYS_PER_CHAT = Number(
+  process.env.TELEGRAM_MESSAGE_DEDUP_MAX_KEYS_PER_CHAT ?? '120'
+);
+const BUSY_NOTICE_COOLDOWN_MS = Number(
+  process.env.TELEGRAM_BUSY_NOTICE_COOLDOWN_MS ?? '6000'
+);
 const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
@@ -1332,6 +1341,22 @@ export function startTelegramBot(router, options = {}) {
       CALLBACK_DEDUP_MAX_KEYS_PER_CHAT,
     CALLBACK_DEDUP_MAX_KEYS_PER_CHAT
   );
+  const messageDedupWindowMs = Math.max(
+    0,
+    Number(options.messageDedupWindowMs ?? process.env.TELEGRAM_MESSAGE_DEDUP_WINDOW_MS) ||
+      MESSAGE_DEDUP_WINDOW_MS
+  );
+  const messageDedupMaxKeysPerChat = toPositiveInt(
+    options.messageDedupMaxKeysPerChat ??
+      process.env.TELEGRAM_MESSAGE_DEDUP_MAX_KEYS_PER_CHAT ??
+      MESSAGE_DEDUP_MAX_KEYS_PER_CHAT,
+    MESSAGE_DEDUP_MAX_KEYS_PER_CHAT
+  );
+  const busyNoticeCooldownMs = Math.max(
+    0,
+    Number(options.busyNoticeCooldownMs ?? process.env.TELEGRAM_BUSY_NOTICE_COOLDOWN_MS) ||
+      BUSY_NOTICE_COOLDOWN_MS
+  );
   const pollingIdleWatchdogMs = toPositiveInt(
     options.pollingIdleWatchdogMs ??
       process.env.TELEGRAM_POLLING_IDLE_WATCHDOG_MS ??
@@ -1357,6 +1382,8 @@ export function startTelegramBot(router, options = {}) {
   const menuScopeByChat = new Map();
   const guidedActionByChat = new Map();
   const recentCallbacksByChat = new Map();
+  const recentMessagesByChat = new Map();
+  const lastBusyNoticeAtByChat = new Map();
   const pollingRecovery = {
     inFlight: false,
     lastAttemptAt: 0,
@@ -1521,6 +1548,104 @@ export function startTelegramBot(router, options = {}) {
     }
 
     return false;
+  }
+
+  function buildMessageContentFingerprint({
+    text = '',
+    caption = '',
+    mediaGroupId = '',
+    photoFileId = '',
+    voiceFileId = '',
+    audioFileId = '',
+  } = {}) {
+    const normalizedText = normalizeText(text || caption || '').slice(0, 180);
+    return [
+      normalizedText,
+      String(mediaGroupId || '').trim(),
+      String(photoFileId || '').trim(),
+      String(voiceFileId || '').trim(),
+      String(audioFileId || '').trim(),
+    ]
+      .filter(Boolean)
+      .join('|');
+  }
+
+  function buildMessageDedupKey({
+    messageId = '',
+    userId = '',
+    mediaGroupId = '',
+    contentFingerprint = '',
+  } = {}) {
+    return `${String(userId || '').trim()}|${String(messageId || '').trim()}|${String(
+      mediaGroupId || ''
+    ).trim()}|${String(contentFingerprint || '').trim()}`;
+  }
+
+  function shouldSkipDuplicateMessage({
+    chatId = '',
+    messageId = '',
+    userId = '',
+    mediaGroupId = '',
+    contentFingerprint = '',
+  } = {}) {
+    if (!messageDedupWindowMs) {
+      return false;
+    }
+    const key = buildMessageDedupKey({
+      messageId,
+      userId,
+      mediaGroupId,
+      contentFingerprint,
+    });
+    if (!key || key === '||') return false;
+
+    const chatKey = String(chatId || '').trim();
+    if (!chatKey) return false;
+
+    const nowMs = Number(nowProvider()) || Date.now();
+    let seen = recentMessagesByChat.get(chatKey);
+    if (!seen) {
+      seen = new Map();
+      recentMessagesByChat.set(chatKey, seen);
+    }
+
+    for (const [existingKey, seenAt] of seen.entries()) {
+      if (nowMs - seenAt > messageDedupWindowMs) {
+        seen.delete(existingKey);
+      }
+    }
+
+    const lastSeenAt = seen.get(key);
+    if (Number.isFinite(lastSeenAt) && nowMs - lastSeenAt <= messageDedupWindowMs) {
+      seen.set(key, nowMs);
+      return true;
+    }
+
+    seen.set(key, nowMs);
+    if (seen.size > messageDedupMaxKeysPerChat) {
+      const overflow = seen.size - messageDedupMaxKeysPerChat;
+      let dropped = 0;
+      for (const existingKey of seen.keys()) {
+        seen.delete(existingKey);
+        dropped += 1;
+        if (dropped >= overflow) break;
+      }
+    }
+
+    return false;
+  }
+
+  function shouldSendBusyNotice(chatId = '') {
+    if (!busyNoticeCooldownMs) return true;
+    const key = String(chatId || '').trim();
+    if (!key) return true;
+    const nowMs = Number(nowProvider()) || Date.now();
+    const last = Number(lastBusyNoticeAtByChat.get(key) || 0);
+    if (Number.isFinite(last) && nowMs - last < busyNoticeCooldownMs) {
+      return false;
+    }
+    lastBusyNoticeAtByChat.set(key, nowMs);
+    return true;
   }
 
   function buildQuickActionsMarkup(scope = 'main') {
@@ -1709,10 +1834,12 @@ export function startTelegramBot(router, options = {}) {
     const hasMedia = Array.isArray(inputItems) && inputItems.length > 0;
 
     if (inFlightByChat.has(chatId)) {
-      await sendBotMessage(
-        chatId,
-        '⏳ Estoy respondiendo tu mensaje anterior. Esperá mi respuesta y seguimos.'
-      );
+      if (shouldSendBusyNotice(chatId)) {
+        await sendBotMessage(
+          chatId,
+          '⏳ Estoy respondiendo tu mensaje anterior. Esperá mi respuesta y seguimos.'
+        );
+      }
       return;
     }
 
@@ -2008,6 +2135,26 @@ export function startTelegramBot(router, options = {}) {
   }
 
   bot.on('message', async (msg) => {
+    const bestPhoto = pickLargestPhoto(Array.isArray(msg?.photo) ? msg.photo : []);
+    if (
+      shouldSkipDuplicateMessage({
+        chatId: msg?.chat?.id,
+        messageId: msg?.message_id,
+        userId: msg?.from?.id,
+        mediaGroupId: msg?.media_group_id,
+        contentFingerprint: buildMessageContentFingerprint({
+          text: msg?.text || '',
+          caption: msg?.caption || '',
+          mediaGroupId: msg?.media_group_id || '',
+          photoFileId: bestPhoto?.file_id || '',
+          voiceFileId: msg?.voice?.file_id || '',
+          audioFileId: msg?.audio?.file_id || '',
+        }),
+      })
+    ) {
+      return;
+    }
+
     if (msg.media_group_id && Array.isArray(msg.photo) && msg.photo.length) {
       enqueueMediaGroup(msg);
       return;
