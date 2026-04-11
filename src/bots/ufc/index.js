@@ -69,6 +69,10 @@ import { startUfcDbReliabilityLoop } from './ufcReliability.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
+import {
+  createDisabledTelegramRuntime,
+  resolveManifestTelegramToken,
+} from '../../platform/runtime/telegramRuntime.js';
 import { enforcePolicyPack } from '../../platform/policy/policyGuard.js';
 import {
   getMercadoPagoConfig,
@@ -297,10 +301,24 @@ export async function bootstrapBot({ manifest } = {}) {
     },
   };
 
-  const telegram = startTelegramBot(router, {
-    interactionMode: manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
-    token: process.env[String(manifest?.telegram_token_env || 'TELEGRAM_BOT_TOKEN')] || process.env.TELEGRAM_BOT_TOKEN,
-  });
+  const { token: telegramToken, tokenEnvName } = resolveManifestTelegramToken(manifest);
+  const botId = manifest?.bot_id || 'ufc';
+  const telegram = telegramToken
+    ? startTelegramBot(router, {
+        interactionMode:
+          manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
+        token: telegramToken,
+      })
+    : createDisabledTelegramRuntime({
+        botId,
+        tokenEnvName,
+      });
+
+  if (!telegramToken) {
+    console.warn(
+      `[bootstrap][${botId}] Telegram polling disabled: missing env var ${tokenEnvName}.`
+    );
+  }
 
   startAutoSettlementMonitor({
     intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
@@ -515,7 +533,7 @@ export async function bootstrapBot({ manifest } = {}) {
 
   createHealthServer(port, {
     appName: manifest?.display_name || 'UFC Bot',
-    botId: manifest?.bot_id || 'ufc',
+    botId,
     billingClient,
     legacyTopup,
     onTopupApplied: async (event = {}) => {
@@ -546,6 +564,6 @@ export async function bootstrapBot({ manifest } = {}) {
 
   return {
     ok: true,
-    botId: manifest?.bot_id || 'ufc',
+    botId,
   };
 }

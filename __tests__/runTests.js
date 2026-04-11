@@ -11,6 +11,7 @@ const SUITES = [
   { modulePath: './autoSettlement.test.js', exportName: 'runAutoSettlementTests' },
   { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
   { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },
+  { modulePath: './telegramRuntime.test.js', exportName: 'runTelegramRuntimeTests' },
   { modulePath: './telegramBot.test.js', exportName: 'runTelegramBotTests' },
   { modulePath: './messageFormatter.test.js', exportName: 'runMessageFormatterTests' },
   { modulePath: './manifest.test.js', exportName: 'runManifestTests' },

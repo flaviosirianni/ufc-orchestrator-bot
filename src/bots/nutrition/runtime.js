@@ -17,6 +17,10 @@ import {
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
+import {
+  createDisabledTelegramRuntime,
+  resolveManifestTelegramToken,
+} from '../../platform/runtime/telegramRuntime.js';
 import { enforcePolicyPack } from '../../platform/policy/policyGuard.js';
 import {
   addNutritionBugReport,
@@ -6002,15 +6006,25 @@ Decime cuál: "borrá el de las 08:00" o "borrá el último".`;
     },
   };
 
-  const telegram = startTelegramBot(router, {
-    interactionMode:
-      manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
-    guidedMenuId: manifest?.domain_pack?.guided_menu || 'nutrition_v1',
-    guidedLedgerEnabled: false,
-    token:
-      process.env[String(manifest?.telegram_token_env || 'TELEGRAM_BOT_TOKEN')] ||
-      process.env.TELEGRAM_BOT_TOKEN,
-  });
+  const { token: telegramToken, tokenEnvName } = resolveManifestTelegramToken(manifest);
+  const telegram = telegramToken
+    ? startTelegramBot(router, {
+        interactionMode:
+          manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
+        guidedMenuId: manifest?.domain_pack?.guided_menu || 'nutrition_v1',
+        guidedLedgerEnabled: false,
+        token: telegramToken,
+      })
+    : createDisabledTelegramRuntime({
+        botId,
+        tokenEnvName,
+      });
+
+  if (!telegramToken) {
+    console.warn(
+      `[bootstrap][${botId}] Telegram polling disabled: missing env var ${tokenEnvName}.`
+    );
+  }
 
   createHealthServer(Number(process.env.PORT || '3000'), {
     appName: displayName,
