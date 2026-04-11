@@ -182,6 +182,29 @@ export async function runTelegramBotTests() {
     const fakeBot = new FakeTelegramBot();
     const router = createRouterSpy();
 
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 120000,
+      pollingWatchdogIntervalMs: 10000,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('polling_error', new Error('EFATAL: AggregateError'));
+    await sleep(10);
+
+    const status = runtime.getRuntimeStatus();
+    assert.match(String(status.lastErrorMessage || ''), /aggregateerror/i);
+    assert.equal(fakeBot.stopPollingCalls, 0);
+    assert.equal(fakeBot.startPollingCalls, 0);
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
     startTelegramBot(router, {
       botInstance: fakeBot,
       interactionMode: 'guided_strict',
