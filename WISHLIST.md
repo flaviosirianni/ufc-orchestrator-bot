@@ -1261,3 +1261,194 @@ Revision de estado: `2026-04-02` (post migracion a arquitectura Core + Bots, dep
      - Decision abierta: permitir adjuntos (screenshots/audio) en fase 1 o limitar a texto.
    - **Prioridad:** alta.
    - **Estado:** pendiente.
+
+38. **Revisar y redisenar `Alertas noticias` del menu Evento (UX + claridad operativa)**
+   - **Objetivo de negocio/UX:** que el usuario entienda claramente que hace `Alertas noticias`, en que estado esta, y que resultado practico obtiene al activarlas.
+   - **Problema observado (ejemplo real):**
+     - El usuario entra a `📰 Evento -> 🔔 Alertas noticias` y recibe estado tecnico, pero no queda claro el comportamiento final esperado.
+     - El copy actual mezcla estado + comandos, pero no explica de forma simple que tipo de alerta llega, cuando, ni por que podria no llegar.
+   - **Comportamiento deseado para el usuario final:**
+     - Pantalla de estado clara con:
+       - estado `ACTIVAS/DESACTIVADAS`,
+       - umbral (`alta/media/baja`),
+       - evento objetivo,
+       - ultimo disparo de alerta (si existe).
+     - Acciones directas por botones: `Activar`, `Desactivar`, `Cambiar umbral`, `Ver ultima alerta`, `Probar alerta`.
+     - Mensaje de ayuda corto: "Te aviso solo cuando detecto cambios relevantes para tu evento."
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `EventAlertsPresenter` en `telegramBot` para construir una vista dedicada (no solo texto plano).
+     - Extender callbacks guiados:
+       - `qa:event_alerts_status`,
+       - `qa:event_alerts_enable`,
+       - `qa:event_alerts_disable`,
+       - `qa:event_alerts_threshold:<level>`,
+       - `qa:event_alerts_test`.
+     - Persistencia:
+       - reutilizar `user_intel_prefs`,
+       - completar uso de `intel_alert_dispatch_log` para mostrar ultima alerta y evitar duplicados.
+     - Guardrails:
+       - no mostrar "activo" si no hay `event_watch_state` vigente,
+       - dedupe por `telegram_user_id + dedupe_key`,
+       - rate-limit de alerta de prueba por usuario.
+     - Estados sugeridos:
+       - `disabled`,
+       - `enabled_waiting_signal`,
+       - `enabled_alert_sent`,
+       - `enabled_no_event_context`.
+   - **Criterios de aceptacion verificables:**
+     - El usuario puede responder "que hace esto" sin leer comandos libres ni documentacion externa.
+     - Puede activar/desactivar y cambiar umbral en <= 2 toques.
+     - La vista siempre informa evento monitoreado y timestamp de actualizacion.
+   - **Pruebas de regresion necesarias:**
+     - Flujo guiado `Evento -> Alertas noticias -> Activar/Desactivar`.
+     - Cambio de umbral y lectura correcta en siguiente consulta de estado.
+     - Estado sin evento objetivo -> mensaje claro sin false-positive de activacion.
+     - Reintento rapido de `Probar alerta` respeta rate-limit.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir si fase 1 incluye dispatch proactivo real o solo configuracion/estado.
+     - Decision abierta: definir umbral default final (`high` vs `medium`) por bot.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+39. **Ingesta periodica de cuotas externas desde proyecto scrapper para enriquecer predicciones**
+   - **Objetivo de negocio/UX:** mejorar calidad de proyecciones y scoring usando un set mas amplio y frecuente de cuotas de mercado (no solo carga manual del usuario).
+   - **Problema observado (ejemplo real):**
+     - El bot hoy depende principalmente de:
+       - cuotas del usuario (screenshot/texto),
+       - snapshots de `odds_api` ya indexados.
+     - No existe una integracion formal con el proyecto scrapper de cuotas para mantener una base multi-fuente mas completa en backend.
+   - **Comportamiento deseado para el usuario final:**
+     - El bot responde con predicciones apoyadas en cuotas recientes de varias fuentes importantes.
+     - Si el usuario no sube quotes, igual hay una base de mercado mas robusta para proyecciones iniciales.
+     - Si el usuario sube quotes propias, se priorizan para decision final pero comparando contra consenso externo.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Nuevo job `quotesIngestionMonitor` que consuma artefactos del scrapper en intervalos fijos (ej. cada 15-30 min en semana de evento).
+     - Canonicalizacion a schema interno comun y upsert en tablas de mercado:
+       - extender `odds_market_snapshots` o nueva tabla `external_quote_snapshots`.
+     - Pipeline de calidad:
+       - normalizacion de nombres de peleadores/eventos,
+       - dedupe por `source + event + market + timestamp_bucket`,
+       - descarte de cuotas stale.
+     - Integracion de consumo:
+       - `preFightAnalysis` y `betScoringEngine` leen consenso enriquecido multi-fuente.
+       - `bettingWizard` muestra "consenso externo" y "cuota usuario" por separado.
+     - Guardrails:
+       - source weighting configurable,
+       - hard fallback a fuentes actuales si el scrapper falla,
+       - observabilidad de freshness/coverage por evento.
+     - Estados sugeridos:
+       - `ingestion_ok`,
+       - `ingestion_partial`,
+       - `ingestion_stale`,
+       - `ingestion_failed`.
+   - **Criterios de aceptacion verificables:**
+     - Existe ingesta automatica periodica de cuotas externas con timestamps trazables.
+     - Proyecciones/scoring reflejan datos del scrapper cuando hay cobertura valida.
+     - Si el scrapper cae, el bot sigue operativo con fallback sin romper flujo de usuario.
+   - **Pruebas de regresion necesarias:**
+     - Ingesta exitosa con 2+ fuentes y dedupe correcto.
+     - Caso de nombres inconsistentes entre fuentes -> matching estable por pelea.
+     - Falla de fuente externa -> sin crash, con degradacion controlada.
+     - Comparacion de output de scoring antes/despues con fixture de cuotas del scrapper.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir lista exacta de fuentes permitidas y politicas legales/ToS por fuente.
+     - Decision abierta: definir frecuencia por etapa de evento (far/near/live).
+     - Decision abierta: definir estrategia de weighting por fuente (igual ponderacion vs ranking).
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+40. **Rediseno integral del menu `Evento`: listar peleas del evento actual y habilitar consulta de eventos pasados**
+   - **Objetivo de negocio/UX:** que `Evento` sea navegable y util para explorar cartelera actual (live o proxima) y tambien historial de eventos anteriores con seleccion guiada.
+   - **Problema observado (ejemplo real):**
+     - El menu `Evento` hoy concentra acciones globales (`Proyecciones`, `Ultimas novedades`, `Alertas`) pero no expone una navegacion clara por evento/pelea.
+     - El usuario no puede elegir facil una pelea puntual del evento ni recorrer eventos viejos desde menu guiado.
+   - **Comportamiento deseado para el usuario final:**
+     - En `Evento`, primero ve "Evento actual" (si live) o "Proximo evento" con lista de todas las peleas.
+     - Puede tocar una pelea y abrir acciones contextuales: `Ver resultado`, `Ver proyeccion`, `Ver analisis`, `Ver cuotas`.
+     - Puede entrar a `Eventos pasados`, elegir evento y luego pelea para revisar resultado/resumen.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Nuevo flujo guiado tipo selector:
+       - `event_menu_root`,
+       - `event_select_current_or_next`,
+       - `fight_select_for_event`,
+       - `event_archive_list`,
+       - `event_archive_fight_select`.
+     - Callbacks sugeridos:
+       - `qa:event_current_card`,
+       - `qa:event_archive`,
+       - `qa:event_pick:<event_id>`,
+       - `qa:event_pick_fight:<event_id>:<fight_id>`.
+     - Data source:
+       - actual/proximo: `event_watch_state` + `odds_events_index` + `odds_market_snapshots`,
+       - pasado: `odds_events_index.completed` + resultados disponibles en scores/caches.
+     - Guardrails:
+       - paginacion para cards largos,
+       - fallback textual si faltan IDs/metadata de pelea,
+       - no romper `guided_strict` (solo callbacks allowlisted).
+   - **Criterios de aceptacion verificables:**
+     - Desde `Evento`, el usuario puede listar todas las peleas del evento activo/proximo en 1-2 toques.
+     - Puede seleccionar un evento pasado y listar sus peleas.
+     - Cada pelea seleccionada abre al menos una salida util (resultado o analisis disponible).
+   - **Pruebas de regresion necesarias:**
+     - Evento live con peleas completadas + pendientes (lista correcta y ordenada).
+     - Evento proximo sin live (fallback correcto a proximo evento).
+     - Archivo con multiples eventos (paginacion/seleccion estable).
+     - Callback invalido fuera de allowlist sigue bloqueado en `guided_strict`.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir rango del archivo visible (ultimos N eventos vs busqueda por fecha).
+     - Decision abierta: definir si resultados pasados salen de Odds API, scraper propio o ambos.
+   - **Prioridad:** alta.
+   - **Estado:** pendiente.
+
+41. **[PRIORIDAD CRITICA] `Analizar Cuotas` con selector de peleas del evento y modo continuo de screenshots**
+   - **Objetivo de negocio/UX:** reducir friccion en el flujo principal de apuestas permitiendo seleccionar pelea desde lista y seguir cargando screenshots en modo continuo sin perder contexto.
+   - **Problema observado (ejemplo real):**
+     - En `Analizar Cuotas` hoy no aparece un listado guiado de peleas del evento live/proximo para elegir rapido.
+     - El usuario quiere analizar por seleccion directa de pelea y continuar subiendo screenshots durante la sesion de analisis.
+   - **Comportamiento deseado para el usuario final:**
+     - Al entrar en `📸 Analizar cuotas`, el bot muestra lista de peleas del evento relevante (live si existe, sino proximo).
+     - El usuario elige pelea y recibe analisis inmediato orientado a esa pelea.
+     - Mientras siga en modo analisis, puede mandar mas screenshots y el bot:
+       - asocia automaticamente la pelea cuando es clara,
+       - o pide desambiguacion minima cuando hay conflicto.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `AnalysisSessionState` por chat:
+       - `event_id`,
+       - `fight_id`,
+       - `fighterA/fighterB`,
+       - `mode=analyze_quotes`,
+       - `last_snapshot_at`.
+     - Nuevos callbacks:
+       - `qa:analyze_quotes_card`,
+       - `qa:analyze_quotes_fight:<event_id>:<fight_id>`,
+       - `qa:analyze_quotes_change_fight`.
+     - Resolver evento objetivo:
+       - prioridad `current_event` live,
+       - fallback `next_event`.
+     - Ingesta continua:
+       - cada screenshot actualiza `store_user_odds` para la pelea activa,
+       - extractor OCR/vision intenta inferir pelea; si coincide con sesion, auto-merge,
+       - si detecta pelea distinta con alta confianza, pedir confirmacion de switch.
+     - Guardrails:
+       - bloquear recomendaciones si cuota detectada es ambigua para multiples peleas,
+       - mantener compatibilidad con texto estructurado actual,
+       - expirar sesion de analisis por inactividad (ej. 20-30 min).
+     - Estados sugeridos:
+       - `analysis_waiting_fight_selection`,
+       - `analysis_active_fight_selected`,
+       - `analysis_waiting_disambiguation`,
+       - `analysis_expired`.
+   - **Criterios de aceptacion verificables:**
+     - `Analizar Cuotas` siempre muestra listado de peleas del evento live/proximo (si hay datos).
+     - Con pelea seleccionada, screenshots consecutivos mantienen contexto sin pedir pelea cada vez.
+     - Cuando una imagen apunta a otra pelea, el bot no mezcla odds: pide confirmacion de cambio.
+   - **Pruebas de regresion necesarias:**
+     - Flujo completo: `menu -> seleccionar pelea -> screenshot 1 -> screenshot 2` con mismo fight.
+     - Screenshot ambiguo (dos peleas posibles) -> desambiguacion obligatoria.
+     - Cambio manual de pelea en medio de sesion conserva consistencia de snapshots.
+     - Fallback sin live event: usa proximo evento automaticamente.
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: definir limite de snapshots por sesion antes de compactar/rotar contexto.
+     - Decision abierta: definir criterio final de "alta confianza" para auto-switch de pelea.
+   - **Prioridad:** critico.
+   - **Estado:** pendiente.

@@ -24,6 +24,9 @@ const POLLING_IDLE_WATCHDOG_MS = Number(
 const POLLING_WATCHDOG_INTERVAL_MS = Number(
   process.env.TELEGRAM_POLLING_WATCHDOG_INTERVAL_MS ?? '30000'
 );
+const POLLING_CONFLICT_RECOVERY_COOLDOWN_MS = Number(
+  process.env.TELEGRAM_POLLING_CONFLICT_RECOVERY_COOLDOWN_MS ?? '60000'
+);
 const CALLBACK_DEDUP_WINDOW_MS = Number(
   process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ?? '2500'
 );
@@ -1388,6 +1391,8 @@ export function startTelegramBot(router, options = {}) {
     inFlight: false,
     lastAttemptAt: 0,
     cooldownMs: 30_000,
+    lastConflictRecoveryAt: 0,
+    conflictCooldownMs: Math.max(10_000, POLLING_CONFLICT_RECOVERY_COOLDOWN_MS),
   };
   const pollingStatus = {
     startedAt: Date.now(),
@@ -1395,6 +1400,8 @@ export function startTelegramBot(router, options = {}) {
     lastMessageAt: 0,
     lastCallbackAt: 0,
     lastPollingErrorAt: 0,
+    lastPollingConflictAt: 0,
+    pollingConflictCount: 0,
     lastRecoveryAt: 0,
     recoveryCount: 0,
     lastRecoveryReason: '',
@@ -2863,6 +2870,19 @@ export function startTelegramBot(router, options = {}) {
     pollingStatus.lastErrorMessage = message.slice(0, 500);
     console.error('[telegram] polling_error', message);
     const lowered = message.toLowerCase();
+    const isPollingConflict =
+      lowered.includes('409 conflict') ||
+      lowered.includes('terminated by other getupdates request');
+    if (isPollingConflict) {
+      const nowMs = Date.now();
+      pollingStatus.lastPollingConflictAt = nowMs;
+      pollingStatus.pollingConflictCount += 1;
+      if (nowMs - pollingRecovery.lastConflictRecoveryAt >= pollingRecovery.conflictCooldownMs) {
+        pollingRecovery.lastConflictRecoveryAt = nowMs;
+        void recoverPolling('telegram_409_conflict');
+      }
+      return;
+    }
     if (
       lowered.includes('etimedout') ||
       lowered.includes('econnreset') ||
@@ -2892,6 +2912,8 @@ export function startTelegramBot(router, options = {}) {
         lastMessageAt: pollingStatus.lastMessageAt,
         lastCallbackAt: pollingStatus.lastCallbackAt,
         lastPollingErrorAt: pollingStatus.lastPollingErrorAt,
+        lastPollingConflictAt: pollingStatus.lastPollingConflictAt,
+        pollingConflictCount: pollingStatus.pollingConflictCount,
         lastRecoveryAt: pollingStatus.lastRecoveryAt,
         recoveryCount: pollingStatus.recoveryCount,
         lastRecoveryReason: pollingStatus.lastRecoveryReason,

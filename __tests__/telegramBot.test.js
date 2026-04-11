@@ -62,17 +62,21 @@ function createRouterSpy() {
 
 function createBaseMessage({
   text = '',
+  caption = '',
   messageId = 1,
   chatId = 100,
   userId = 200,
   photo = undefined,
+  mediaGroupId = '',
 } = {}) {
   return {
     message_id: messageId,
     text,
+    ...(caption ? { caption } : {}),
     chat: { id: chatId, type: 'private' },
     from: { id: userId, first_name: 'QA' },
     ...(photo ? { photo } : {}),
+    ...(mediaGroupId ? { media_group_id: mediaGroupId } : {}),
   };
 }
 
@@ -142,6 +146,35 @@ export async function runTelegramBotTests() {
     assert.match(String(statusAfterError.lastErrorMessage || ''), /etimedout/i);
     assert.ok(fakeBot.stopPollingCalls >= 1);
     assert.ok(fakeBot.startPollingCalls >= 1);
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 120000,
+      pollingWatchdogIntervalMs: 10000,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit(
+      'polling_error',
+      new Error(
+        'ETELEGRAM: 409 Conflict: terminated by other getUpdates request; make sure that only one bot instance is running'
+      )
+    );
+    await sleep(10);
+
+    const status = runtime.getRuntimeStatus();
+    assert.ok(fakeBot.stopPollingCalls >= 1);
+    assert.ok(fakeBot.startPollingCalls >= 1);
+    assert.ok(Number(status.lastPollingConflictAt) > 0);
+    assert.ok(Number(status.pollingConflictCount) >= 1);
     runtime.close();
   });
 
@@ -220,6 +253,49 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls[0].inputType, 'image');
     assert.equal(Array.isArray(router.calls[0].inputItems), true);
     assert.equal(router.calls[0].inputItems.length, 1);
+  });
+
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({
+        buffer: Buffer.from('fake-image'),
+        filePath: 'ticket.jpg',
+      }),
+    });
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        messageId: 10,
+        caption: 'analiza estos quotes',
+        mediaGroupId: 'group_1',
+        photo: [{ file_id: 'photo_group_1', file_size: 1000 }],
+      })
+    );
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({
+        messageId: 11,
+        mediaGroupId: 'group_1',
+        photo: [{ file_id: 'photo_group_2', file_size: 1000 }],
+      })
+    );
+
+    await sleep(1100);
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].interactionMode, 'guided_strict');
+    assert.equal(router.calls[0].guidedAction, 'analyze_quotes');
+    assert.equal(router.calls[0].inputType, 'image');
+    assert.equal(router.calls[0].message, 'analiza estos quotes');
+    assert.equal(Array.isArray(router.calls[0].inputItems), true);
+    assert.equal(router.calls[0].inputItems.length, 2);
   });
 
   tests.push(async () => {
