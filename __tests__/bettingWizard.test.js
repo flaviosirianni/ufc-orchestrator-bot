@@ -108,19 +108,17 @@ export async function runBettingWizardTests() {
     const wizard = createBettingWizard({
       conversationStore,
       client: fakeClient,
-      fightsScalper: {
-        async getFighterHistory(args) {
+      ufcStats: {
+        isAvailable() { return true; },
+        getFightHistoryRows(args) {
           capturedHistoryArgs = args;
-          return {
-            fighters: ['Mario Bautista', 'Vinicius Oliveira'],
-            rows: [
-              ['2025-07-19', 'UFC 318', 'Vinicius Oliveira', 'Kyler Phillips'],
-              ['2025-06-07', 'UFC 316', 'Mario Bautista', 'Patchy Mix'],
-            ],
-          };
+          return [
+            ['2025-07-19', 'UFC 318', 'Vinicius Oliveira', 'Kyler Phillips', 'Bantamweight', 'Vinicius Oliveira', 'Decision', '3', '5:00'],
+            ['2025-06-07', 'UFC 316', 'Mario Bautista', 'Patchy Mix', 'Bantamweight', 'Mario Bautista', 'Decision', '3', '5:00'],
+          ];
         },
-        getFightHistoryCacheStatus() {
-          return { rowCount: 400 };
+        getFreshnessMeta() {
+          return { latestFightDate: '2025-07-19', fightCount: 400 };
         },
       },
     });
@@ -137,11 +135,8 @@ export async function runBettingWizardTests() {
     });
 
     assert.match(result.reply, /Pick preliminar/);
-    assert.deepEqual(capturedHistoryArgs.fighters, [
-      'Mario Bautista',
-      'Vinicius Oliveira',
-    ]);
-    assert.equal(capturedHistoryArgs.strict, true);
+    assert.equal(capturedHistoryArgs.fighterA, 'Mario Bautista');
+    assert.equal(capturedHistoryArgs.fighterB, 'Vinicius Oliveira');
     assert.equal(fakeClient.calls.length, 2);
     assert.match(fakeClient.calls[0].input, /CONVERSATION_CONTEXT/);
   });
@@ -1577,17 +1572,16 @@ export async function runBettingWizardTests() {
     const wizard = createBettingWizard({
       conversationStore,
       client: fakeClient,
-      fightsScalper: {
-        async getFighterHistory() {
-          return {
-            fighters: ['Josh Emmett', 'Kevin Vallejos', 'Amanda Lemos', 'Gillian Robertson', 'Max Holloway', 'Charles Oliveira'],
-            rows: [
-              ['2026-03-15', 'UFC 999', 'Josh Emmett', 'Kevin Vallejos', '', 'Kevin Vallejos', 'Decision'],
-              ['2026-03-15', 'UFC 999', 'Amanda Lemos', 'Gillian Robertson', '', 'Amanda Lemos', 'Decision'],
-              ['2026-03-15', 'UFC 999', 'Max Holloway', 'Charles Oliveira', '', 'Charles Oliveira', 'KO/TKO'],
-            ],
-          };
+      ufcStats: {
+        isAvailable() { return true; },
+        getFightHistoryRows() {
+          return [
+            ['2026-03-15', 'UFC 999', 'Josh Emmett', 'Kevin Vallejos', '', 'Kevin Vallejos', 'Decision', '3', '5:00'],
+            ['2026-03-15', 'UFC 999', 'Amanda Lemos', 'Gillian Robertson', '', 'Amanda Lemos', 'Decision', '3', '5:00'],
+            ['2026-03-15', 'UFC 999', 'Max Holloway', 'Charles Oliveira', '', 'Charles Oliveira', 'KO/TKO', '2', '3:15'],
+          ];
         },
+        getFreshnessMeta() { return { latestFightDate: '2026-03-15', fightCount: 3 }; },
       },
       userStore: {
         listUserBets() {
@@ -1855,22 +1849,16 @@ export async function runBettingWizardTests() {
     const wizard = createBettingWizard({
       conversationStore,
       client: fakeClient,
-      fightsScalper: {
-        async getFighterHistory() {
-          return {
-            fighters: ['Michel Pereira'],
-            rows: [
-              ['2023-11-11', 'UFC 295', 'Michel Pereira', 'Andre Petroski', '', 'Michel Pereira', 'KO'],
-              ['2023-07-08', 'UFC FN', 'Michel Pereira', 'Santiago Ponzinibbio', '', 'Michel Pereira', 'KO'],
-            ],
-          };
+      ufcStats: {
+        isAvailable() { return true; },
+        getFightHistoryRows() {
+          return [
+            ['2023-11-11', 'UFC 295', 'Michel Pereira', 'Andre Petroski', '', 'Michel Pereira', 'KO', '1', '2:34'],
+            ['2023-07-08', 'UFC FN', 'Michel Pereira', 'Santiago Ponzinibbio', '', 'Michel Pereira', 'KO', '1', '1:55'],
+          ];
         },
-        getFightHistoryCacheStatus() {
-          return {
-            latestFightDate: '2023-11-11',
-            sheetAgeDays: 860,
-            potentialGap: true,
-          };
+        getFreshnessMeta() {
+          return { latestFightDate: '2023-11-11', fightCount: 2 };
         },
       },
     });
@@ -1905,24 +1893,18 @@ export async function runBettingWizardTests() {
     const wizard = createBettingWizard({
       conversationStore,
       client: fakeClient,
-      fightsScalper: {
-        async getFighterHistory() {
-          return {
-            fighters: ['Michel Pereira'],
-            rows: [
-              ['2026-03-01', 'UFC 400', 'Michel Pereira', 'Rival A', '', 'Michel Pereira', 'DEC'],
-              ['2026-01-18', 'UFC 399', 'Michel Pereira', 'Rival B', '', 'Michel Pereira', 'SUB'],
-              ['2025-11-02', 'UFC 398', 'Michel Pereira', 'Rival C', '', 'Michel Pereira', 'KO'],
-              ['2025-09-06', 'UFC 397', 'Michel Pereira', 'Rival D', '', 'Michel Pereira', 'DEC'],
-            ],
-          };
+      ufcStats: {
+        isAvailable() { return true; },
+        getFightHistoryRows() {
+          return [
+            ['2026-03-01', 'UFC 400', 'Michel Pereira', 'Rival A', '', 'Michel Pereira', 'DEC', '3', '5:00'],
+            ['2026-01-18', 'UFC 399', 'Michel Pereira', 'Rival B', '', 'Michel Pereira', 'SUB', '2', '3:22'],
+            ['2025-11-02', 'UFC 398', 'Michel Pereira', 'Rival C', '', 'Michel Pereira', 'KO', '1', '1:45'],
+            ['2025-09-06', 'UFC 397', 'Michel Pereira', 'Rival D', '', 'Michel Pereira', 'DEC', '3', '5:00'],
+          ];
         },
-        getFightHistoryCacheStatus() {
-          return {
-            latestFightDate: '2026-03-01',
-            sheetAgeDays: 10,
-            potentialGap: false,
-          };
+        getFreshnessMeta() {
+          return { latestFightDate: '2026-03-01', fightCount: 4 };
         },
       },
     });

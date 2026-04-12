@@ -7659,17 +7659,6 @@ export function createBettingWizard({
         };
       }
 
-      if (typeof fightsScalper?.getFighterHistory !== 'function') {
-        return {
-          reply:
-            'No tengo disponible el modulo de verificacion de resultados en este entorno. Pasame bet_id + resultado y lo cierro manualmente.',
-          metadata: {
-            resolvedFight: runtimeState.resolvedFight,
-            eventCard: runtimeState.eventCard,
-          },
-        };
-      }
-
       const fighterPool = collectUniqueFightersFromBets(pendingBets);
       let historyRows = [];
       try {
