@@ -450,6 +450,33 @@ function initSchema(db) {
 
     CREATE UNIQUE INDEX IF NOT EXISTS uniq_alert_dispatch_dedupe
       ON intel_alert_dispatch_log (telegram_user_id, dedupe_key);
+
+    CREATE TABLE IF NOT EXISTS event_fight_mirror (
+      watch_key       TEXT NOT NULL,
+      event_id        TEXT NOT NULL,
+      fight_id        TEXT NOT NULL,
+      fighter_a       TEXT NOT NULL,
+      fighter_b       TEXT NOT NULL,
+      weight_class    TEXT,
+      card_position   INTEGER,
+      stats_pack_json TEXT,
+      built_at        TEXT NOT NULL,
+      PRIMARY KEY (watch_key, fight_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_fight_mirror_watch_key
+      ON event_fight_mirror (watch_key, built_at DESC);
+
+    CREATE TABLE IF NOT EXISTS event_fighter_mirror (
+      watch_key       TEXT NOT NULL,
+      event_id        TEXT NOT NULL,
+      fighter_slug    TEXT NOT NULL,
+      fighter_name    TEXT NOT NULL,
+      stats_pack_json TEXT,
+      built_at        TEXT NOT NULL,
+      PRIMARY KEY (watch_key, fighter_slug)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_fighter_mirror_watch_key
+      ON event_fighter_mirror (watch_key, built_at DESC);
   `);
 }
 
@@ -3919,4 +3946,130 @@ export function updateUserIntelPrefs(userId, updates = {}) {
 
 export function getDbPath() {
   return DB_PATH;
+}
+
+// ---------------------------------------------------------------------------
+// Event Fight Mirror — per-event stats cache keyed by watch_key
+// ---------------------------------------------------------------------------
+
+function parseEventFightMirrorRow(row) {
+  if (!row) return null;
+  return {
+    watchKey: row.watch_key,
+    eventId: row.event_id,
+    fightId: row.fight_id,
+    fighterA: row.fighter_a,
+    fighterB: row.fighter_b,
+    weightClass: row.weight_class || null,
+    cardPosition: row.card_position === null || row.card_position === undefined ? null : Number(row.card_position),
+    statsPack: parseJsonSafe(row.stats_pack_json, null),
+    builtAt: row.built_at,
+  };
+}
+
+function parseEventFighterMirrorRow(row) {
+  if (!row) return null;
+  return {
+    watchKey: row.watch_key,
+    eventId: row.event_id,
+    fighterSlug: row.fighter_slug,
+    fighterName: row.fighter_name,
+    statsPack: parseJsonSafe(row.stats_pack_json, null),
+    builtAt: row.built_at,
+  };
+}
+
+export function upsertEventFightMirror(rows = [], watchKey = 'next_event') {
+  if (!Array.isArray(rows) || !rows.length) return { upsertedCount: 0 };
+  const db = getDb();
+  const builtAt = nowIso();
+  const stmt = db.prepare(
+    `INSERT OR REPLACE INTO event_fight_mirror
+      (watch_key, event_id, fight_id, fighter_a, fighter_b, weight_class, card_position, stats_pack_json, built_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const upsertMany = db.transaction((items) => {
+    for (const r of items) {
+      stmt.run(
+        String(watchKey),
+        String(r.eventId || ''),
+        String(r.fightId || ''),
+        String(r.fighterA || ''),
+        String(r.fighterB || ''),
+        r.weightClass || null,
+        r.cardPosition === null || r.cardPosition === undefined ? null : Number(r.cardPosition),
+        r.statsPackJson != null ? JSON.stringify(r.statsPackJson) : null,
+        builtAt
+      );
+    }
+  });
+  upsertMany(rows);
+  return { upsertedCount: rows.length };
+}
+
+export function upsertEventFighterMirror(rows = [], watchKey = 'next_event') {
+  if (!Array.isArray(rows) || !rows.length) return { upsertedCount: 0 };
+  const db = getDb();
+  const builtAt = nowIso();
+  const stmt = db.prepare(
+    `INSERT OR REPLACE INTO event_fighter_mirror
+      (watch_key, event_id, fighter_slug, fighter_name, stats_pack_json, built_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  );
+  const upsertMany = db.transaction((items) => {
+    for (const r of items) {
+      stmt.run(
+        String(watchKey),
+        String(r.eventId || ''),
+        String(r.fighterSlug || ''),
+        String(r.fighterName || ''),
+        r.statsPackJson != null ? JSON.stringify(r.statsPackJson) : null,
+        builtAt
+      );
+    }
+  });
+  upsertMany(rows);
+  return { upsertedCount: rows.length };
+}
+
+export function getEventFightMirror(watchKey = 'next_event') {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT watch_key, event_id, fight_id, fighter_a, fighter_b, weight_class, card_position, stats_pack_json, built_at
+       FROM event_fight_mirror
+       WHERE watch_key = ?
+       ORDER BY card_position ASC`
+    )
+    .all(String(watchKey));
+  return rows.map(parseEventFightMirrorRow).filter(Boolean);
+}
+
+export function getEventFighterMirror(watchKey = 'next_event') {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT watch_key, event_id, fighter_slug, fighter_name, stats_pack_json, built_at
+       FROM event_fighter_mirror
+       WHERE watch_key = ?`
+    )
+    .all(String(watchKey));
+  return rows.map(parseEventFighterMirrorRow).filter(Boolean);
+}
+
+export function clearEventMirror(watchKey = 'next_event') {
+  const db = getDb();
+  const wk = String(watchKey);
+  db.transaction(() => {
+    db.prepare('DELETE FROM event_fight_mirror WHERE watch_key = ?').run(wk);
+    db.prepare('DELETE FROM event_fighter_mirror WHERE watch_key = ?').run(wk);
+  })();
+}
+
+export function getEventMirrorBuiltAt(watchKey = 'next_event') {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT MAX(built_at) AS max_built_at FROM event_fight_mirror WHERE watch_key = ?')
+    .get(String(watchKey));
+  return row?.max_built_at || null;
 }

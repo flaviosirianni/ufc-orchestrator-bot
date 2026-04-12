@@ -39,6 +39,34 @@ export function isAvailable() {
   return db !== null;
 }
 
+/**
+ * getFreshnessMeta()
+ *
+ * Returns basic metadata about the loaded ufc_stats.db for freshness reporting.
+ */
+export function getFreshnessMeta() {
+  if (!db) return null;
+  try {
+    const meta = db
+      .prepare(
+        `SELECT MAX(event_date) AS latest_fight_date,
+                COUNT(*) AS fight_count
+         FROM fights`
+      )
+      .get();
+    const upcomingRow = db.prepare('SELECT COUNT(*) AS cnt FROM upcoming_fights').get();
+    return {
+      isAvailable: true,
+      latestFightDate: meta?.latest_fight_date || null,
+      fightCount: Number(meta?.fight_count) || 0,
+      upcomingCount: Number(upcomingRow?.cnt) || 0,
+      dbPath: db.name || null,
+    };
+  } catch {
+    return { isAvailable: true, latestFightDate: null, fightCount: 0, upcomingCount: 0, dbPath: null };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -101,7 +129,13 @@ export function getFighterStats({ fighterName, limit = 8, includeRounds = false 
     return fight;
   });
 
-  return { fighter: fights[0]?.fighter || name, fights };
+  const freshness = getFreshnessMeta();
+  return {
+    fighter: fights[0]?.fighter || name,
+    fights,
+    dataSource: 'ufc_stats_db',
+    dbBuiltAt: freshness?.latestFightDate || null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -240,4 +274,63 @@ export function getUpcomingFights({ eventName, limit = 50 } = {}) {
   }
 
   return { fights: rows };
+}
+
+// ---------------------------------------------------------------------------
+// Fight history rows — 2D format for autoSettlement compatibility
+// ---------------------------------------------------------------------------
+
+/**
+ * getFightHistoryRows({ fighterA, fighterB, limit })
+ *
+ * Returns completed fights as 2D rows in the format expected by resolveAutoSettlementCandidate:
+ *   [date, event, fighterA, fighterB, division, winner, method, round, time]  (indices 0-8)
+ *
+ * - Without fighter args: returns all completed fights (limit 5000) for settlement scanning.
+ * - With fighterA/fighterB: applies two-tier name matching (exact → partial).
+ *
+ * @returns {Array<Array<any>>} Empty array if db not available.
+ */
+export function getFightHistoryRows({ fighterA, fighterB, limit = 5000 } = {}) {
+  if (!db) return [];
+
+  const n = Math.min(Math.max(1, Number(limit) || 5000), 10000);
+
+  let rows;
+  if (fighterA || fighterB) {
+    const name = (fighterA || fighterB).trim();
+    rows = _queryFights(name, n);
+  } else {
+    // All completed fights — fighter_1_result must be non-empty (fight has happened)
+    rows = db
+      .prepare(
+        `SELECT fight_id, event_date, event_name, fighter_1_name, fighter_2_name,
+                weight_class, fighter_1_result, fighter_2_result, method, round, time
+         FROM fights
+         WHERE fighter_1_result IS NOT NULL AND fighter_1_result != ''
+         ORDER BY event_date DESC
+         LIMIT ?`
+      )
+      .all(n);
+  }
+
+  return rows.map((row) => {
+    const winner =
+      row.fighter_1_result === 'W'
+        ? row.fighter_1_name
+        : row.fighter_2_result === 'W'
+          ? row.fighter_2_name
+          : '';
+    return [
+      row.event_date,       // [0] date
+      row.event_name,       // [1] event
+      row.fighter_1_name,   // [2] fighterA
+      row.fighter_2_name,   // [3] fighterB
+      row.weight_class,     // [4] division
+      winner,               // [5] winner
+      row.method,           // [6] method
+      row.round,            // [7] round
+      row.time,             // [8] time
+    ];
+  });
 }

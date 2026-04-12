@@ -6,8 +6,6 @@
   "domain_pack": {
     "prompt_file": "Knowledge/ufc_bets_playbook.md",
     "enabled_tools": [
-      "sheet_ops",
-      "fights_scalper",
       "web_intel",
       "odds_api"
     ],

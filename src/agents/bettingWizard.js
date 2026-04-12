@@ -80,6 +80,7 @@ const FACT_FRESHNESS_MAX_AGE_DAYS = Math.max(
 
 const INCLUDE_FIELDS = ['web_search_call.action.sources'];
 const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
+const FIGHT_DATA_FAIL_CLOSED = process.env.FIGHT_DATA_FAIL_CLOSED !== 'false';
 
 const FUNCTION_TOOLS = [
   {
@@ -386,6 +387,23 @@ const FUNCTION_TOOLS = [
     },
     strict: false,
   },
+  {
+    type: 'function',
+    name: 'get_event_fights',
+    description:
+      'Lista las peleas del evento actual o siguiente desde el mirror cache. Úsalo para obtener el fight card completo con peleadores y categorías antes de analizar cuotas.',
+    parameters: {
+      type: 'object',
+      properties: {
+        watch_key: {
+          type: 'string',
+          description: 'next_event (default) o current_event.',
+        },
+      },
+      additionalProperties: false,
+    },
+    strict: false,
+  },
 ];
 
 const GUIDED_DEFAULT_ACTION = 'analyze_quotes';
@@ -400,6 +418,8 @@ const GUIDED_ACTIONS = new Set([
 const GUIDED_STRICT_TOOL_ALLOWLIST_BY_ACTION = Object.freeze({
   analyze_quotes: new Set([
     'get_fighter_history',
+    'get_fighter_detailed_stats',
+    'get_event_fights',
     'get_user_profile',
     'get_user_odds',
     'store_user_odds',
@@ -4891,6 +4911,30 @@ function summariseFighterRows(rows = [], fighter = '') {
   };
 }
 
+/**
+ * Builds a text block listing the event card for injection into analyze_quotes context.
+ * Only injects if the event has >= 2 fights and is within 7 days.
+ * Returns null if not applicable.
+ */
+function _buildEventCardContext(eventState) {
+  if (!eventState?.mainCard?.length || eventState.mainCard.length < 2) return null;
+  if (eventState.eventDateUtc) {
+    const eventMs = Date.parse(eventState.eventDateUtc);
+    if (Number.isFinite(eventMs)) {
+      const diffDays = (eventMs - Date.now()) / 86400000;
+      if (diffDays > 7 || diffDays < -2) return null; // too far out or too stale
+    }
+  }
+  const lines = [`[Cartelera: ${eventState.eventName || 'Evento UFC'} (${eventState.eventDateUtc || '?'})]`];
+  for (const fight of eventState.mainCard) {
+    const a = fight.fighterA || fight.fighter_a || '?';
+    const b = fight.fighterB || fight.fighter_b || '?';
+    const wc = fight.weightClass || fight.weight_class || '';
+    lines.push(`${a} vs ${b}${wc ? ` (${wc})` : ''}`);
+  }
+  return lines.join('\n');
+}
+
 function buildHistoryToolResult(historyResult = {}, cacheStatus = null) {
   const fighters = Array.isArray(historyResult.fighters) ? historyResult.fighters : [];
   const rows = Array.isArray(historyResult.rows) ? historyResult.rows : [];
@@ -7629,12 +7673,20 @@ export function createBettingWizard({
       const fighterPool = collectUniqueFightersFromBets(pendingBets);
       let historyRows = [];
       try {
-        const history = await fightsScalper.getFighterHistory({
-          message: fighterPool.join(' vs '),
-          fighters: fighterPool,
-          strict: false,
-        });
-        historyRows = Array.isArray(history?.rows) ? history.rows : [];
+        if (process.env.UFC_ENABLE_LEGACY_SHEETS === 'true' && typeof fightsScalper?.getFighterHistory === 'function') {
+          const history = await fightsScalper.getFighterHistory({
+            message: fighterPool.join(' vs '),
+            fighters: fighterPool,
+            strict: false,
+          });
+          historyRows = Array.isArray(history?.rows) ? history.rows : [];
+        } else if (typeof ufcStats?.getFightHistoryRows === 'function') {
+          historyRows = ufcStats.getFightHistoryRows({
+            fighterA: fighterPool[0] || undefined,
+            fighterB: fighterPool[1] || undefined,
+            limit: 100,
+          });
+        }
       } catch (error) {
         console.error('⚠️ bulk settle history lookup failed:', error);
       }
@@ -7893,18 +7945,24 @@ export function createBettingWizard({
         };
       }
 
-      if (
-        fightRef?.fighterA &&
-        fightRef?.fighterB &&
-        typeof fightsScalper?.getFighterHistory === 'function'
-      ) {
+      if (fightRef?.fighterA && fightRef?.fighterB) {
         try {
-          const history = await fightsScalper.getFighterHistory({
-            message: `${fightRef.fighterA} vs ${fightRef.fighterB}`,
-            fighters: [fightRef.fighterA, fightRef.fighterB],
-            strict: false,
-          });
-          const latest = findLatestHistoryResultForFight(history?.rows || [], fightRef);
+          let fallbackRows = [];
+          if (process.env.UFC_ENABLE_LEGACY_SHEETS === 'true' && typeof fightsScalper?.getFighterHistory === 'function') {
+            const history = await fightsScalper.getFighterHistory({
+              message: `${fightRef.fighterA} vs ${fightRef.fighterB}`,
+              fighters: [fightRef.fighterA, fightRef.fighterB],
+              strict: false,
+            });
+            fallbackRows = history?.rows || [];
+          } else if (typeof ufcStats?.getFightHistoryRows === 'function') {
+            fallbackRows = ufcStats.getFightHistoryRows({
+              fighterA: fightRef.fighterA,
+              fighterB: fightRef.fighterB,
+              limit: 20,
+            });
+          }
+          const latest = findLatestHistoryResultForFight(fallbackRows, fightRef);
           if (latest?.winner) {
             const lines = [
               '📚 Resultado encontrado en historial local (fallback).',
@@ -8552,45 +8610,89 @@ export function createBettingWizard({
 
       switch (name) {
         case 'get_fighter_history': {
-          if (!fightsScalper?.getFighterHistory) {
+          if (process.env.UFC_ENABLE_LEGACY_SHEETS === 'true') {
+            // --- Legacy path: Google Sheets cache via fightsScalper ---
+            if (!fightsScalper?.getFighterHistory) {
+              return { ok: false, error: 'fightsScalperTool no esta disponible.' };
+            }
+            const fighters = Array.isArray(args.fighters)
+              ? args.fighters.map((value) => String(value).trim()).filter(Boolean).slice(0, 4)
+              : undefined;
+            const query = String(args.query || resolvedMessage || originalMessage || '').trim();
+            const strict =
+              typeof args.strict === 'boolean' ? args.strict : Boolean(fighters && fighters.length);
+            const result = await fightsScalper.getFighterHistory({ message: query, fighters, strict });
+            if (result?.fighters?.length >= 2 && conversationStore?.setLastResolvedFight) {
+              const resolvedFight = { fighterA: result.fighters[0], fighterB: result.fighters[1] };
+              conversationStore.setLastResolvedFight(chatId, resolvedFight);
+              runtimeState.resolvedFight = resolvedFight;
+            }
+            const cacheStatus = fightsScalper?.getFightHistoryCacheStatus
+              ? fightsScalper.getFightHistoryCacheStatus()
+              : null;
+            const historyToolResult = buildHistoryToolResult(result, cacheStatus);
+            turnToolEffects.historyRowCount = Number(historyToolResult.rowCount) || 0;
+            turnToolEffects.historyLatestFightDate = historyToolResult.latestFightDate || null;
+            return historyToolResult;
+          }
+
+          // --- New path: ufc_stats.db via ufcStatsTool ---
+          if (FIGHT_DATA_FAIL_CLOSED && !ufcStats?.isAvailable?.()) {
             return {
               ok: false,
-              error: 'fightsScalperTool no esta disponible.',
+              error: 'fight_data_not_ready',
+              message: 'Los datos de historial no están disponibles. Reintenta en unos minutos.',
             };
+          }
+          if (!ufcStats?.getFightHistoryRows) {
+            return { ok: false, error: 'ufcStatsTool no disponible. Verificá UFC_STATS_DB_PATH.' };
           }
 
           const fighters = Array.isArray(args.fighters)
             ? args.fighters.map((value) => String(value).trim()).filter(Boolean).slice(0, 4)
-            : undefined;
+            : [];
           const query = String(args.query || resolvedMessage || originalMessage || '').trim();
-          const strict =
-            typeof args.strict === 'boolean'
-              ? args.strict
-              : Boolean(fighters && fighters.length);
 
-          const result = await fightsScalper.getFighterHistory({
-            message: query,
-            fighters,
-            strict,
+          // Extract up to 2 fighter names from fighters array or query
+          const fighterA = fighters[0] || null;
+          const fighterB = fighters[1] || null;
+          const historyRows = ufcStats.getFightHistoryRows({
+            fighterA: fighterA || query || undefined,
+            fighterB: fighterB || undefined,
+            limit: 20,
           });
 
-          if (result?.fighters?.length >= 2 && conversationStore?.setLastResolvedFight) {
-            const resolvedFight = {
-              fighterA: result.fighters[0],
-              fighterB: result.fighters[1],
-            };
+          // Build result shape compatible with buildHistoryToolResult
+          const extractedFighters = [];
+          if (fighterA) extractedFighters.push(fighterA);
+          if (fighterB) extractedFighters.push(fighterB);
+
+          const statsResult = {
+            fighters: extractedFighters,
+            rows: historyRows,
+            ok: historyRows.length > 0,
+            rowCount: historyRows.length,
+          };
+
+          if (statsResult.fighters.length >= 2 && conversationStore?.setLastResolvedFight) {
+            const resolvedFight = { fighterA: statsResult.fighters[0], fighterB: statsResult.fighters[1] };
             conversationStore.setLastResolvedFight(chatId, resolvedFight);
             runtimeState.resolvedFight = resolvedFight;
           }
 
-          const cacheStatus = fightsScalper?.getFightHistoryCacheStatus
-            ? fightsScalper.getFightHistoryCacheStatus()
+          const freshness = ufcStats.getFreshnessMeta ? ufcStats.getFreshnessMeta() : null;
+          const cacheStatus = freshness
+            ? {
+                rowCount: freshness.fightCount,
+                latestFightDate: freshness.latestFightDate,
+                dataSource: 'ufc_stats_db',
+                sheetAgeDays: null,
+                potentialGap: false,
+              }
             : null;
-          const historyToolResult = buildHistoryToolResult(result, cacheStatus);
+          const historyToolResult = buildHistoryToolResult(statsResult, cacheStatus);
           turnToolEffects.historyRowCount = Number(historyToolResult.rowCount) || 0;
-          turnToolEffects.historyLatestFightDate =
-            historyToolResult.latestFightDate || null;
-
+          turnToolEffects.historyLatestFightDate = historyToolResult.latestFightDate || null;
           return historyToolResult;
         }
 
@@ -8613,6 +8715,31 @@ export function createBettingWizard({
             eventName: args.event_name,
             limit: args.limit,
           });
+        }
+
+        case 'get_event_fights': {
+          if (FIGHT_DATA_FAIL_CLOSED && !ufcStats?.isAvailable?.()) {
+            return { ok: false, error: 'ufc_stats_db_not_available. Reintenta en unos minutos.' };
+          }
+          if (!userStore?.getEventFightMirror) {
+            return { ok: false, error: 'Mirror cache no configurado.' };
+          }
+          const wk = String(args.watch_key || 'next_event').trim();
+          const fights = userStore.getEventFightMirror(wk) || [];
+          const eventState = userStore?.getEventWatchState?.(wk);
+          return {
+            ok: true,
+            watchKey: wk,
+            eventName: eventState?.eventName || null,
+            eventDate: eventState?.eventDateUtc || null,
+            fights: fights.map((f) => ({
+              fightId: f.fightId,
+              fighterA: f.fighterA,
+              fighterB: f.fighterB,
+              weightClass: f.weightClass,
+              cardPosition: f.cardPosition,
+            })),
+          };
         }
 
         case 'get_user_profile': {
@@ -9097,6 +9224,19 @@ export function createBettingWizard({
           )
         );
       }
+
+      // Auto-inject event card context when analyzing quotes so the LLM can
+      // resolve partial fighter references from screenshots without extra tool calls.
+      if (isGuidedAnalyzeTurn && userStore?.getEventWatchState) {
+        const cardContext = _buildEventCardContext(
+          userStore.getEventWatchState('next_event') ||
+          userStore.getEventWatchState('current_event')
+        );
+        if (cardContext) {
+          extraSections.push('[EVENT_CARD_CONTEXT]', cardContext);
+        }
+      }
+
       if (wantsLedger && ledgerSummary) {
         extraSections.push(
           '[LEDGER_SUMMARY]',

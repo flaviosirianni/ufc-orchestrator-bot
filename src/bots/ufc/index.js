@@ -64,7 +64,14 @@ import {
   insertFightBetScoringSnapshots,
   getDbPath,
   creditFromMercadoPagoPayment,
+  getEventFightMirror,
+  getEventFighterMirror,
+  upsertEventFightMirror,
+  upsertEventFighterMirror,
+  clearEventMirror,
+  getEventMirrorBuiltAt,
 } from '../../core/sqliteStore.js';
+import { initEventMirrorService } from '../../core/eventMirrorService.js';
 import { startUfcDbReliabilityLoop } from './ufcReliability.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
@@ -159,13 +166,29 @@ export async function bootstrapBot({ manifest } = {}) {
 
   ufcStats.initUfcStatsTool({ dbPath: process.env.UFC_STATS_DB_PATH });
 
-  fightsScalper.configureFightHistoryStore({
-    getCacheSnapshot: getFightHistoryCacheSnapshot,
-    upsertCacheSnapshot: upsertFightHistoryCacheSnapshot,
-  });
+  if (process.env.UFC_ENABLE_LEGACY_SHEETS === 'true') {
+    fightsScalper.configureFightHistoryStore({
+      getCacheSnapshot: getFightHistoryCacheSnapshot,
+      upsertCacheSnapshot: upsertFightHistoryCacheSnapshot,
+    });
+    fightsScalper.startFightHistorySync({
+      intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
+    });
+    console.log('[bootstrap][ufc] Legacy Sheets sync enabled (UFC_ENABLE_LEGACY_SHEETS=true)');
+  } else {
+    console.log('[bootstrap][ufc] Using ufc_stats.db as fight data source (Sheets sync disabled)');
+  }
 
-  fightsScalper.startFightHistorySync({
-    intervalMs: Number(process.env.FIGHT_HISTORY_SYNC_INTERVAL_MS ?? '21600000'),
+  initEventMirrorService({
+    ufcStats,
+    store: {
+      getEventWatchState,
+      getEventFightMirror,
+      upsertEventFightMirror,
+      upsertEventFighterMirror,
+      clearEventMirror,
+    },
+    refreshMs: Number(process.env.EVENT_FIGHT_MIRROR_REFRESH_MS ?? '3600000'),
   });
 
   const bettingWizard = createBettingWizard({
@@ -226,6 +249,8 @@ export async function bootstrapBot({ manifest } = {}) {
       listLatestRelevantNews,
       getUserIntelPrefs,
       updateUserIntelPrefs,
+      getEventFightMirror,
+      getEventFighterMirror,
       listLatestOddsMarketsForFight,
       listLatestOddsMarketsForEvent,
       listUpcomingOddsEvents,
@@ -322,6 +347,7 @@ export async function bootstrapBot({ manifest } = {}) {
 
   startAutoSettlementMonitor({
     intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+    getFightHistoryRows: ufcStats.getFightHistoryRows,
     getFightHistoryCacheSnapshot,
     listPendingBetsForAutoSettlement,
     applyBetMutation,

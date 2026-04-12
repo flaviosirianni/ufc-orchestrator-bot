@@ -222,6 +222,7 @@ function buildNotificationText({ bet, settlement }) {
 
 export function startAutoSettlementMonitor({
   intervalMs = Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+  getFightHistoryRows,
   getFightHistoryCacheSnapshot,
   listPendingBetsForAutoSettlement,
   applyBetMutation,
@@ -229,9 +230,14 @@ export function startAutoSettlementMonitor({
   notify,
 } = {}) {
   if (
-    typeof getFightHistoryCacheSnapshot !== 'function' ||
     typeof listPendingBetsForAutoSettlement !== 'function' ||
     typeof applyBetMutation !== 'function'
+  ) {
+    return { stop: () => {} };
+  }
+  if (
+    typeof getFightHistoryRows !== 'function' &&
+    typeof getFightHistoryCacheSnapshot !== 'function'
   ) {
     return { stop: () => {} };
   }
@@ -242,8 +248,13 @@ export function startAutoSettlementMonitor({
     if (inFlight) return;
     inFlight = true;
     try {
-      const cache = getFightHistoryCacheSnapshot('default');
-      const rows = Array.isArray(cache?.rows) ? cache.rows : [];
+      let rows = [];
+      if (typeof getFightHistoryRows === 'function') {
+        rows = getFightHistoryRows() || [];
+      } else {
+        const cache = getFightHistoryCacheSnapshot('default');
+        rows = Array.isArray(cache?.rows) ? cache.rows : [];
+      }
       if (!rows.length) {
         return;
       }
