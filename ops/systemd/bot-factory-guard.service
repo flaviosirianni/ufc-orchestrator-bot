@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=oneshot
 User=ubuntu
-ExecStart=/home/ubuntu/bot-factory/ops/scripts/guard-bot-factory.sh
+ExecStart=/home/ubuntu/apps/bot-factory/ops/scripts/guard-bot-factory.sh
 EnvironmentFile=/etc/bot-factory/guard.env
 Environment=GUARD_LOG_FILE=/tmp/bot-factory-guard.log
 StandardOutput=journal

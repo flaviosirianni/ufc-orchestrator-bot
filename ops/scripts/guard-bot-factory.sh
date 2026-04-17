@@ -3,7 +3,7 @@
 # Requires: jq, systemd, bash 4+
 set -euo pipefail
 
-BOTS=("ufc:3301" "nutrition:3302")
+BOTS=("ufc:3000" "nutrition:3001")
 STATE_FILE="/tmp/bot-factory-guard-state.json"
 LOCK_FILE="/tmp/bot-factory-guard.lock"
 LOG_FILE="${GUARD_LOG_FILE:-/var/log/bot-factory-guard.log}"
