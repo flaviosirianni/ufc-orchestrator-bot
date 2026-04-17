@@ -66,3 +66,40 @@ sudo systemctl reload nginx
   - `ops/scripts/backup-bot-factory.sh`
 - Check rapido de servicios:
   - `ops/scripts/check-bot-factory-services.sh`
+
+## Runbook de incidentes
+
+### Diagnóstico rápido
+```bash
+systemctl status "bot-factory@ufc" "bot-factory@nutrition" billing-service
+curl -s http://localhost:3301/health | jq '{ok,runtime:.runtime.telegram}'
+curl -s http://localhost:3302/health | jq '{ok,runtime:.runtime.telegram}'
+journalctl -u "bot-factory@ufc" -n 50 --no-pager
+journalctl -u bot-factory-guard.service -n 20 --no-pager
+```
+
+### Caso: 409 Conflict sostenido (> 5 min)
+1. `curl -s http://localhost:3301/health | jq '.runtime.telegram.degraded'`
+2. Si `true`: el guard lo resolverá en el próximo ciclo (≤60s). Si no hay guard activo: `systemctl start bot-factory-guard.service`.
+3. Si persiste: `systemctl restart bot-factory@ufc` manual.
+4. Si sigue: rotar token Telegram → actualizar `/etc/bot-factory/ufc.env` → `systemctl restart bot-factory@ufc`.
+
+### Caso: Bot arranca pero no responde en Telegram
+1. Verificar `/health` en el puerto correspondiente.
+2. `journalctl -u "bot-factory@ufc" -n 100` — buscar errores de DB o bootstrap.
+3. Si `idleMs` > 5 min, el watchdog (4 min) debería haber actuado. Verificar `recoveryCount` y `degraded`.
+4. Si `degraded: true`, esperar que el guard reinicie (ventana de 30 min) o reiniciar manual.
+
+### Caso: systemctl restart no recupera
+1. `journalctl -u "bot-factory@ufc" -n 200 | grep -i 'error\|fail\|db'`
+2. `ls -lh /home/ubuntu/bot-data/*.db`
+3. `systemctl cat "bot-factory@ufc" | grep EnvironmentFile` → verificar `/etc/bot-factory/ufc.env`
+
+### Ventanas y límites configurables
+| Var | Default | Propósito |
+|-----|---------|-----------|
+| `TELEGRAM_POLLING_RECOVERY_WINDOW_MS` | 3600000 (1h) | Ventana para contar recoveries |
+| `TELEGRAM_POLLING_RECOVERY_MAX_PER_WINDOW` | 10 | Max recoveries antes de degraded |
+| `TELEGRAM_POLLING_CONFLICT_RECOVERY_COOLDOWN_MS` | 60000 | Cooldown entre recoveries por 409 |
+| `RESTART_WINDOW_SEC` | 1800 (30min) | Cooldown del guard entre restarts |
+| `STALE_IDLE_SEC` | 300 (5min) | Idle que dispara restart si hay conflictos |
