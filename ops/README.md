@@ -103,3 +103,9 @@ journalctl -u bot-factory-guard.service -n 20 --no-pager
 | `TELEGRAM_POLLING_CONFLICT_RECOVERY_COOLDOWN_MS` | 60000 | Cooldown entre recoveries por 409 |
 | `RESTART_WINDOW_SEC` | 1800 (30min) | Cooldown del guard entre restarts |
 | `STALE_IDLE_SEC` | 300 (5min) | Idle que dispara restart si hay conflictos |
+
+### Orden de rollout recomendado
+1. Deploy app changes en **nutrition** (canary). Observar `/health` 24h.
+2. Deploy app changes en **ufc**.
+3. Instalar guard script + timer en servidor.
+4. Smoke test: `curl /health` en ambos puertos + `/start` en Telegram.
