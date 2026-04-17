@@ -27,6 +27,15 @@ const POLLING_WATCHDOG_INTERVAL_MS = Number(
 const POLLING_CONFLICT_RECOVERY_COOLDOWN_MS = Number(
   process.env.TELEGRAM_POLLING_CONFLICT_RECOVERY_COOLDOWN_MS ?? '60000'
 );
+const POLLING_RECOVERY_COOLDOWN_MS = Number(
+  process.env.TELEGRAM_POLLING_RECOVERY_COOLDOWN_MS ?? '30000'
+);
+const POLLING_RECOVERY_WINDOW_MS = Number(
+  process.env.TELEGRAM_POLLING_RECOVERY_WINDOW_MS ?? String(60 * 60 * 1000)
+);
+const POLLING_RECOVERY_MAX_PER_WINDOW = Number(
+  process.env.TELEGRAM_POLLING_RECOVERY_MAX_PER_WINDOW ?? '10'
+);
 const CALLBACK_DEDUP_WINDOW_MS = Number(
   process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ?? '2500'
 );
@@ -1372,6 +1381,30 @@ export function startTelegramBot(router, options = {}) {
       POLLING_WATCHDOG_INTERVAL_MS,
     POLLING_WATCHDOG_INTERVAL_MS
   );
+  const pollingRecoveryCooldownMs = toPositiveInt(
+    options.pollingRecoveryCooldownMs ??
+      process.env.TELEGRAM_POLLING_RECOVERY_COOLDOWN_MS ??
+      POLLING_RECOVERY_COOLDOWN_MS,
+    POLLING_RECOVERY_COOLDOWN_MS
+  );
+  const pollingConflictRecoveryCooldownMs = toPositiveInt(
+    options.pollingConflictRecoveryCooldownMs ??
+      process.env.TELEGRAM_POLLING_CONFLICT_RECOVERY_COOLDOWN_MS ??
+      POLLING_CONFLICT_RECOVERY_COOLDOWN_MS,
+    POLLING_CONFLICT_RECOVERY_COOLDOWN_MS
+  );
+  const pollingRecoveryWindowMs = toPositiveInt(
+    options.pollingRecoveryWindowMs ??
+      process.env.TELEGRAM_POLLING_RECOVERY_WINDOW_MS ??
+      POLLING_RECOVERY_WINDOW_MS,
+    POLLING_RECOVERY_WINDOW_MS
+  );
+  const pollingRecoveryMaxPerWindow = toPositiveInt(
+    options.pollingRecoveryMaxPerWindow ??
+      process.env.TELEGRAM_POLLING_RECOVERY_MAX_PER_WINDOW ??
+      POLLING_RECOVERY_MAX_PER_WINDOW,
+    POLLING_RECOVERY_MAX_PER_WINDOW
+  );
   const nowProvider = typeof options.nowProvider === 'function' ? options.nowProvider : Date.now;
   const defaultGuidedAction = getDefaultGuidedAction({
     guidedMenuId,
@@ -1390,9 +1423,13 @@ export function startTelegramBot(router, options = {}) {
   const pollingRecovery = {
     inFlight: false,
     lastAttemptAt: 0,
-    cooldownMs: 30_000,
+    cooldownMs: pollingRecoveryCooldownMs,
     lastConflictRecoveryAt: 0,
-    conflictCooldownMs: Math.max(10_000, POLLING_CONFLICT_RECOVERY_COOLDOWN_MS),
+    conflictCooldownMs: Math.max(10_000, pollingConflictRecoveryCooldownMs),
+    recoveryWindowMs: pollingRecoveryWindowMs,
+    recoveryMaxPerWindow: pollingRecoveryMaxPerWindow,
+    recoveryWindowStart: 0,
+    recoveryWindowCount: 0,
   };
   const pollingStatus = {
     startedAt: Date.now(),
@@ -1407,6 +1444,7 @@ export function startTelegramBot(router, options = {}) {
     lastRecoveryReason: '',
     lastErrorMessage: '',
     watchdogChecks: 0,
+    degraded: false,
   };
 
   function touchPollingActivity(kind = 'update') {
@@ -1420,9 +1458,26 @@ export function startTelegramBot(router, options = {}) {
     if (typeof bot.stopPolling !== 'function' || typeof bot.startPolling !== 'function') {
       return;
     }
-    const nowMs = Date.now();
+    const nowMs = nowProvider();
     if (pollingRecovery.inFlight) return;
     if (nowMs - pollingRecovery.lastAttemptAt < pollingRecovery.cooldownMs) return;
+
+    // Reset window if expired
+    if (nowMs - pollingRecovery.recoveryWindowStart > pollingRecovery.recoveryWindowMs) {
+      pollingRecovery.recoveryWindowStart = nowMs;
+      pollingRecovery.recoveryWindowCount = 0;
+      pollingStatus.degraded = false;
+    }
+    if (pollingRecovery.recoveryWindowCount >= pollingRecovery.recoveryMaxPerWindow) {
+      if (!pollingStatus.degraded) {
+        pollingStatus.degraded = true;
+        console.warn(
+          `[telegram] degraded: recovery limit ${pollingRecovery.recoveryWindowCount}/${pollingRecovery.recoveryMaxPerWindow} in window`
+        );
+      }
+      return;
+    }
+    pollingRecovery.recoveryWindowCount += 1;
 
     pollingRecovery.inFlight = true;
     pollingRecovery.lastAttemptAt = nowMs;
@@ -1435,7 +1490,7 @@ export function startTelegramBot(router, options = {}) {
     try {
       await bot.startPolling();
       touchPollingActivity('update');
-      pollingStatus.lastRecoveryAt = Date.now();
+      pollingStatus.lastRecoveryAt = nowProvider();
       pollingStatus.recoveryCount += 1;
       console.log(`[telegram] polling recovered${reason ? ` (${reason})` : ''}`);
     } catch (startError) {
@@ -2922,6 +2977,10 @@ export function startTelegramBot(router, options = {}) {
         watchdogIdleThresholdMs: pollingIdleWatchdogMs,
         watchdogIntervalMs: pollingWatchdogIntervalMs,
         pollingRecoveryInFlight: Boolean(pollingRecovery.inFlight),
+        degraded: pollingStatus.degraded,
+        recoveryWindowCount: pollingRecovery.recoveryWindowCount,
+        recoveryMaxPerWindow: pollingRecovery.recoveryMaxPerWindow,
+        recoveryWindowMs: pollingRecovery.recoveryWindowMs,
       };
     },
     async sendSystemMessage({ chatId, text } = {}) {

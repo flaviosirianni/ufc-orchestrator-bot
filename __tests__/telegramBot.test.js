@@ -1353,6 +1353,70 @@ export async function runTelegramBotTests() {
     assert.equal(fakeBot.answeredCallbacks.length, 3);
   });
 
+  // Test A — degraded mode after exceeding recovery limit
+  tests.push(async () => {
+    const fakeBot = new FakeTelegramBot();
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      pollingRecoveryCooldownMs: 1,
+      pollingConflictRecoveryCooldownMs: 1,
+      pollingRecoveryWindowMs: 60_000,
+      pollingRecoveryMaxPerWindow: 2,
+    });
+
+    for (let i = 0; i < 4; i++) {
+      await fakeBot.emit('polling_error', new Error('ETIMEDOUT'));
+      await sleep(5);
+    }
+
+    const status = runtime.getRuntimeStatus();
+    assert.equal(status.degraded, true, 'debe entrar en degraded tras superar limite');
+    assert.ok(fakeBot.startPollingCalls <= 2, `solo ${fakeBot.startPollingCalls} recoveries, max 2`);
+    runtime.close();
+  });
+
+  // Test B — window expiry resets degraded
+  tests.push(async () => {
+    let mockNow = 1_000_000;
+    const fakeBot = new FakeTelegramBot();
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      nowProvider: () => mockNow,
+      pollingRecoveryCooldownMs: 1,
+      pollingConflictRecoveryCooldownMs: 1,
+      pollingRecoveryWindowMs: 500,
+      pollingRecoveryMaxPerWindow: 1,
+    });
+
+    // First recovery passes
+    await fakeBot.emit('polling_error', new Error('ETIMEDOUT'));
+    await sleep(5);
+    assert.equal(fakeBot.startPollingCalls, 1);
+
+    // Second in same window → blocked → degraded
+    mockNow += 100;
+    await fakeBot.emit('polling_error', new Error('ETIMEDOUT'));
+    await sleep(5);
+    assert.equal(runtime.getRuntimeStatus().degraded, true);
+
+    // Advance past window → resets
+    mockNow += 600;
+    await fakeBot.emit('polling_error', new Error('ETIMEDOUT'));
+    await sleep(5);
+    const status = runtime.getRuntimeStatus();
+    assert.equal(status.degraded, false, 'ventana expirada → degraded resetea');
+    assert.equal(fakeBot.startPollingCalls, 2, 'una recovery adicional tras reset');
+    runtime.close();
+  });
+
   for (const test of tests) {
     await test();
   }
