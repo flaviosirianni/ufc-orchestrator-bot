@@ -562,6 +562,7 @@ export async function bootstrapBot({ manifest } = {}) {
     botId,
     billingClient,
     legacyTopup,
+    statusProvider: () => ({ telegram: telegram?.getRuntimeStatus?.() ?? null }),
     onTopupApplied: async (event = {}) => {
       if (!telegram?.sendSystemMessage) return;
       const userId = String(event.user_id || '').trim();
