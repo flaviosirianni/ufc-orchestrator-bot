@@ -82,7 +82,7 @@ for entry in "${BOTS[@]}"; do
     else
       log "[$bot] reiniciando: $reason"
       alert "Reiniciando $bot — $reason"
-      if systemctl restart "bot-factory@${bot}"; then
+      if sudo systemctl restart "bot-factory@${bot}"; then
         last_restart[$bot]=$now
         log "[$bot] restart OK"
       else
