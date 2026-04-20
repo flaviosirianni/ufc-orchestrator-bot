@@ -11,11 +11,12 @@ WorkingDirectory=/home/ubuntu/apps/bot-factory
 EnvironmentFile=/etc/bot-factory/%i.env
 Environment=NODE_ENV=production
 Environment=BOT_ID=%i
-ExecStart=/usr/bin/npm run start:bot
+ExecStart=/usr/bin/node src/platform/launcher.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
 KillSignal=SIGTERM
+KillMode=control-group
 StandardOutput=journal
 StandardError=journal
 

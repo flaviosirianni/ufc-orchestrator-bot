@@ -69,8 +69,8 @@ for entry in "${BOTS[@]}"; do
   prev_conflicts[$bot]=$conflicts
 
   reason=""
-  if [[ "$degraded" == "true" ]]; then
-    reason="degraded_mode"
+  if [[ "$degraded" == "true" ]] && (( idle_sec > STALE_IDLE_SEC )); then
+    reason="degraded+stale idle=${idle_sec}s"
   elif (( idle_sec > STALE_IDLE_SEC && conflicts > prev )); then
     reason="stale+conflicts idle=${idle_sec}s new=$((conflicts - prev))"
   fi
