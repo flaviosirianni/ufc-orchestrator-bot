@@ -1508,6 +1508,10 @@ export function startTelegramBot(router, options = {}) {
           const nowMs = Date.now();
           const idleMs = nowMs - Number(pollingStatus.lastUpdateAt || nowMs);
           if (idleMs < pollingIdleWatchdogMs) return;
+          // Only recover if a polling error occurred during this idle period.
+          // Pure idleness (no messages but polling healthy) shouldn't consume the recovery budget.
+          const lastErrorAt = Number(pollingStatus.lastPollingErrorAt || 0);
+          if (!lastErrorAt || lastErrorAt < Number(pollingStatus.lastUpdateAt || 0)) return;
           void recoverPolling(`watchdog_idle_${idleMs}ms`);
         }, pollingWatchdogIntervalMs)
       : null;

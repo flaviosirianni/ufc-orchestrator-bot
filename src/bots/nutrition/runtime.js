@@ -1421,6 +1421,8 @@ const NUTRITION_MATCH_STOPWORDS = new Set([
   'unos',
   'unas',
   'real',
+  'plato',
+  'platos',
   'taza',
   'tazon',
   'porcion',
