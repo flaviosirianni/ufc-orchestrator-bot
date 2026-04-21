@@ -317,6 +317,22 @@ function detectDateHint(message = '', todayIsoDate = '') {
     }
   }
 
+  // DD/MM without year (require 2-digit day to avoid false-matching fractions like "1/2")
+  const dmyNoYearMatch = text.match(/\b(\d{2})\/(\d{1,2})\b/);
+  if (dmyNoYearMatch) {
+    const day = Number(dmyNoYearMatch[1]);
+    const month = Number(dmyNoYearMatch[2]);
+    const year = Number(todayParts?.year || new Date().getFullYear());
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return {
+        localDate: `${year.toString().padStart(4, '0')}-${month
+          .toString()
+          .padStart(2, '0')}-${day.toString().padStart(2, '0')}`,
+        matchedToken: dmyNoYearMatch[0],
+      };
+    }
+  }
+
   const monthNameToNumber = {
     enero: 1,
     feb: 2,

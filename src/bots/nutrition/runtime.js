@@ -1471,7 +1471,12 @@ function tokenizeForIntakeMatch(value = '') {
       if (token.length > 3 && token.endsWith('s')) return token.slice(0, -1);
       return token;
     })
-    .filter((token) => token.length >= 3 && !NUTRITION_MATCH_STOPWORDS.has(token));
+    .filter(
+      (token) =>
+        token.length >= 3 &&
+        !NUTRITION_MATCH_STOPWORDS.has(token) &&
+        !/^\d+h?$/.test(token)
+    );
 }
 
 function countTokenOverlap(itemTokens = [], messageTokens = []) {
@@ -2963,6 +2968,7 @@ async function parseStructuredIntakeWithModel({
     '- Usa catalog_id cuando encuentres producto en el catalogo recibido.',
     '- Prioriza primero "productos fijos por usuario" (alias personales), luego historial de productos consumidos por usuario, y recién después el catalogo general.',
     '- No inventes catalog_id; si no existe, deja null y completa food_name.',
+    '- En food_name, escribí el alimento exactamente como lo mencionó el usuario (ej: si dijo "fideos", food_name="fideos"; no uses el nombre canónico del catálogo).',
     '- Si hay temporalidad explicita, mapea local_date/local_time; si no, usa null.',
     '- Si no hay match de catálogo pero se entiende el item, estimá macros del item en estimated_totals y confidence media/baja (no bloquear).',
     '- Solo pedir aclaracion si de verdad no se puede estimar ni identificar el item.',
