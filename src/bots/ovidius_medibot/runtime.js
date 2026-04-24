@@ -976,7 +976,7 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
     },
   };
 
-  const telegramToken = resolveManifestTelegramToken(manifest);
+  const { token: telegramToken, tokenEnvName } = resolveManifestTelegramToken(manifest);
   const telegram = telegramToken
     ? startTelegramBot(router, {
         interactionMode: manifest?.interaction_mode || 'guided_strict',
@@ -984,7 +984,7 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
         guidedLedgerEnabled: false,
         token: telegramToken,
       })
-    : createDisabledTelegramRuntime({ botId, tokenEnvName: manifest?.telegram_token_env || 'OVIDIUS_MEDIBOT_TELEGRAM_BOT_TOKEN' });
+    : createDisabledTelegramRuntime({ botId, tokenEnvName });
 
   const healthServer = createHealthServer(port, {
     botId,
