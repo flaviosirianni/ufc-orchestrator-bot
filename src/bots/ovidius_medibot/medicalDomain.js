@@ -323,3 +323,12 @@ export function estimateDocumentType(filename = '', mimeType = '', rawText = '')
   if (text.includes('vacun') || text.includes('inmuniz')) return 'vaccination';
   return 'other';
 }
+
+export function parseFeedbackPayload(rawMessage = '', { minLength = 10 } = {}) {
+  const normalizedMessage = String(rawMessage || '').replace(/\s+/g, ' ').trim();
+  if (!normalizedMessage) return { ok: false, error: 'empty_feedback_payload' };
+  if (normalizedMessage.length < Math.max(1, Number(minLength) || 1)) {
+    return { ok: false, error: 'feedback_too_short' };
+  }
+  return { ok: true, messageText: normalizedMessage };
+}

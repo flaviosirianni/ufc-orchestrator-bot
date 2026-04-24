@@ -52,6 +52,7 @@ import {
   recordMedUsage,
   withMedOperationReceipt,
   addMedBugReport,
+  addMedFeatureRequest,
 } from './medicalStore.js';
 import { startMedicalDbReliabilityLoop } from './medicalReliability.js';
 import {
@@ -72,6 +73,7 @@ import {
   resolveDocumentTypeLabel,
   resolveStatusLabel,
   estimateDocumentType,
+  parseFeedbackPayload,
 } from './medicalDomain.js';
 
 // ──────────────────────────────────────────────
@@ -176,6 +178,21 @@ function normalizeRouteInput(input) {
 function buildSpendIdempotencyKey(userId, guidedAction, sourceMessageId) {
   const raw = `med:${userId}:${guidedAction}:${sourceMessageId}`;
   return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
+}
+
+function formatFeedbackWriteFailure(action = '', errorCode = '') {
+  const suffix = errorCode ? ` (detalle: ${errorCode})` : '';
+  if (action === 'report_bug') return `❌ No pude guardar tu reporte de bug${suffix}. Reintentá con una descripción breve en texto.`;
+  if (action === 'submit_feature_request') return `❌ No pude guardar tu feature request${suffix}. Reintentá con una descripción breve en texto.`;
+  return `❌ No pude guardar el registro en la DB${suffix}.`;
+}
+
+function formatIdempotencyNotice(idempotencyStatus = '') {
+  const normalized = String(idempotencyStatus || '').toLowerCase();
+  if (normalized === 'replayed' || normalized === 'replayed_payload_mismatch') {
+    return 'ℹ️ Ese mensaje ya estaba procesado; no dupliqué datos.';
+  }
+  return '';
 }
 
 // ──────────────────────────────────────────────
@@ -590,7 +607,12 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
       } catch { /* non-fatal */ }
 
       // Credits gate
-      if (CREDIT_ENFORCE && guidedAction !== 'view_credits') {
+      const isNonBillableAction =
+        guidedAction === 'view_credits' ||
+        guidedAction === 'report_bug' ||
+        guidedAction === 'submit_feature_request' ||
+        guidedAction === 'med_settings';
+      if (CREDIT_ENFORCE && !isNonBillableAction) {
         try {
           await billingBridge.refreshCreditState(userId);
           const state = billingBridge.getCreditState(userId, creditFreeWeekly);
@@ -602,7 +624,7 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
         } catch { /* billing unavailable — allow */ }
       }
 
-      // view_credits
+      // View credits
       if (guidedAction === 'view_credits') {
         try {
           await billingBridge.refreshCreditState(userId);
@@ -616,10 +638,57 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
         }
       }
 
-      // Bug report
-      if (guidedAction === 'med_report_bug') {
-        try { addMedBugReport(userId, chatId, sourceMessageId, message || ''); } catch { /* ignore */ }
-        return '✅ Reporte recibido. ¡Gracias por avisarnos!';
+      // Bug report + Feature request
+      if (guidedAction === 'report_bug' || guidedAction === 'submit_feature_request') {
+        const cleanFeedback = String(message || '').trim();
+        if (!cleanFeedback) {
+          return [
+            'Necesito un mensaje de texto para guardar tu feedback.',
+            guidedAction === 'report_bug'
+              ? 'Ejemplo: `Al interpretar un estudio, el bot no respondió y se quedó cargando.`'
+              : 'Ejemplo: `Me gustaría poder exportar el resumen médico en PDF para llevarlo al médico.`',
+          ].join('\n');
+        }
+        const parsedFeedback = parseFeedbackPayload(cleanFeedback, { minLength: 10 });
+        if (!parsedFeedback.ok) {
+          if (parsedFeedback.error === 'feedback_too_short') {
+            return 'Tu mensaje es muy corto. Sumá un poco más de detalle para poder revisarlo bien.';
+          }
+          return 'No pude leer tu feedback. Reintentá con un mensaje de texto.';
+        }
+        const feedbackSourceMessageId =
+          String(sourceMessageId || '').trim() || `feedback_${crypto.randomUUID()}`;
+        const userTimeZone = String(DEFAULT_USER_TIMEZONE);
+        const now = new Date().toLocaleString('es-AR', { timeZone: userTimeZone });
+        if (guidedAction === 'report_bug') {
+          const saved = addMedBugReport(
+            userId,
+            { chatId, messageText: parsedFeedback.messageText },
+            { idempotency: { sourceMessageId: feedbackSourceMessageId, operationType: 'report_bug' } }
+          );
+          if (!saved?.ok) return formatFeedbackWriteFailure('report_bug', saved?.error || 'db_write_failed');
+          const idempotencyNotice = formatIdempotencyNotice(saved.idempotencyStatus);
+          return [
+            '✅ Gracias, guardé tu reporte de bug.',
+            `- ID: ${saved.reportId || 'N/D'}`,
+            `- Fecha: ${now} (${userTimeZone})`,
+            idempotencyNotice,
+          ].filter(Boolean).join('\n');
+        } else {
+          const saved = addMedFeatureRequest(
+            userId,
+            { chatId, messageText: parsedFeedback.messageText },
+            { idempotency: { sourceMessageId: feedbackSourceMessageId, operationType: 'submit_feature_request' } }
+          );
+          if (!saved?.ok) return formatFeedbackWriteFailure('submit_feature_request', saved?.error || 'db_write_failed');
+          const idempotencyNotice = formatIdempotencyNotice(saved.idempotencyStatus);
+          return [
+            '✅ Gracias, guardé tu feature request.',
+            `- ID: ${saved.requestId || 'N/D'}`,
+            `- Fecha: ${now} (${userTimeZone})`,
+            idempotencyNotice,
+          ].filter(Boolean).join('\n');
+        }
       }
 
       // Settings
