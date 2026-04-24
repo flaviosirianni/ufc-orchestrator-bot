@@ -185,9 +185,25 @@ export function ensureMedicalSchema() {
       chat_id TEXT,
       source_message_id TEXT NOT NULL,
       message_text TEXT NOT NULL,
-      status TEXT DEFAULT 'open',
+      status TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_med_bug_reports_user_time
+      ON med_bug_reports (telegram_user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS med_feature_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id TEXT NOT NULL,
+      chat_id TEXT,
+      source_message_id TEXT NOT NULL,
+      message_text TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_med_feature_requests_user_time
+      ON med_feature_requests (telegram_user_id, created_at DESC);
   `);
 
   const profileMigrations = [
@@ -857,9 +873,74 @@ export function withMedOperationReceipt({ userId, operationType, sourceMessageId
 // BUG REPORTS
 // ──────────────────────────────────────────────
 
-export function addMedBugReport(userId, chatId, sourceMessageId, messageText) {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO med_bug_reports (telegram_user_id, chat_id, source_message_id, message_text, status, created_at) VALUES (?, ?, ?, ?, 'open', ?)`
-  ).run(String(userId), String(chatId || ''), String(sourceMessageId), String(messageText), new Date().toISOString());
+export function addMedBugReport(userId = '', payload = {}, options = {}) {
+  ensureMedicalSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const messageText = String(payload.messageText || '').trim();
+  const chatId = String(payload.chatId || '').trim() || null;
+  const sourceMessageId = String(options?.idempotency?.sourceMessageId || '').trim();
+  if (!normalizedUserId || !messageText || !sourceMessageId) {
+    return { ok: false, error: 'missing_bug_report_payload' };
+  }
+
+  const mutationResult = withMedOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_bug_report'),
+    sourceMessageId,
+    applyMutation: () => {
+      const createdAt = new Date().toISOString();
+      const result = getDb()
+        .prepare(
+          `INSERT INTO med_bug_reports (telegram_user_id, chat_id, source_message_id, message_text, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(normalizedUserId, chatId, sourceMessageId, messageText, 'new', createdAt);
+      if ((Number(result?.changes) || 0) !== 1) throw new Error('insert_bug_report_failed');
+      return { reportId: Number(result?.lastInsertRowid) || null, createdAt };
+    },
+  });
+
+  if (!mutationResult?.ok) return mutationResult;
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    reportId: Number(mutationResult.result?.reportId) || null,
+    createdAt: String(mutationResult.result?.createdAt || ''),
+  };
+}
+
+export function addMedFeatureRequest(userId = '', payload = {}, options = {}) {
+  ensureMedicalSchema();
+  const normalizedUserId = String(userId || '').trim();
+  const messageText = String(payload.messageText || '').trim();
+  const chatId = String(payload.chatId || '').trim() || null;
+  const sourceMessageId = String(options?.idempotency?.sourceMessageId || '').trim();
+  if (!normalizedUserId || !messageText || !sourceMessageId) {
+    return { ok: false, error: 'missing_feature_request_payload' };
+  }
+
+  const mutationResult = withMedOperationReceipt({
+    userId: normalizedUserId,
+    operationType: String(options?.idempotency?.operationType || 'add_feature_request'),
+    sourceMessageId,
+    applyMutation: () => {
+      const createdAt = new Date().toISOString();
+      const result = getDb()
+        .prepare(
+          `INSERT INTO med_feature_requests (telegram_user_id, chat_id, source_message_id, message_text, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(normalizedUserId, chatId, sourceMessageId, messageText, 'new', createdAt);
+      if ((Number(result?.changes) || 0) !== 1) throw new Error('insert_feature_request_failed');
+      return { requestId: Number(result?.lastInsertRowid) || null, createdAt };
+    },
+  });
+
+  if (!mutationResult?.ok) return mutationResult;
+  return {
+    ok: true,
+    idempotencyStatus: mutationResult.idempotencyStatus || null,
+    requestId: Number(mutationResult.result?.requestId) || null,
+    createdAt: String(mutationResult.result?.createdAt || ''),
+  };
 }
