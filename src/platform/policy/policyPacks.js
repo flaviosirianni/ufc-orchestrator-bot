@@ -24,6 +24,14 @@ const CLINICAL_NUTRITION_TERMS = [
 ];
 
 export const POLICY_PACKS = Object.freeze({
+  medical_guidance_companion: {
+    id: 'medical_guidance_companion',
+    description:
+      'Asistente médico de acompañamiento. Siempre agrega aviso de no-reemplazo al final de la respuesta.',
+    alwaysAppendNotice: true,
+    escalationNotice:
+      '---\n_Este asistente no reemplaza la consulta médica profesional. Ante cualquier urgencia o duda importante, consultá a tu médico._',
+  },
   general_safe_advice: {
     id: 'general_safe_advice',
     description: 'Consejos generales sin afirmaciones medicas o legales absolutas.',

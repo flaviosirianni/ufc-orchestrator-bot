@@ -11,6 +11,13 @@ export function enforcePolicyPack({ text = '', policyPackId = 'general_safe_advi
   const safeText = String(text || '').trim();
   if (!safeText) return safeText;
 
+  const notice = String(pack.escalationNotice || '').trim();
+
+  if (pack.alwaysAppendNotice) {
+    if (!notice || safeText.includes(notice)) return safeText;
+    return `${safeText}\n\n${notice}`;
+  }
+
   const restrictedTerms = Array.isArray(pack.restrictedTerms) ? pack.restrictedTerms : [];
   if (!restrictedTerms.length) {
     return safeText;
@@ -20,12 +27,7 @@ export function enforcePolicyPack({ text = '', policyPackId = 'general_safe_advi
     return safeText;
   }
 
-  const notice = String(pack.escalationNotice || '').trim();
-  if (!notice) {
-    return safeText;
-  }
-
-  if (safeText.includes(notice)) {
+  if (!notice || safeText.includes(notice)) {
     return safeText;
   }
 

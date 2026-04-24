@@ -55,7 +55,7 @@ const CREDIT_TOPUP_URL = process.env.CREDIT_TOPUP_URL || '';
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || '';
 const MP_TOPUP_PACKS = process.env.MP_TOPUP_PACKS || '';
 const INTERACTION_MODES = new Set(['guided_strict', 'hybrid']);
-const GUIDED_MENU_IDS = new Set(['default', 'ufc_default', 'ufc_v1', 'nutrition_v1']);
+const GUIDED_MENU_IDS = new Set(['default', 'ufc_default', 'ufc_v1', 'nutrition_v1', 'ovidius_v1']);
 const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
   process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict'
 );
@@ -240,6 +240,72 @@ const NUTRITION_TUTORIAL_AVANZADO_ROWS = [
   [{ text: 'Cómo interpretar el peso en la balanza', callback_data: 'qa:nutrition_tutorial:interpretar_peso' }],
   [{ text: 'Cómo usar el bot al máximo', callback_data: 'qa:nutrition_tutorial:usar_bot' }],
   [{ text: '⬅ Niveles', callback_data: 'qa:nutrition_tutorial:menu_niveles' }],
+];
+
+const OVIDIUS_GUIDED_MAIN_MENU_ROWS = [
+  [
+    { text: '💬 Consulta', callback_data: 'menu:ovidius_consulta' },
+    { text: '👤 Perfiles', callback_data: 'menu:ovidius_perfiles' },
+  ],
+  [
+    { text: '📋 Historia', callback_data: 'menu:ovidius_historia' },
+    { text: '📄 Documentos', callback_data: 'menu:ovidius_documentos' },
+  ],
+  [
+    { text: '🩺 Prep. Consulta', callback_data: 'menu:ovidius_consulta_prep' },
+    { text: '🔔 Seguimiento', callback_data: 'menu:ovidius_seguimiento' },
+  ],
+  [
+    { text: '💳 Créditos', callback_data: 'qa:view_credits' },
+    { text: '⚙️ Ajustes', callback_data: 'qa:med_settings' },
+  ],
+];
+
+const OVIDIUS_CONSULTA_ROWS = [
+  [{ text: '🤒 Síntoma / problema', callback_data: 'qa:med_free_chat' }],
+  [{ text: '🔬 Interpretar estudio', callback_data: 'qa:med_interpret_study' }],
+  [{ text: '❓ Pregunta médica general', callback_data: 'qa:med_general_question' }],
+  [{ text: '↩ Seguir episodio abierto', callback_data: 'qa:med_followup_episode' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_PERFILES_ROWS = [
+  [{ text: '📋 Ver perfiles', callback_data: 'qa:med_view_profiles' }],
+  [{ text: '➕ Agregar persona', callback_data: 'qa:med_add_patient' }],
+  [{ text: '✏️ Editar perfil', callback_data: 'qa:med_edit_profile' }],
+  [{ text: '🗂 Resumen médico', callback_data: 'qa:med_summary_card' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_HISTORIA_ROWS = [
+  [{ text: '🔴 Episodios activos', callback_data: 'qa:med_view_history_active' }],
+  [{ text: '✅ Episodios resueltos', callback_data: 'qa:med_view_history_resolved' }],
+  [{ text: '🩺 Diagnósticos confirmados', callback_data: 'qa:med_view_diagnoses' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_DOCUMENTOS_ROWS = [
+  [{ text: '📤 Subir estudio', callback_data: 'qa:med_upload_document' }],
+  [{ text: '📁 Ver documentos recientes', callback_data: 'qa:med_view_documents' }],
+  [{ text: '🔍 Buscar resultado', callback_data: 'qa:med_search_document' }],
+  [{ text: '📊 Comparar estudios', callback_data: 'qa:med_compare_studies' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_CONSULTA_PREP_ROWS = [
+  [{ text: '📝 Preparar resumen para médico', callback_data: 'qa:med_consult_prep' }],
+  [{ text: '💊 Explicar lo que dijo el médico', callback_data: 'qa:med_post_consult' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_SEGUIMIENTO_ROWS = [
+  [{ text: '📌 Temas abiertos', callback_data: 'qa:med_view_followup' }],
+  [{ text: '✔ Actualizar un tema', callback_data: 'qa:med_update_followup' }],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+];
+
+const OVIDIUS_LEAF_ROWS = [
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
 const BETS_MENU_ROWS = [
@@ -600,6 +666,46 @@ const QUICK_ACTION_HINTS = {
     'Pasame campos a actualizar (objetivo, kcal, proteina, timezone, notas/restricciones).',
     'Tambien podés setear productos fijos: `producto leche proteica = Leche Proteica La Serenisima`.',
   ].join('\n'),
+  ovidius_welcome: [
+    '👋 Bienvenido a *Ovidius*, tu asistente médico de acompañamiento.',
+    '',
+    'Podés consultarme síntomas, interpretar estudios, preparar consultas médicas, y mantener un historial clínico organizado para vos y tu familia.',
+    '',
+    'Usá el menú para navegar, o escribime directamente qué necesitás.',
+  ].join('\n'),
+  ovidius_free_chat: [
+    '💬 Consulta médica',
+    'Describime el síntoma, problema o pregunta médica.',
+    'Puedo interpretar estudios si me mandás una foto o PDF.',
+  ].join('\n'),
+  ovidius_upload_document: [
+    '📤 Subir estudio',
+    'Adjuntá la foto, imagen o PDF del estudio que querés interpretar.',
+    'También podés escribir los valores si los tenés a mano.',
+  ].join('\n'),
+  ovidius_search_document: [
+    '🔍 Buscar resultado',
+    'Escribime qué estudio o resultado querés encontrar.',
+    'Ejemplo: "mi último colesterol", "radiografía de tórax", "glucosa de febrero".',
+  ].join('\n'),
+  ovidius_consult_prep: [
+    '🩺 Preparar consulta',
+    'Contame para qué médico es la consulta y cuál es el motivo principal.',
+    'Si tenés un episodio activo, lo uso como base para el resumen.',
+  ].join('\n'),
+  ovidius_post_consult: [
+    '💊 Explicar consulta',
+    'Contame qué te dijo el médico o adjuntá la receta/epicrisis.',
+    'Lo explico en lenguaje claro.',
+  ].join('\n'),
+  ovidius_followup_episode: [
+    '↩ Seguir episodio',
+    'Contame cómo evolucionó el problema. ¿Mejoró, empeoró, tenés nuevos síntomas?',
+  ].join('\n'),
+  ovidius_reencauce: [
+    '📌 Modo guiado — Ovidius.',
+    'Usá el menú para seleccionar una opción, o escribime directamente tu consulta médica.',
+  ].join('\n'),
 };
 
 const MENU_SCOPES = new Set([
@@ -607,6 +713,8 @@ const MENU_SCOPES = new Set([
   'nutrition_registro', 'nutrition_perfil', 'nutrition_estadisticas', 'nutrition_aprendizaje',
   'nutrition_help',
   'nutrition_registro_leaf', 'nutrition_perfil_leaf', 'nutrition_estadisticas_leaf', 'nutrition_aprendizaje_leaf',
+  'ovidius_consulta', 'ovidius_perfiles', 'ovidius_historia', 'ovidius_documentos',
+  'ovidius_consulta_prep', 'ovidius_seguimiento', 'ovidius_leaf',
 ]);
 const GUIDED_ALLOWED_CALLBACKS = new Set([
   'menu:main',
@@ -663,6 +771,40 @@ const NUTRITION_GUIDED_ALLOWED_CALLBACKS = new Set([
   'qa:topup_credits',
 ]);
 
+const OVIDIUS_GUIDED_ALLOWED_CALLBACKS = new Set([
+  'menu:main',
+  'menu:ovidius_consulta',
+  'menu:ovidius_perfiles',
+  'menu:ovidius_historia',
+  'menu:ovidius_documentos',
+  'menu:ovidius_consulta_prep',
+  'menu:ovidius_seguimiento',
+  'qa:med_free_chat',
+  'qa:med_interpret_study',
+  'qa:med_general_question',
+  'qa:med_followup_episode',
+  'qa:med_view_profiles',
+  'qa:med_add_patient',
+  'qa:med_edit_profile',
+  'qa:med_summary_card',
+  'qa:med_view_history_active',
+  'qa:med_view_history_resolved',
+  'qa:med_view_diagnoses',
+  'qa:med_upload_document',
+  'qa:med_view_documents',
+  'qa:med_search_document',
+  'qa:med_compare_studies',
+  'qa:med_consult_prep',
+  'qa:med_post_consult',
+  'qa:med_view_followup',
+  'qa:med_update_followup',
+  'qa:med_report_bug',
+  'qa:med_settings',
+  'qa:help',
+  'qa:view_credits',
+  'qa:topup_credits',
+]);
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -690,9 +832,16 @@ export function normalizeGuidedMenuId(value = '') {
   return 'ufc_v1';
 }
 
+function isOvidiusMenu(guidedMenuId = '') {
+  return normalizeGuidedMenuId(guidedMenuId) === 'ovidius_v1';
+}
+
 function getDefaultGuidedAction({ guidedMenuId = 'ufc_v1', guidedLedgerEnabled = true } = {}) {
   if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
     return 'log_intake';
+  }
+  if (isOvidiusMenu(guidedMenuId)) {
+    return 'med_free_chat';
   }
   if (!guidedLedgerEnabled) {
     return 'analyze_quotes';
@@ -724,11 +873,16 @@ export function isGuidedCallbackAllowed(
   if (menuId === 'nutrition_v1') {
     allowed = NUTRITION_GUIDED_ALLOWED_CALLBACKS;
   }
+  if (menuId === 'ovidius_v1') {
+    allowed = OVIDIUS_GUIDED_ALLOWED_CALLBACKS;
+  }
   if (allowed.has(value)) {
     return true;
   }
   if (/^qa:nutrition_goal:[a-z_]+$/.test(value)) return true;
   if (/^qa:nutrition_tutorial:[a-z0-9_]+$/.test(value)) return true;
+  if (/^qa:med_select_patient:\d+$/.test(value)) return true;
+  if (/^qa:med_set_status:[a-z_]+:\d+$/.test(value)) return true;
   return /^qa:topup_pack:\d+$/i.test(value);
 }
 
@@ -1142,6 +1296,11 @@ function buildCreditsQuickActionRows({
       [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
     ];
   }
+  if (isOvidiusMenu(guidedMenuId)) {
+    return [
+      [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
+    ];
+  }
 
   return guidedLedgerEnabled
     ? [
@@ -1163,6 +1322,24 @@ function buildCreditsQuickActionRows({
 
 function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
   const menuId = normalizeGuidedMenuId(guidedMenuId);
+  if (menuId === 'ovidius_v1') {
+    if (guidedAction === 'med_upload_document' || guidedAction === 'med_interpret_study') {
+      return QUICK_ACTION_HINTS.ovidius_upload_document;
+    }
+    if (guidedAction === 'med_search_document') {
+      return QUICK_ACTION_HINTS.ovidius_search_document;
+    }
+    if (guidedAction === 'med_consult_prep') {
+      return QUICK_ACTION_HINTS.ovidius_consult_prep;
+    }
+    if (guidedAction === 'med_post_consult') {
+      return QUICK_ACTION_HINTS.ovidius_post_consult;
+    }
+    if (guidedAction === 'med_followup_episode') {
+      return QUICK_ACTION_HINTS.ovidius_followup_episode;
+    }
+    return QUICK_ACTION_HINTS.ovidius_free_chat;
+  }
   if (menuId === 'nutrition_v1') {
     const action = normalizeGuidedAction(guidedAction, { defaultAction: 'log_intake' });
     if (action === 'log_weighin') {
@@ -1196,6 +1373,14 @@ function resolveGuidedBlockHintByAction(guidedAction = '', { guidedMenuId = 'ufc
 }
 
 function guidedMenuScopeForAction(guidedAction = '', { guidedMenuId = 'ufc_v1' } = {}) {
+  if (isOvidiusMenu(guidedMenuId)) {
+    if (guidedAction === 'med_view_profiles' || guidedAction === 'med_add_patient' || guidedAction === 'med_edit_profile' || guidedAction === 'med_summary_card') return 'ovidius_perfiles';
+    if (guidedAction === 'med_view_history_active' || guidedAction === 'med_view_history_resolved' || guidedAction === 'med_view_diagnoses') return 'ovidius_historia';
+    if (guidedAction === 'med_upload_document' || guidedAction === 'med_view_documents' || guidedAction === 'med_search_document' || guidedAction === 'med_compare_studies') return 'ovidius_documentos';
+    if (guidedAction === 'med_consult_prep' || guidedAction === 'med_post_consult') return 'ovidius_consulta_prep';
+    if (guidedAction === 'med_view_followup' || guidedAction === 'med_update_followup') return 'ovidius_seguimiento';
+    return 'ovidius_leaf';
+  }
   if (normalizeGuidedMenuId(guidedMenuId) === 'nutrition_v1') {
     const action = normalizeGuidedAction(guidedAction, { defaultAction: 'log_intake' });
     if (action === 'update_profile') return 'nutrition_perfil_leaf';
@@ -1728,6 +1913,16 @@ export function startTelegramBot(router, options = {}) {
         if (scope === 'nutrition_aprendizaje_leaf') return { inline_keyboard: NUTRITION_APRENDIZAJE_LEAF_ROWS };
         return { inline_keyboard: NUTRITION_GUIDED_MAIN_MENU_ROWS };
       }
+      if (isOvidiusMenu(guidedMenuId)) {
+        if (scope === 'ovidius_consulta') return { inline_keyboard: OVIDIUS_CONSULTA_ROWS };
+        if (scope === 'ovidius_perfiles') return { inline_keyboard: OVIDIUS_PERFILES_ROWS };
+        if (scope === 'ovidius_historia') return { inline_keyboard: OVIDIUS_HISTORIA_ROWS };
+        if (scope === 'ovidius_documentos') return { inline_keyboard: OVIDIUS_DOCUMENTOS_ROWS };
+        if (scope === 'ovidius_consulta_prep') return { inline_keyboard: OVIDIUS_CONSULTA_PREP_ROWS };
+        if (scope === 'ovidius_seguimiento') return { inline_keyboard: OVIDIUS_SEGUIMIENTO_ROWS };
+        if (scope === 'ovidius_leaf') return { inline_keyboard: OVIDIUS_LEAF_ROWS };
+        return { inline_keyboard: OVIDIUS_GUIDED_MAIN_MENU_ROWS };
+      }
       if (scope === 'ufc_analysis') {
         return {
           inline_keyboard: GUIDED_ANALYSIS_MENU_ROWS,
@@ -1841,6 +2036,27 @@ export function startTelegramBot(router, options = {}) {
     if (isGuidedStrictInteractionMode(interactionMode)) {
       if (guidedMenuId === 'nutrition_v1') {
         return sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_welcome, { menuScope: 'main' });
+      }
+      if (isOvidiusMenu(guidedMenuId)) {
+        if (scope === 'ovidius_consulta') {
+          return sendBotMessage(chatId, '💬 Consulta\n¿Qué necesitás?', { menuScope: 'ovidius_consulta' });
+        }
+        if (scope === 'ovidius_perfiles') {
+          return sendBotMessage(chatId, '👤 Perfiles médicos', { menuScope: 'ovidius_perfiles' });
+        }
+        if (scope === 'ovidius_historia') {
+          return sendBotMessage(chatId, '📋 Historia médica', { menuScope: 'ovidius_historia' });
+        }
+        if (scope === 'ovidius_documentos') {
+          return sendBotMessage(chatId, '📄 Documentos y estudios', { menuScope: 'ovidius_documentos' });
+        }
+        if (scope === 'ovidius_consulta_prep') {
+          return sendBotMessage(chatId, '🩺 Preparación de consulta', { menuScope: 'ovidius_consulta_prep' });
+        }
+        if (scope === 'ovidius_seguimiento') {
+          return sendBotMessage(chatId, '🔔 Seguimiento', { menuScope: 'ovidius_seguimiento' });
+        }
+        return sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_welcome, { menuScope: 'main' });
       }
       if (scope === 'ufc_analysis') {
         return sendBotMessage(chatId, '📸 Análisis\n¿Qué querés hacer?', {
@@ -2030,7 +2246,9 @@ export function startTelegramBot(router, options = {}) {
       const helpText = isGuidedStrictInteractionMode(interactionMode)
         ? guidedMenuId === 'nutrition_v1'
           ? QUICK_ACTION_HINTS.nutrition_help_guided
-          : QUICK_ACTION_HINTS.help_guided
+          : isOvidiusMenu(guidedMenuId)
+            ? QUICK_ACTION_HINTS.ovidius_welcome
+            : QUICK_ACTION_HINTS.help_guided
         : QUICK_ACTION_HINTS.help;
       await sendBotMessage(chatId, helpText, { menuScope: 'main' });
       return;
@@ -2523,6 +2741,157 @@ export function startTelegramBot(router, options = {}) {
         return;
       }
 
+      // ── OVIDIUS_V1 callbacks ──────────────────────────────────────────────
+      if (isOvidiusMenu(guidedMenuId)) {
+        if (data === 'menu:ovidius_consulta') {
+          setGuidedAction(chatId, 'med_free_chat');
+          await sendMenu(chatId, 'ovidius_consulta');
+          return;
+        }
+        if (data === 'menu:ovidius_perfiles') {
+          setGuidedAction(chatId, 'med_view_profiles');
+          await sendMenu(chatId, 'ovidius_perfiles');
+          return;
+        }
+        if (data === 'menu:ovidius_historia') {
+          setGuidedAction(chatId, 'med_view_history_active');
+          await sendMenu(chatId, 'ovidius_historia');
+          return;
+        }
+        if (data === 'menu:ovidius_documentos') {
+          setGuidedAction(chatId, 'med_upload_document');
+          await sendMenu(chatId, 'ovidius_documentos');
+          return;
+        }
+        if (data === 'menu:ovidius_consulta_prep') {
+          setGuidedAction(chatId, 'med_consult_prep');
+          await sendMenu(chatId, 'ovidius_consulta_prep');
+          return;
+        }
+        if (data === 'menu:ovidius_seguimiento') {
+          setGuidedAction(chatId, 'med_view_followup');
+          await sendMenu(chatId, 'ovidius_seguimiento');
+          return;
+        }
+        if (data === 'qa:med_free_chat') {
+          setGuidedAction(chatId, 'med_free_chat');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_free_chat, { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data === 'qa:med_interpret_study' || data === 'qa:med_upload_document') {
+          setGuidedAction(chatId, data === 'qa:med_upload_document' ? 'med_upload_document' : 'med_interpret_study');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_upload_document, { menuScope: 'ovidius_documentos' });
+          return;
+        }
+        if (data === 'qa:med_general_question') {
+          setGuidedAction(chatId, 'med_general_question');
+          await sendBotMessage(chatId, '❓ Pregunta médica general\nEscribime tu consulta.', { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data === 'qa:med_followup_episode') {
+          setGuidedAction(chatId, 'med_followup_episode');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_followup_episode, { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data === 'qa:med_view_profiles') {
+          setGuidedAction(chatId, 'med_view_profiles');
+          const routed = await routeSyntheticAction(query, 'mostrame mis perfiles', { guidedAction: 'med_view_profiles', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay perfiles creados.', { menuScope: 'ovidius_perfiles' });
+          return;
+        }
+        if (data === 'qa:med_add_patient') {
+          setGuidedAction(chatId, 'med_add_patient');
+          const routed = await routeSyntheticAction(query, 'agregar paciente', { guidedAction: 'med_add_patient', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || '¿Cómo se llama la persona y qué relación tiene con vos?', { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data === 'qa:med_edit_profile') {
+          setGuidedAction(chatId, 'med_edit_profile');
+          const routed = await routeSyntheticAction(query, 'editar perfil', { guidedAction: 'med_edit_profile', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'Decime qué datos querés actualizar.', { menuScope: 'ovidius_perfiles' });
+          return;
+        }
+        if (data === 'qa:med_summary_card') {
+          setGuidedAction(chatId, 'med_summary_card');
+          const routed = await routeSyntheticAction(query, 'mostrame el resumen médico', { guidedAction: 'med_summary_card', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay datos suficientes para el resumen.', { menuScope: 'ovidius_perfiles' });
+          return;
+        }
+        if (data === 'qa:med_view_history_active') {
+          setGuidedAction(chatId, 'med_view_history_active');
+          const routed = await routeSyntheticAction(query, 'episodios activos', { guidedAction: 'med_view_history_active', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay episodios activos.', { menuScope: 'ovidius_historia' });
+          return;
+        }
+        if (data === 'qa:med_view_history_resolved') {
+          setGuidedAction(chatId, 'med_view_history_resolved');
+          const routed = await routeSyntheticAction(query, 'episodios resueltos', { guidedAction: 'med_view_history_resolved', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay episodios resueltos.', { menuScope: 'ovidius_historia' });
+          return;
+        }
+        if (data === 'qa:med_view_diagnoses') {
+          setGuidedAction(chatId, 'med_view_diagnoses');
+          const routed = await routeSyntheticAction(query, 'diagnósticos confirmados', { guidedAction: 'med_view_diagnoses', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay diagnósticos confirmados registrados.', { menuScope: 'ovidius_historia' });
+          return;
+        }
+        if (data === 'qa:med_view_documents') {
+          setGuidedAction(chatId, 'med_view_documents');
+          const routed = await routeSyntheticAction(query, 'ver documentos', { guidedAction: 'med_view_documents', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay documentos cargados.', { menuScope: 'ovidius_documentos' });
+          return;
+        }
+        if (data === 'qa:med_search_document') {
+          setGuidedAction(chatId, 'med_search_document');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_search_document, { menuScope: 'ovidius_documentos' });
+          return;
+        }
+        if (data === 'qa:med_compare_studies') {
+          setGuidedAction(chatId, 'med_compare_studies');
+          await sendBotMessage(chatId, '📊 Comparar estudios\nAdjuntá el nuevo estudio o describí cuál querés comparar.', { menuScope: 'ovidius_documentos' });
+          return;
+        }
+        if (data === 'qa:med_consult_prep') {
+          setGuidedAction(chatId, 'med_consult_prep');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_consult_prep, { menuScope: 'ovidius_consulta_prep' });
+          return;
+        }
+        if (data === 'qa:med_post_consult') {
+          setGuidedAction(chatId, 'med_post_consult');
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_post_consult, { menuScope: 'ovidius_consulta_prep' });
+          return;
+        }
+        if (data === 'qa:med_view_followup') {
+          setGuidedAction(chatId, 'med_view_followup');
+          const routed = await routeSyntheticAction(query, 'ver seguimiento', { guidedAction: 'med_view_followup', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'No hay temas de seguimiento abiertos.', { menuScope: 'ovidius_seguimiento' });
+          return;
+        }
+        if (data === 'qa:med_update_followup') {
+          setGuidedAction(chatId, 'med_update_followup');
+          await sendBotMessage(chatId, '✔ Actualizar seguimiento\nDecime el número del tema y el nuevo estado.', { menuScope: 'ovidius_seguimiento' });
+          return;
+        }
+        if (data === 'qa:med_settings') {
+          setGuidedAction(chatId, 'med_settings');
+          const routed = await routeSyntheticAction(query, 'ajustes', { guidedAction: 'med_settings', inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || '⚙️ Ajustes del bot.', { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data === 'qa:med_report_bug') {
+          setGuidedAction(chatId, 'med_report_bug');
+          await sendBotMessage(chatId, '🐞 Reportar problema\nDescribime brevemente el problema que encontraste.', { menuScope: 'ovidius_leaf' });
+          return;
+        }
+        if (data.startsWith('qa:med_select_patient:')) {
+          const pid = data.replace('qa:med_select_patient:', '');
+          setGuidedAction(chatId, 'med_free_chat');
+          const routed = await routeSyntheticAction(query, '', { guidedAction: `med_select_patient:${pid}`, inputType: 'synthetic' });
+          await sendBotMessage(chatId, routed || 'Perfil seleccionado.', { menuScope: 'main' });
+          return;
+        }
+      }
+
       if (data === 'menu:ufc_analysis') {
         setGuidedAction(chatId, 'analyze_quotes');
         await sendMenu(chatId, 'ufc_analysis');
@@ -2661,6 +3030,10 @@ export function startTelegramBot(router, options = {}) {
           await sendBotMessage(chatId, QUICK_ACTION_HINTS.nutrition_help_feedback, {
             menuScope: 'nutrition_help',
           });
+          return;
+        }
+        if (isOvidiusMenu(guidedMenuId)) {
+          await sendBotMessage(chatId, QUICK_ACTION_HINTS.ovidius_welcome, { menuScope: 'main' });
           return;
         }
         await sendBotMessage(

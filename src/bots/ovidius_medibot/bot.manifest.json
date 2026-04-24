@@ -1,0 +1,22 @@
+{
+  "bot_id": "ovidius_medibot",
+  "display_name": "Ovidius — Asistente Médico",
+  "telegram_token_env": "OVIDIUS_MEDIBOT_TELEGRAM_BOT_TOKEN",
+  "interaction_mode": "guided_strict",
+  "domain_pack": {
+    "prompt_file": "src/bots/ovidius_medibot/prompt.md",
+    "enabled_tools": [],
+    "guided_menu": "ovidius_v1"
+  },
+  "credit_policy": {
+    "costs": {
+      "analysis": 1.0,
+      "image": 0.5,
+      "audio_minute": 0.2
+    }
+  },
+  "risk_policy": "medical_guidance_companion",
+  "storage": {
+    "db_path": "/home/ubuntu/bot-data/ovidius_medibot/bot.db"
+  }
+}
