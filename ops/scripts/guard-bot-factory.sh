@@ -3,7 +3,7 @@
 # Requires: jq, systemd, bash 4+
 set -euo pipefail
 
-BOTS=("ufc:3000" "nutrition:3001")
+BOTS=("ufc:3000" "nutrition:3001" "ovidius_medibot:3002")
 STATE_FILE="/tmp/bot-factory-guard-state.json"
 LOCK_FILE="/tmp/bot-factory-guard.lock"
 LOG_FILE="${GUARD_LOG_FILE:-/var/log/bot-factory-guard.log}"
@@ -42,7 +42,8 @@ now=$(date +%s)
 declare -A last_restart
 declare -A prev_conflicts
 if [[ -f "$STATE_FILE" ]]; then
-  for bot in ufc nutrition; do
+  for entry in "${BOTS[@]}"; do
+    bot="${entry%%:*}"
     last_restart[$bot]=$(jq -r ".${bot}.last_restart // 0" "$STATE_FILE" 2>/dev/null || echo 0)
     prev_conflicts[$bot]=$(jq -r ".${bot}.conflicts // 0" "$STATE_FILE" 2>/dev/null || echo 0)
   done
@@ -95,10 +96,13 @@ for entry in "${BOTS[@]}"; do
   fi
 done
 
-jq -n \
-  --argjson ur "${last_restart[ufc]:-0}" \
-  --argjson uc "${prev_conflicts[ufc]:-0}" \
-  --argjson nr "${last_restart[nutrition]:-0}" \
-  --argjson nc "${prev_conflicts[nutrition]:-0}" \
-  '{ufc:{last_restart:$ur,conflicts:$uc},nutrition:{last_restart:$nr,conflicts:$nc}}' \
-  > "$STATE_FILE"
+state='{}'
+for entry in "${BOTS[@]}"; do
+  bot="${entry%%:*}"
+  state=$(echo "$state" | jq \
+    --arg bot "$bot" \
+    --argjson r "${last_restart[$bot]:-0}" \
+    --argjson c "${prev_conflicts[$bot]:-0}" \
+    '.[$bot] = {last_restart: $r, conflicts: $c}')
+done
+echo "$state" > "$STATE_FILE"
