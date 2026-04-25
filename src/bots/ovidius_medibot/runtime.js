@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import OpenAI from 'openai';
 import '../../core/env.js';
 import { startTelegramBot } from '../../core/telegramBot.js';
-import { upsertUser, upsertChat, getCreditState, listCreditTransactions, getUsageCounters } from '../../core/sqliteStore.js';
+import { upsertUser, upsertChat, getCreditState, listCreditTransactions, spendCredits, addCredits, getUsageCounters } from '../../core/sqliteStore.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
@@ -577,7 +577,16 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
   const modelCandidates = parseModelCandidates(DEFAULT_SMART_MODELS);
 
   const billingClient = createBillingApiClient({ botId });
-  const billingBridge = createBillingUserStoreBridge({ billingClient });
+  const billingBridge = createBillingUserStoreBridge({
+    billingClient,
+    fallbackUserStore: {
+      getCreditState,
+      listCreditTransactions,
+      spendCredits,
+      addCredits,
+      getUsageCounters,
+    },
+  });
 
   const reliabilityLoop = startMedicalDbReliabilityLoop({ dbPath });
 
