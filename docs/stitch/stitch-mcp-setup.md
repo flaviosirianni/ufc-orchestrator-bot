@@ -1,18 +1,26 @@
 # Stitch MCP Setup
 
-This repo does not store Stitch credentials. The local proxy reads `STITCH_API_KEY` from the environment.
+This repo does not store Stitch credentials. The local proxy can use either an API key or OAuth.
 
-## 1. Get the API Key
+Project and screen reads require OAuth. The API key path can initialize the MCP tool list, but Stitch returns `401` for project data with API-key auth.
 
-1. Open `https://stitch.withgoogle.com/settings`.
-2. Create/copy an API key.
-3. Export it in the shell that launches Codex:
+## 1. OAuth Setup for Project/Screen Export
+
+Install Google Cloud CLI, then authenticate the same Google account that owns the Stitch project:
 
 ```bash
-export STITCH_API_KEY="YOUR_STITCH_API_KEY"
+gcloud auth login
+gcloud config set project YOUR_GOOGLE_CLOUD_PROJECT_ID
 ```
 
-For VS Code/Codex extension sessions, make sure the extension process can see that variable. If it cannot, add it to your shell profile and restart VS Code.
+The local proxy can fetch a fresh OAuth access token on startup:
+
+```bash
+export STITCH_USE_GCLOUD_AUTH=true
+export GOOGLE_CLOUD_PROJECT="YOUR_GOOGLE_CLOUD_PROJECT_ID"
+```
+
+Do not commit OAuth tokens, API keys, or `.env` files.
 
 ## 2. Install the Official SDK
 
@@ -26,10 +34,14 @@ This updates `package.json` and `package-lock.json`. Do not commit any `.env` fi
 
 ## 3. Register Stitch in Codex
 
-After `STITCH_API_KEY` is available and dependencies are installed:
+For OAuth via `gcloud`, register the stdio proxy with these local environment variables:
 
 ```bash
-codex mcp add stitch -- node scripts/stitch-mcp-proxy.mjs
+codex mcp remove stitch
+codex mcp add stitch \
+  --env STITCH_USE_GCLOUD_AUTH=true \
+  --env GOOGLE_CLOUD_PROJECT="YOUR_GOOGLE_CLOUD_PROJECT_ID" \
+  -- node scripts/stitch-mcp-proxy.mjs
 ```
 
 Then verify:
@@ -39,6 +51,14 @@ codex mcp list
 ```
 
 Expected: a `stitch` MCP server appears in the list.
+
+If you only need API-key experiments, the proxy also supports:
+
+```bash
+codex mcp add stitch --env STITCH_API_KEY="YOUR_STITCH_API_KEY" -- node scripts/stitch-mcp-proxy.mjs
+```
+
+However, project and screen export currently require OAuth.
 
 ## 4. Use After Designing in Stitch
 
@@ -51,6 +71,6 @@ Once Stitch has generated screens:
 ## Notes
 
 - Codex HTTP MCP registration currently supports bearer-token env vars but not arbitrary `X-Goog-Api-Key` headers, so this repo uses a stdio proxy.
-- The proxy intentionally fails fast when `STITCH_API_KEY` is missing.
-- If your Stitch account requires OAuth instead of API key, use the official Stitch SDK/OAuth path and set the relevant environment variables before starting the proxy.
+- The proxy intentionally fails fast when no API key, OAuth token, or `STITCH_USE_GCLOUD_AUTH=true` path is available.
+- OAuth mode prefers `STITCH_ACCESS_TOKEN` when explicitly set; otherwise it can call `gcloud auth print-access-token`.
 - If `npm install` fails with `EACCES` inside `node_modules`, the local dependency tree is owned by another user. Fix ownership or reinstall dependencies before installing the Stitch SDK.
