@@ -41,11 +41,13 @@ now=$(date +%s)
 
 declare -A last_restart
 declare -A prev_conflicts
+declare -A consec_failures
 if [[ -f "$STATE_FILE" ]]; then
   for entry in "${BOTS[@]}"; do
     bot="${entry%%:*}"
     last_restart[$bot]=$(jq -r ".${bot}.last_restart // 0" "$STATE_FILE" 2>/dev/null || echo 0)
     prev_conflicts[$bot]=$(jq -r ".${bot}.conflicts // 0" "$STATE_FILE" 2>/dev/null || echo 0)
+    consec_failures[$bot]=$(jq -r ".${bot}.consec_failures // 0" "$STATE_FILE" 2>/dev/null || echo 0)
   done
 fi
 
@@ -56,10 +58,14 @@ for entry in "${BOTS[@]}"; do
   health=$(curl -sf --connect-timeout 3 --max-time 5 "http://localhost:${port}/health" 2>/dev/null || echo "")
 
   if [[ -z "$health" ]]; then
-    log "[$bot] /health inaccesible en puerto $port"
-    alert "$bot health inaccesible — revisar servicio"
+    consec_failures[$bot]=$(( ${consec_failures[$bot]:-0} + 1 ))
+    log "[$bot] /health inaccesible en puerto $port (fallo consecutivo: ${consec_failures[$bot]})"
+    if (( ${consec_failures[$bot]} >= 2 )); then
+      alert "$bot health inaccesible — revisar servicio"
+    fi
     continue
   fi
+  consec_failures[$bot]=0
 
   degraded=$(echo "$health"   | jq -r '.runtime.telegram.degraded // false')
   idle_ms=$(echo "$health"    | jq -r '.runtime.telegram.idleMs // 0')
@@ -103,6 +109,7 @@ for entry in "${BOTS[@]}"; do
     --arg bot "$bot" \
     --argjson r "${last_restart[$bot]:-0}" \
     --argjson c "${prev_conflicts[$bot]:-0}" \
-    '.[$bot] = {last_restart: $r, conflicts: $c}')
+    --argjson f "${consec_failures[$bot]:-0}" \
+    '.[$bot] = {last_restart: $r, conflicts: $c, consec_failures: $f}')
 done
 echo "$state" > "$STATE_FILE"
