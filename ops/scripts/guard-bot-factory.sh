@@ -4,8 +4,8 @@
 set -euo pipefail
 
 BOTS=("ufc:3000" "nutrition:3001" "ovidius_medibot:3002")
-STATE_FILE="/tmp/bot-factory-guard-state.json"
-LOCK_FILE="/tmp/bot-factory-guard.lock"
+STATE_FILE="${GUARD_STATE_FILE:-/tmp/bot-factory-guard-state.json}"
+LOCK_FILE="${GUARD_LOCK_FILE:-/tmp/bot-factory-guard.lock}"
 LOG_FILE="${GUARD_LOG_FILE:-/var/log/bot-factory-guard.log}"
 RESTART_WINDOW_SEC="${RESTART_WINDOW_SEC:-1800}"
 STALE_IDLE_SEC="${STALE_IDLE_SEC:-300}"
@@ -39,58 +39,79 @@ trap 'rm -f "$LOCK_FILE"' EXIT
 
 now=$(date +%s)
 
-declare -A last_restart
-declare -A prev_conflicts
-declare -A consec_failures
+old_state='{}'
 if [[ -f "$STATE_FILE" ]]; then
-  for entry in "${BOTS[@]}"; do
-    bot="${entry%%:*}"
-    last_restart[$bot]=$(jq -r ".${bot}.last_restart // 0" "$STATE_FILE" 2>/dev/null || echo 0)
-    prev_conflicts[$bot]=$(jq -r ".${bot}.conflicts // 0" "$STATE_FILE" 2>/dev/null || echo 0)
-    consec_failures[$bot]=$(jq -r ".${bot}.consec_failures // 0" "$STATE_FILE" 2>/dev/null || echo 0)
-  done
+  old_state=$(cat "$STATE_FILE" 2>/dev/null || echo '{}')
 fi
 
+state='{}'
 for entry in "${BOTS[@]}"; do
   bot="${entry%%:*}"
   port="${entry##*:}"
+  last_restart=$(echo "$old_state" | jq -r --arg bot "$bot" '.[$bot].last_restart // 0' 2>/dev/null || echo 0)
+  prev_conflicts=$(echo "$old_state" | jq -r --arg bot "$bot" '.[$bot].conflicts // 0' 2>/dev/null || echo 0)
+  consec_failures=$(echo "$old_state" | jq -r --arg bot "$bot" '.[$bot].consec_failures // 0' 2>/dev/null || echo 0)
 
   health=$(curl -sf --connect-timeout 3 --max-time 5 "http://localhost:${port}/health" 2>/dev/null || echo "")
 
   if [[ -z "$health" ]]; then
-    consec_failures[$bot]=$(( ${consec_failures[$bot]:-0} + 1 ))
-    log "[$bot] /health inaccesible en puerto $port (fallo consecutivo: ${consec_failures[$bot]})"
-    if (( ${consec_failures[$bot]} >= 2 )); then
+    consec_failures=$(( consec_failures + 1 ))
+    log "[$bot] /health inaccesible en puerto $port (fallo consecutivo: ${consec_failures})"
+    if (( consec_failures >= 2 )); then
       alert "$bot health inaccesible — revisar servicio"
     fi
+    state=$(echo "$state" | jq \
+      --arg bot "$bot" \
+      --argjson r "$last_restart" \
+      --argjson c "$prev_conflicts" \
+      --argjson f "$consec_failures" \
+      '.[$bot] = {last_restart: $r, conflicts: $c, consec_failures: $f}')
     continue
   fi
-  consec_failures[$bot]=0
+  consec_failures=0
 
-  degraded=$(echo "$health"   | jq -r '.runtime.telegram.degraded // false')
-  idle_ms=$(echo "$health"    | jq -r '.runtime.telegram.idleMs // 0')
-  conflicts=$(echo "$health"  | jq -r '.runtime.telegram.pollingConflictCount // 0')
+  telegram_runtime=$(echo "$health" | jq -c '.runtime.telegram // empty' 2>/dev/null || echo "")
+  degraded=false
+  disabled=false
+  idle_ms=0
+  conflicts=0
+  last_update_at=0
+  last_error_at=0
+  last_error_message=""
+  if [[ -n "$telegram_runtime" && "$telegram_runtime" != "null" ]]; then
+    degraded=$(echo "$telegram_runtime" | jq -r '.degraded // false')
+    disabled=$(echo "$telegram_runtime" | jq -r '.disabled // false')
+    idle_ms=$(echo "$telegram_runtime" | jq -r '.idleMs // 0')
+    conflicts=$(echo "$telegram_runtime" | jq -r '.pollingConflictCount // 0')
+    last_update_at=$(echo "$telegram_runtime" | jq -r '.lastUpdateAt // 0')
+    last_error_at=$(echo "$telegram_runtime" | jq -r '.lastPollingErrorAt // 0')
+    last_error_message=$(echo "$telegram_runtime" | jq -r '.lastErrorMessage // ""')
+  fi
 
   idle_sec=$(( idle_ms / 1000 ))
-  prev="${prev_conflicts[$bot]:-0}"
-  prev_conflicts[$bot]=$conflicts
 
   reason=""
-  if [[ "$degraded" == "true" ]] && (( idle_sec > STALE_IDLE_SEC )); then
+  if [[ -z "$telegram_runtime" || "$telegram_runtime" == "null" ]]; then
+    reason="telegram runtime missing"
+  elif [[ "$disabled" == "true" ]]; then
+    reason="telegram disabled"
+  elif [[ "$degraded" == "true" ]] && (( idle_sec > STALE_IDLE_SEC )); then
     reason="degraded+stale idle=${idle_sec}s"
-  elif (( idle_sec > STALE_IDLE_SEC && conflicts > prev )); then
-    reason="stale+conflicts idle=${idle_sec}s new=$((conflicts - prev))"
+  elif (( idle_sec > STALE_IDLE_SEC && last_error_at > last_update_at )); then
+    reason="stale+polling_error idle=${idle_sec}s last_error=${last_error_message:-unknown}"
+  elif (( idle_sec > STALE_IDLE_SEC && conflicts > prev_conflicts )); then
+    reason="stale+conflicts idle=${idle_sec}s new=$((conflicts - prev_conflicts))"
   fi
 
   if [[ -n "$reason" ]]; then
-    elapsed=$(( now - ${last_restart[$bot]:-0} ))
+    elapsed=$(( now - last_restart ))
     if (( elapsed < RESTART_WINDOW_SEC )); then
       log "[$bot] necesita restart ($reason) pero dentro de ventana (${elapsed}s < ${RESTART_WINDOW_SEC}s)"
     else
       log "[$bot] reiniciando: $reason"
       alert "Reiniciando $bot — $reason"
       if sudo systemctl restart "bot-factory@${bot}"; then
-        last_restart[$bot]=$now
+        last_restart=$now
         log "[$bot] restart OK"
       else
         alert "$bot restart FALLÓ — intervención manual necesaria"
@@ -100,16 +121,12 @@ for entry in "${BOTS[@]}"; do
   else
     log "[$bot] ok (idle=${idle_sec}s conflicts=${conflicts} degraded=${degraded})"
   fi
-done
 
-state='{}'
-for entry in "${BOTS[@]}"; do
-  bot="${entry%%:*}"
   state=$(echo "$state" | jq \
     --arg bot "$bot" \
-    --argjson r "${last_restart[$bot]:-0}" \
-    --argjson c "${prev_conflicts[$bot]:-0}" \
-    --argjson f "${consec_failures[$bot]:-0}" \
+    --argjson r "$last_restart" \
+    --argjson c "$conflicts" \
+    --argjson f "$consec_failures" \
     '.[$bot] = {last_restart: $r, conflicts: $c, consec_failures: $f}')
 done
 echo "$state" > "$STATE_FILE"

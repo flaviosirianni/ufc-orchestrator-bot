@@ -196,8 +196,8 @@ export async function runTelegramBotTests() {
 
     const status = runtime.getRuntimeStatus();
     assert.match(String(status.lastErrorMessage || ''), /aggregateerror/i);
-    assert.equal(fakeBot.stopPollingCalls, 0);
-    assert.equal(fakeBot.startPollingCalls, 0);
+    assert.ok(fakeBot.stopPollingCalls >= 1);
+    assert.ok(fakeBot.startPollingCalls >= 1);
     runtime.close();
   });
 

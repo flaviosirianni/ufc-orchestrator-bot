@@ -3356,7 +3356,9 @@ export function startTelegramBot(router, options = {}) {
     if (
       lowered.includes('etimedout') ||
       lowered.includes('econnreset') ||
-      lowered.includes('socket hang up')
+      lowered.includes('socket hang up') ||
+      lowered.includes('aggregateerror') ||
+      lowered.includes('efatal')
     ) {
       void recoverPolling(message);
     }

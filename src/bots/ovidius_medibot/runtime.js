@@ -1066,6 +1066,9 @@ export async function bootstrapOvidiusMedibot({ manifest = {} } = {}) {
 
   const healthServer = createHealthServer(port, {
     botId,
+    statusProvider: () => ({
+      telegram: typeof telegram?.getRuntimeStatus === 'function' ? telegram.getRuntimeStatus() : null,
+    }),
     onTopupApplied: async (event = {}) => {
       try {
         const telegramUserId = String(event.user_id || '');
