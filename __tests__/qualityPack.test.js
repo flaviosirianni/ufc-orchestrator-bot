@@ -4,6 +4,24 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+const GIT_LOCAL_ENV_KEYS = [
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_GRAFT_FILE',
+  'GIT_INDEX_FILE',
+  'GIT_NO_REPLACE_OBJECTS',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_PREFIX',
+  'GIT_SHALLOW_FILE',
+  'GIT_COMMON_DIR',
+];
+
 /**
  * Ejecuta un proceso síncrono para construir y comprobar el fixture Git.
  *
@@ -12,10 +30,17 @@ import path from 'node:path';
  * @sideEffects Crea procesos hijo; los comandos del test sólo escriben bajo un directorio temporal.
  */
 function run(command, args, options = {}) {
+  const { env = process.env, ...execOptions } = options;
+  const isolatedEnv = { ...env };
+  for (const key of GIT_LOCAL_ENV_KEYS) {
+    delete isolatedEnv[key];
+  }
+
   return execFileSync(command, args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    ...options,
+    ...execOptions,
+    env: isolatedEnv,
   }).trim();
 }
 
@@ -47,48 +72,73 @@ export async function runQualityPackTests() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ufc-quality-pack-'));
   const sourceRepo = path.join(fixtureRoot, 'source');
   const worktree = path.join(fixtureRoot, 'worktree');
-  fs.mkdirSync(path.join(sourceRepo, 'scripts'), { recursive: true });
-  fs.mkdirSync(path.join(sourceRepo, '.githooks'), { recursive: true });
-  fs.copyFileSync(
-    path.resolve('scripts/install-git-hooks.sh'),
-    path.join(sourceRepo, 'scripts/install-git-hooks.sh')
-  );
-  fs.copyFileSync(
-    path.resolve('.githooks/pre-push'),
-    path.join(sourceRepo, '.githooks/pre-push')
-  );
-  fs.chmodSync(path.join(sourceRepo, 'scripts/install-git-hooks.sh'), 0o755);
-  fs.chmodSync(path.join(sourceRepo, '.githooks/pre-push'), 0o755);
+  const poisonedRepo = path.join(fixtureRoot, 'poisoned');
+  const isolatedEnv = { ...process.env };
+  for (const key of GIT_LOCAL_ENV_KEYS) {
+    delete isolatedEnv[key];
+  }
 
-  run('git', ['init', '-q'], { cwd: sourceRepo });
-  run('git', ['config', 'user.email', 'quality-pack@example.invalid'], {
-    cwd: sourceRepo,
-  });
-  run('git', ['config', 'user.name', 'Quality Pack Test'], { cwd: sourceRepo });
-  run('git', ['add', '.'], { cwd: sourceRepo });
-  run('git', ['commit', '-qm', 'fixture'], { cwd: sourceRepo });
-  run('git', ['worktree', 'add', '-qb', 'quality-pack-worktree', worktree], {
-    cwd: sourceRepo,
-  });
+  try {
+    fs.mkdirSync(path.join(sourceRepo, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRepo, '.githooks'), { recursive: true });
+    fs.mkdirSync(poisonedRepo, { recursive: true });
+    fs.copyFileSync(
+      path.resolve('scripts/install-git-hooks.sh'),
+      path.join(sourceRepo, 'scripts/install-git-hooks.sh')
+    );
+    fs.copyFileSync(
+      path.resolve('.githooks/pre-push'),
+      path.join(sourceRepo, '.githooks/pre-push')
+    );
+    fs.chmodSync(path.join(sourceRepo, 'scripts/install-git-hooks.sh'), 0o755);
+    fs.chmodSync(path.join(sourceRepo, '.githooks/pre-push'), 0o755);
 
-  assert.equal(
-    fs.statSync(path.join(worktree, '.git')).isFile(),
-    true,
-    'el fixture debe reproducir un worktree real con .git como archivo'
-  );
+    execFileSync('git', ['init', '-q'], { cwd: poisonedRepo, env: isolatedEnv });
+    run('git', ['init', '-q'], {
+      cwd: sourceRepo,
+      env: {
+        ...isolatedEnv,
+        GIT_DIR: path.join(poisonedRepo, '.git'),
+        GIT_WORK_TREE: poisonedRepo,
+      },
+    });
+    assert.equal(
+      fs.statSync(path.join(sourceRepo, '.git')).isDirectory(),
+      true,
+      'el fixture debe ignorar GIT_DIR/GIT_WORK_TREE heredados por hooks'
+    );
 
-  run('bash', ['scripts/install-git-hooks.sh'], { cwd: worktree });
+    run('git', ['config', 'user.email', 'quality-pack@example.invalid'], {
+      cwd: sourceRepo,
+    });
+    run('git', ['config', 'user.name', 'Quality Pack Test'], { cwd: sourceRepo });
+    run('git', ['add', '.'], { cwd: sourceRepo });
+    run('git', ['commit', '-qm', 'fixture'], { cwd: sourceRepo });
+    run('git', ['worktree', 'add', '-qb', 'quality-pack-worktree', worktree], {
+      cwd: sourceRepo,
+    });
 
-  assert.equal(
-    run('git', ['config', '--get', 'core.hooksPath'], { cwd: worktree }),
-    '.githooks',
-    'el instalador debe configurar el hooksPath versionado también desde worktrees'
-  );
-  assert.equal(
-    fs.statSync(path.join(worktree, '.githooks', 'pre-push')).mode & 0o111,
-    0o111,
-    'el pre-push versionado debe quedar ejecutable'
-  );
+    assert.equal(
+      fs.statSync(path.join(worktree, '.git')).isFile(),
+      true,
+      'el fixture debe reproducir un worktree real con .git como archivo'
+    );
+
+    run('bash', ['scripts/install-git-hooks.sh'], { cwd: worktree });
+
+    assert.equal(
+      run('git', ['config', '--get', 'core.hooksPath'], { cwd: worktree }),
+      '.githooks',
+      'el instalador debe configurar el hooksPath versionado también desde worktrees'
+    );
+    assert.equal(
+      fs.statSync(path.join(worktree, '.githooks', 'pre-push')).mode & 0o111,
+      0o111,
+      'el pre-push versionado debe quedar ejecutable'
+    );
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 
   console.log('All quality pack tests passed.');
 }

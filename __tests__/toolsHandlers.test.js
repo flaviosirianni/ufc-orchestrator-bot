@@ -9,6 +9,13 @@ import {
   getFightHistoryCacheStatus,
 } from '../src/tools/fightsScalperTool.js';
 
+/**
+ * Verifica los contratos de Sheet Ops y Fight History, incluido el ownership del caché.
+ *
+ * @returns {Promise<void>} Se resuelve cuando todos los casos pasan.
+ * @throws {AssertionError|Error} Ante output, filtrado, sync o lifecycle incorrecto.
+ * @sideEffects Configura temporalmente el store externo de Fight History.
+ */
 export async function runToolsHandlersTests() {
   const tests = [];
 
@@ -110,6 +117,7 @@ export async function runToolsHandlersTests() {
   });
 
   tests.push(async () => {
+    let readRangeCalls = 0;
     let dbSnapshot = {
       cacheKey: 'default',
       sheetId: 'sheet-test',
@@ -142,10 +150,16 @@ export async function runToolsHandlersTests() {
         strict: true,
         message: 'historial de Michel Pereira',
         readRangeImpl: async () => {
+          readRangeCalls += 1;
           throw new Error('Should not read Google Sheet when sqlite cache exists');
         },
       });
 
+      assert.equal(
+        readRangeCalls,
+        0,
+        'una lectura servida desde SQLite no debe iniciar I/O de background sin ownership'
+      );
       assert.equal(result.rows.length, 1);
       assert.match(result.rows[0][2], /Michel Pereira/);
       const status = getFightHistoryCacheStatus();

@@ -1,4 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import {
+  createAsyncFailureMonitor,
+  runSuiteWithGuards,
+} from './testHarness.js';
 
 const SUITES = [
   { modulePath: './routerChain.test.js', exportName: 'runRouterChainTests' },
@@ -21,34 +25,62 @@ const SUITES = [
   { modulePath: './billingStore.test.js', exportName: 'runBillingStoreTests' },
   { modulePath: './billingReliability.test.js', exportName: 'runBillingReliabilityTests' },
   { modulePath: './qualityPack.test.js', exportName: 'runQualityPackTests' },
+  { modulePath: './testHarness.test.js', exportName: 'runTestHarnessTests' },
 ];
 
+const asyncFailureMonitor = createAsyncFailureMonitor();
+
+/**
+ * Importa y ejecuta una suite bajo guardas de rechazos y recursos bloqueantes.
+ *
+ * @returns {Promise<void>} Se resuelve si la suite y sus tareas asíncronas terminan limpias.
+ * @throws {Error} Ante contrato inválido, test fallido, rechazo no manejado o timer residual.
+ * @sideEffects Importa módulos de test y ejecuta sus fixtures.
+ */
 async function runSuite({ modulePath = '', exportName = '' } = {}) {
-  const mod = await import(modulePath);
-  const runner = mod?.[exportName];
-  if (typeof runner !== 'function') {
-    throw new Error(`Suite inválida: ${modulePath} no exporta ${exportName}.`);
-  }
-  await runner();
+  await runSuiteWithGuards({
+    name: modulePath,
+    runner: async () => {
+      const mod = await import(modulePath);
+      const runner = mod?.[exportName];
+      if (typeof runner !== 'function') {
+        throw new Error(`Suite inválida: ${modulePath} no exporta ${exportName}.`);
+      }
+      await runner();
+    },
+    monitor: asyncFailureMonitor,
+  });
 }
 
+/**
+ * Ejecuta la matriz secuencial y el dominio Nutrition en un proceso aislado.
+ *
+ * @returns {Promise<void>} Se resuelve cuando toda la matriz queda verde.
+ * @throws {Error} Propaga cualquier fallo funcional o de lifecycle detectado.
+ * @sideEffects Ejecuta suites, crea la DB temporal Nutrition y lanza un proceso Node hijo.
+ */
 async function main() {
-  for (const suite of SUITES) {
-    await runSuite(suite);
+  try {
+    for (const suite of SUITES) {
+      await runSuite(suite);
+    }
+    execFileSync(process.execPath, ['__tests__/nutritionDomain.test.js'], {
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        DB_PATH:
+          process.env.DB_PATH ||
+          `/tmp/ufc-orchestrator-nutrition-tests-${Date.now()}.db`,
+      },
+    });
+    asyncFailureMonitor.throwIfAny('nutritionDomain subprocess');
+    console.log('All test suites passed.');
+  } finally {
+    asyncFailureMonitor.close();
   }
-  execFileSync(process.execPath, ['__tests__/nutritionDomain.test.js'], {
-    stdio: 'inherit',
-    env: {
-      ...process.env,
-      DB_PATH:
-        process.env.DB_PATH ||
-        `/tmp/ufc-orchestrator-nutrition-tests-${Date.now()}.db`,
-    },
-  });
-  console.log('All test suites passed.');
 }
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

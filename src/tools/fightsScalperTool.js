@@ -442,19 +442,6 @@ function rowMatchesFighter(row = [], fighter = '', { strict = false } = {}) {
   return tokens.some((token) => token.length >= 3 && rowText.includes(token));
 }
 
-function isCacheStale(meta, maxAgeMs) {
-  if (!meta?.lastSyncAt) {
-    return true;
-  }
-
-  const ts = Date.parse(meta.lastSyncAt);
-  if (Number.isNaN(ts)) {
-    return true;
-  }
-
-  return Date.now() - ts > maxAgeMs;
-}
-
 export function getFightHistoryCacheStatus() {
   const external = loadExternalCacheSnapshot();
   if (external) {
@@ -561,10 +548,18 @@ export async function syncFightHistoryCache({
   }
 }
 
+/**
+ * Resuelve filas desde el snapshot persistido o, si no existe, mediante un sync explícito.
+ * Una lectura de usuario nunca inicia trabajo de background: la frescura pertenece al monitor
+ * registrado por `startFightHistorySync`, que cuenta con lifecycle y logging propios.
+ *
+ * @returns {Promise<Array<Array<unknown>>>} Filas cacheadas o recién sincronizadas.
+ * @throws {Error} Si no hay caché y la sincronización requerida falla.
+ * @sideEffects Puede sincronizar y persistir el caché únicamente cuando no hay snapshot usable.
+ */
 async function loadHistoryRows({
   sheetId,
   range,
-  maxAgeMs = DEFAULT_SYNC_INTERVAL_MS,
   readRangeImpl = readRange,
 } = {}) {
   const cached = loadFightHistoryCache();
@@ -574,11 +569,6 @@ async function loadHistoryRows({
   );
 
   if (cacheMatchesRequest && cached?.rows?.length) {
-    if (sheetId && isCacheStale(meta, maxAgeMs)) {
-      syncFightHistoryCache({ sheetId, range, readRangeImpl }).catch((error) =>
-        console.error('❌ Background cache refresh failed:', error)
-      );
-    }
     return cached.rows;
   }
 

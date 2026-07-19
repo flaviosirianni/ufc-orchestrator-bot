@@ -1,2 +1,3 @@
 # flow_id	url	status	channel	notes
-UFC-STAB-002	local://scripts/quality-gate.sh	verified	automated	Quality pack validado en worktree real; evidencia reproducible con npm run quality:gate y __tests__/qualityPack.test.js.
+UFC-STAB-002	local://scripts/quality-gate.sh	verified	automated	Quality pack validado en worktree real y entorno simulado de pre-push; fixture ignora variables Git locales heredadas, se autolimpia y no modifica HEAD.
+UFC-STAB-005	local://__tests__/runTests.js	verified	automated	RED: toolsHandlers detectó 1 lectura Sheets con snapshot SQLite. GREEN: npm test exit 0 sin Background cache refresh failed; testHarness valida unhandledRejection y Timeout residual.

@@ -14,8 +14,10 @@ Producción modificada durante esta ejecución: no
 - Git preflight del worktree: `ok`.
 - Backlog/spec/plan publicados en `origin/stabilize/ufc-runtime-integrity` mediante commit `333c4a8`; el pre-push Nutrition completo pasó.
 - `npm install` completado desde `package-lock.json`.
-- `npm test` terminó con exit code 0, pero el output no es limpio: `toolsHandlers` dispara `Background cache refresh failed: Should not read Google Sheet when sqlite cache exists` y el runner igualmente informa PASS.
+- Baseline inicial: `npm test` terminaba con exit code 0 aunque `toolsHandlers` disparaba `Background cache refresh failed: Should not read Google Sheet when sqlite cache exists`.
 - UFC-STAB-002 cerrado: quality pack versionado, instalador compatible con worktrees, `npm run quality:gate` y regresión `qualityPack.test.js` en verde.
+- UFC-STAB-005 cerrado localmente: el cache SQLite ya no dispara refresh sin ownership y el runner falla ante rechazos no manejados o `Timeout` residuales; `npm test` queda verde sin `Background cache refresh failed`.
+- Incidente de test controlado: `qualityPack.test.js` heredó variables Git del primer `pre-push` y creó el commit temporal `4904932`. Se restauraron branch/índice a `b3b93cf` sin tocar el working tree, se eliminaron sólo sus artefactos temporales y se agregó una regresión que sanitiza todas las variables locales reportadas por `git rev-parse --local-env-vars`.
 - No se editaron bases, servicios, variables ni procesos productivos.
 
 ## Estado de datos protegido
@@ -27,8 +29,8 @@ Producción modificada durante esta ejecución: no
 
 ## Próximo paso exacto
 
-1. Implementar UFC-STAB-005 por TDD: reproducir el error de background como fallo real y corregir el lifecycle del refresh.
-2. Ejecutar UFC-STAB-003 y UFC-STAB-004.
+1. Ejecutar UFC-STAB-003: perfil prod-like UFC con safety local y comandos `qa:parity:ufc`/`prepush:ufc`.
+2. Ejecutar UFC-STAB-004: snapshot operativo anonimizado y fixtures de incidentes.
 
 ## Rollback actual
 
