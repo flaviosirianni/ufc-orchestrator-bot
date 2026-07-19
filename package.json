@@ -24,6 +24,7 @@
     "parity:env:ufc": "node src/scripts/envParityDoctor.js --bot ufc --env-file .env.ufc --server ufc-oci --enforce-live-token-diff",
     "qa:parity:ufc": "node src/scripts/parityGate.js --bot ufc --env-file .env.ufc --server ufc-oci --enforce-live-token-diff",
     "prepush:ufc": "npm run qa:parity:ufc",
+    "ufc:baseline:capture": "node src/scripts/ufcOperationalSnapshot.js",
     "ufc:db:verify": "node src/scripts/ufcDbVerify.js",
     "ufc:db:backup": "node src/scripts/ufcDbBackup.js",
     "billing:db:verify": "node src/scripts/billingDbVerify.js",

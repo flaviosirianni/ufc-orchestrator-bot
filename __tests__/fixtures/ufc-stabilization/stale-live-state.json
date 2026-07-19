@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "anonymized": true,
+  "incident_id": "stale_live_watch_state",
+  "observed": {
+    "event_status": "live",
+    "last_verified_at": "2026-04-01T00:00:00.000Z",
+    "evaluated_at": "2026-07-18T12:00:00.000Z",
+    "live_signal_count": 0
+  },
+  "expected": {
+    "confidence": "stale",
+    "consumer_allowed": false,
+    "ledger_mutation_allowed": false,
+    "reasons": [
+      "verification_ttl_exceeded",
+      "live_signal_missing"
+    ]
+  }
+}

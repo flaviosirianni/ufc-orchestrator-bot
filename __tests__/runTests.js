@@ -27,6 +27,10 @@ const SUITES = [
   { modulePath: './qualityPack.test.js', exportName: 'runQualityPackTests' },
   { modulePath: './testHarness.test.js', exportName: 'runTestHarnessTests' },
   { modulePath: './parityScripts.test.js', exportName: 'runParityScriptsTests' },
+  {
+    modulePath: './ufcOperationalSnapshot.test.js',
+    exportName: 'runUfcOperationalSnapshotTests',
+  },
 ];
 
 const asyncFailureMonitor = createAsyncFailureMonitor();

@@ -1,0 +1,19 @@
+{
+  "fixture_version": 1,
+  "anonymized": true,
+  "incident_id": "restart_storm_observation",
+  "observed": {
+    "restart_count": 303,
+    "window_label": "historical_april_window",
+    "duplicate_process_evidence": "not_confirmed"
+  },
+  "expected": {
+    "runtime_state": "degraded",
+    "automatic_restart_allowed": false,
+    "cause_confidence": "hypothesis_only",
+    "reasons": [
+      "restart_budget_exceeded",
+      "root_cause_not_proven"
+    ]
+  }
+}

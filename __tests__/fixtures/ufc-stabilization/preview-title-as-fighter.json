@@ -1,0 +1,18 @@
+{
+  "fixture_version": 1,
+  "anonymized": true,
+  "incident_id": "editorial_title_parsed_as_fighter",
+  "observed": {
+    "fighter_a": "Event Preview",
+    "fighter_b": "Fixture Fighter",
+    "source_kind": "editorial_page"
+  },
+  "expected": {
+    "confidence": "invalid",
+    "consumer_allowed": false,
+    "reasons": [
+      "title_like_fighter_name",
+      "structured_card_source_missing"
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "anonymized": true,
+  "incident_id": "invalid_future_completed_candidate",
+  "observed": {
+    "event_label": "UFC 329",
+    "candidate_status": "completed",
+    "candidate_date_iso": "2035-07-18",
+    "observation_date_iso": "2026-07-18",
+    "compatible_source_count": 0
+  },
+  "expected": {
+    "confidence": "invalid",
+    "consumer_allowed": false,
+    "reasons": [
+      "future_event_marked_completed",
+      "source_quorum_failed"
+    ]
+  }
+}
