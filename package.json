@@ -26,6 +26,8 @@
     "billing:db:verify": "node src/scripts/billingDbVerify.js",
     "billing:db:backup": "node src/scripts/billingDbBackup.js",
     "db:doctor": "node src/scripts/dbReliabilityDoctor.js",
+    "quality:gate": "bash ./scripts/quality-gate.sh",
+    "hooks:install": "bash ./scripts/install-git-hooks.sh",
     "test": "node __tests__/runTests.js",
     "history:sync": "node src/scripts/runHistoryScraper.js",
     "credits:add": "node src/scripts/addCredits.js"

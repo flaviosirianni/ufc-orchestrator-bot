@@ -1,0 +1,2 @@
+# flow_id	layer	entrypoint	criticality	owner	last_review
+UFC-STAB-002	ops	npm run quality:gate	high	ufc-stabilization	2026-07-18

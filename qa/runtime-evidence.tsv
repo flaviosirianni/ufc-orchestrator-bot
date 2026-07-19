@@ -1,0 +1,2 @@
+# flow_id	url	status	channel	notes
+UFC-STAB-002	local://scripts/quality-gate.sh	verified	automated	Quality pack validado en worktree real; evidencia reproducible con npm run quality:gate y __tests__/qualityPack.test.js.
