@@ -1,5 +1,7 @@
 # Implementation Plan (Execution Track)
 
+> **Estado histórico:** este plan documenta el track febrero-marzo de 2026. La estabilización activa del UFC Betting Bot se sigue en `docs/ufc-stabilization/BACKLOG.md` y en `docs/superpowers/plans/2026-07-18-ufc-stabilization.md`.
+
 Este archivo traduce el backlog de `WISHLIST.md` a un plan secuencial de ejecucion en 3 PRs.
 Objetivo: atacar primero riesgo de integridad de datos y luego mejorar precision/UX.
 

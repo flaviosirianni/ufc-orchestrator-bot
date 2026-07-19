@@ -2,6 +2,8 @@
 
 Ideas para implementar mas adelante (fuera del foco actual de trabajo).
 
+> **Track activo de estabilización UFC:** el avance operativo, evidencias y próximo paso están en `docs/ufc-stabilization/BACKLOG.md`. El plan anterior de tres PRs queda como referencia histórica.
+
 ## Convencion para nuevos items
 
 Cada item nuevo debe escribirse con este nivel de detalle, porque se usa como base directa de implementacion:
@@ -17,16 +19,16 @@ Cada item nuevo debe escribirse con este nivel de detalle, porque se usa como ba
 
 ## Ejecucion
 
-La secuencia de implementacion activa se documenta en `IMPLEMENTATION_PLAN.md` (plan en 3 PRs).
+La estabilizacion activa del UFC Betting Bot se documenta en `docs/ufc-stabilization/BACKLOG.md`. `IMPLEMENTATION_PLAN.md` conserva el plan historico de febrero-marzo de 2026.
 
 ## Backlog Unificado (Bot Factory)
 
-Revision de estado: `2026-04-02` (post migracion a arquitectura Core + Bots, deploy OCI y billing global).
+Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UFC).
 
 ### Estructura actual del backlog
 
 - **Plataforma/Billing (cross-bot):** items 1, 2, 3, 8, 9, 11, 13, 14, 20, 29, 34, 35, 37.
-- **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33.
+- **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 38, 39, 40, 41, 42.
 - **Nutrition (dominio nutricion):** item 36 (mas backlog incremental a crear en esta seccion en siguientes iteraciones).
 
 ### Leyenda de estado
@@ -1452,3 +1454,50 @@ Revision de estado: `2026-04-02` (post migracion a arquitectura Core + Bots, dep
      - Decision abierta: definir criterio final de "alta confianza" para auto-switch de pelea.
    - **Prioridad:** critico.
    - **Estado:** pendiente.
+
+42. **[PRIORIDAD CRITICA] Estabilizacion integral del UFC Betting Bot**
+   - **Objetivo de negocio/UX:** recuperar confianza en el bot garantizando que calendario, cartelera, proyecciones, settlement, creditos y estado operativo provengan de fuentes verificadas y sistemas consistentes.
+   - **Problema observado (ejemplos reales):**
+     - `event_watch_state` mostro UFC 329 en una fecha incompatible y mantuvo un `current_event` viejo como live.
+     - Los mirrors mezclaron fragmentos de resultados web como si fueran nombres de peleadores.
+     - `ufc_stats.db` quedo sin actualizar desde abril y no existe un scheduler productivo.
+     - Una tormenta historica produjo 303 reinicios y decenas de miles de snapshots repetidos.
+     - Actividad UFC de creditos quedo en la DB local aunque billing global estaba configurado.
+     - Manifest, env y archivos reales apuntan a paths de DB diferentes.
+     - La suite imprime un fallo de refresh de background pero igualmente informa PASS.
+   - **Comportamiento deseado para el usuario final:**
+     - El bot informa un evento o resultado solamente cuando su identidad, fecha y card estan corroboradas.
+     - Si una fuente esta vencida o en conflicto, responde con incertidumbre controlada y no genera proyecciones ni cierres automaticos.
+     - Saldo, gastos y recargas reflejan una unica wallet global sin duplicados.
+     - El bot permanece disponible con un solo poller, sin ciclos de reinicio ni crecimiento anomalo de DB.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - `EventTruthGate` con confianza `verified|degraded|invalid|stale` separada de `scheduled|live|completed|unknown`.
+     - Reconciliador de UFCStats, UFC oficial y Odds API con quorum de dos fuentes.
+     - Publicacion atomica y versionada de `ufc_stats.db` desde `data_scrapper` mediante timer OCI.
+     - Dedupe por hash de projections/scoring y retencion recuperable de telemetria.
+     - `BILLING_MODE=external_required|local`, idempotencia estable y migracion dry-run/apply con receipts.
+     - Supervisor de lifecycle, lock por bot, conflicto 409 con backoff y restart budget persistente.
+     - Migracion candidate/verify/swap a paths Bot Factory, con allowlist UFC y backups restaurables.
+     - Backlog operativo canónico en `docs/ufc-stabilization/BACKLOG.md`.
+   - **Criterios de aceptacion verificables:**
+     - Los incidentes UFC 329, evento live stale y nombres `Preview` quedan cubiertos por tests y no se reproducen.
+     - Stats productivas tienen menos de 36 horas y su timer demuestra corridas idempotentes.
+     - Datos no verificados no generan snapshots, alertas ni auto-settlements.
+     - Toda actividad UFC nueva de creditos aparece exclusivamente en billing global.
+     - Existe un unico consumidor Telegram y no se observan restart storms durante siete dias.
+     - Ledger y auditoria conservan los mismos conteos y digests antes/despues de migraciones.
+     - Paths productivos coinciden con manifest/env y el restore drill funciona.
+   - **Pruebas de regresion necesarias:**
+     - Unitarias del truth gate, quorum, staleness y parser de candidatos.
+     - Fake-clock de 24 horas para dedupe de monitores.
+     - Stats vencidas -> no projection/no settlement.
+     - Billing outage e idempotencia de spend/topup/webhook.
+     - Doble bootstrap y secuencia de polling 409.
+     - Migracion/retencion con fixtures que contienen ledger y tablas Nutrition.
+     - Restore de backups, full suite, ledger suite y smoke Telegram no mutante.
+   - **Riesgos y decisiones abiertas:**
+     - Las migraciones productivas se bloquean si el dry-run detecta saldos, filas o digests ambiguos.
+     - Los retiros de paths viejos quedan en `WAITING_OBSERVATION` durante 14 dias.
+     - El cierre de runtime queda en `WAITING_OBSERVATION` durante el soak de siete dias.
+   - **Prioridad:** critico.
+   - **Estado:** en progreso. El detalle por item, evidencia y proximo paso vive en `docs/ufc-stabilization/BACKLOG.md`.
