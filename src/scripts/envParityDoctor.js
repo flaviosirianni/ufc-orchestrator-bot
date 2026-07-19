@@ -134,6 +134,32 @@ function readLiveEnvValue({
   return asString(output);
 }
 
+/**
+ * Normaliza reglas de paths nuevas y conserva el contrato legacy `db_path` de Nutrition.
+ *
+ * @returns {Array<object>} Reglas con env_key, required, forbidden_prefixes y marcador legacy.
+ * @sideEffects Ninguno.
+ */
+function normalizePathRules(localSafetyConfig = {}) {
+  if (Array.isArray(localSafetyConfig?.path_rules)) {
+    return localSafetyConfig.path_rules
+      .filter((rule) => rule && typeof rule === 'object')
+      .map((rule) => ({ ...rule, legacy_db_path: false }));
+  }
+
+  const legacyRule = localSafetyConfig?.db_path;
+  if (!legacyRule || typeof legacyRule !== 'object') {
+    return [];
+  }
+  return [{ ...legacyRule, env_key: asString(legacyRule.env_key, 'DB_PATH'), legacy_db_path: true }];
+}
+
+/**
+ * Audita required keys, invariantes, paths locales y diferencia de token para un bot.
+ *
+ * @returns {void}
+ * @sideEffects Lee archivos/config live por SSH, imprime JSON y fija process.exitCode ante fallos.
+ */
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const botId = asString(args.bot, 'nutrition');
@@ -220,30 +246,42 @@ function main() {
     }
   });
 
-  const dbPathRule = localSafetyConfig?.db_path || {};
-  const dbPathKey = asString(dbPathRule?.env_key, 'DB_PATH');
-  const rawDbPath = asString(localEnvValues[dbPathKey]);
-  const dbPath = expandEnvValue(rawDbPath);
-  if (asBoolean(dbPathRule?.required, false) && !dbPath) {
-    safetyViolations.push({
-      type: 'db_path_missing',
-      key: dbPathKey,
-      message: 'DB_PATH obligatorio no informado.',
-    });
-  }
-  const forbiddenPrefixes = Array.isArray(dbPathRule?.forbidden_prefixes)
-    ? dbPathRule.forbidden_prefixes.map((value) => asString(value)).filter(Boolean)
-    : [];
-  forbiddenPrefixes.forEach((prefix) => {
-    if (dbPath && dbPath.startsWith(prefix)) {
+  const pathRules = normalizePathRules(localSafetyConfig);
+  pathRules.forEach((pathRule) => {
+    const envKey = asString(pathRule?.env_key);
+    if (!envKey) {
       safetyViolations.push({
-        type: 'db_path_forbidden_prefix',
-        key: dbPathKey,
-        prefix,
-        db_path: dbPath,
-        message: `DB_PATH local no puede usar prefijo de prod (${prefix}).`,
+        type: 'path_rule_invalid',
+        message: 'Regla de path sin env_key.',
+      });
+      return;
+    }
+
+    const resolvedPath = expandEnvValue(asString(localEnvValues[envKey]));
+    if (asBoolean(pathRule?.required, false) && !resolvedPath) {
+      safetyViolations.push({
+        type: pathRule.legacy_db_path ? 'db_path_missing' : 'path_missing',
+        key: envKey,
+        message: `${envKey} obligatorio no informado.`,
       });
     }
+
+    const forbiddenPrefixes = Array.isArray(pathRule?.forbidden_prefixes)
+      ? pathRule.forbidden_prefixes.map((value) => asString(value)).filter(Boolean)
+      : [];
+    forbiddenPrefixes.forEach((prefix) => {
+      if (resolvedPath && resolvedPath.startsWith(prefix)) {
+        safetyViolations.push({
+          type: pathRule.legacy_db_path
+            ? 'db_path_forbidden_prefix'
+            : 'path_forbidden_prefix',
+          key: envKey,
+          prefix,
+          path: resolvedPath,
+          message: `${envKey} local no puede usar prefijo de prod (${prefix}).`,
+        });
+      }
+    });
   });
 
   const tokenDiffRule = localSafetyConfig?.token_diff || {};

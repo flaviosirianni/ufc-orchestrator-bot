@@ -126,6 +126,66 @@ function runMatrixCommand({ name = '', command = '', args = [], env = process.en
   };
 }
 
+/**
+ * Construye la matriz prod-like explícita para cada bot soportado por el gate.
+ *
+ * @returns {Array<object>} Comandos ordenados con su entorno de ejecución.
+ * @throws {Error} Si el bot no tiene una matriz declarada.
+ * @sideEffects Ninguno.
+ */
+function buildTestMatrix({ botId = '', botEnv = process.env, sharedEnv = process.env, dbPath = '' } = {}) {
+  const sharedSuite = {
+    name: 'npm_test',
+    command: 'npm',
+    args: ['test'],
+    env: sharedEnv,
+  };
+
+  if (botId === 'nutrition') {
+    return [
+      sharedSuite,
+      {
+        name: 'nutrition_domain_test',
+        command: 'node',
+        args: ['__tests__/nutritionDomain.test.js'],
+        env: botEnv,
+      },
+      {
+        name: 'nutrition_baseline',
+        command: 'npm',
+        args: ['run', 'nutrition:baseline'],
+        env: botEnv,
+      },
+      {
+        name: 'nutrition_db_verify',
+        command: 'npm',
+        args: ['run', 'nutrition:db:verify', '--', '--db', dbPath],
+        env: botEnv,
+      },
+    ];
+  }
+
+  if (botId === 'ufc') {
+    return [
+      sharedSuite,
+      {
+        name: 'ufc_db_verify',
+        command: 'npm',
+        args: ['run', 'ufc:db:verify', '--', '--db', dbPath],
+        env: botEnv,
+      },
+    ];
+  }
+
+  throw new Error(`No existe matriz prod-like declarada para bot=${botId}.`);
+}
+
+/**
+ * Ejecuta paridad de código, auditoría de entorno y matriz prod-like del bot indicado.
+ *
+ * @returns {void}
+ * @sideEffects Ejecuta Git, SSH, Node/npm; imprime evidencia JSON y fija process.exitCode ante fallos.
+ */
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const botId = asString(args.bot, 'nutrition');
@@ -137,7 +197,7 @@ function main() {
   const enforceLiveTokenDiff = asBoolean(args['enforce-live-token-diff'], true);
 
   const sharedEnv = { ...process.env };
-  const nutritionEnv = {
+  const botEnv = {
     ...process.env,
     BOT_ID: botId,
     ENV_FILE: envFile,
@@ -240,7 +300,7 @@ function main() {
   if (enforceLiveTokenDiff) {
     doctorArgs.push('--enforce-live-token-diff');
   }
-  const envDoctorExec = runCommand('node', doctorArgs, { env: nutritionEnv, inherit: false });
+  const envDoctorExec = runCommand('node', doctorArgs, { env: botEnv, inherit: false });
   let envDoctorPayload = null;
   if (envDoctorExec.stdout) {
     try {
@@ -266,22 +326,19 @@ function main() {
   const envMap = parseEnvText(fs.readFileSync(envFile, 'utf8'));
   const dbPath = expandEnvValue(envMap.DB_PATH || '');
   const testResults = [];
-  const matrix = [
-    { name: 'npm_test', command: 'npm', args: ['test'], env: sharedEnv },
-    {
-      name: 'nutrition_domain_test',
-      command: 'node',
-      args: ['__tests__/nutritionDomain.test.js'],
-      env: nutritionEnv,
-    },
-    { name: 'nutrition_baseline', command: 'npm', args: ['run', 'nutrition:baseline'], env: nutritionEnv },
-    {
-      name: 'nutrition_db_verify',
-      command: 'npm',
-      args: ['run', 'nutrition:db:verify', '--', '--db', dbPath],
-      env: nutritionEnv,
-    },
-  ];
+  let matrix = [];
+  try {
+    matrix = buildTestMatrix({ botId, botEnv, sharedEnv, dbPath });
+  } catch (error) {
+    summary.steps.push({
+      name: 'test_matrix',
+      ok: false,
+      db_path: dbPath,
+      results: [],
+      error: String(error?.message || error),
+    });
+    summary.ok = false;
+  }
 
   for (const entry of matrix) {
     const result = runMatrixCommand({
@@ -296,25 +353,27 @@ function main() {
     }
   }
 
-  if (withSmoke && testResults.every((result) => result.ok)) {
+  if (withSmoke && botId === 'nutrition' && testResults.every((result) => result.ok)) {
     const smokeResult = runMatrixCommand({
       name: 'nutrition_ops_smoke',
       command: 'npm',
       args: ['run', 'nutrition:smoke'],
-      env: nutritionEnv,
+      env: botEnv,
     });
     testResults.push(smokeResult);
   }
 
-  const matrixOk = testResults.length > 0 && testResults.every((result) => result.ok);
-  summary.steps.push({
-    name: 'test_matrix',
-    ok: matrixOk,
-    db_path: dbPath,
-    results: testResults,
-  });
-  if (!matrixOk) {
-    summary.ok = false;
+  if (matrix.length) {
+    const matrixOk = testResults.length > 0 && testResults.every((result) => result.ok);
+    summary.steps.push({
+      name: 'test_matrix',
+      ok: matrixOk,
+      db_path: dbPath,
+      results: testResults,
+    });
+    if (!matrixOk) {
+      summary.ok = false;
+    }
   }
 
   console.log('\n[parity-gate] summary');

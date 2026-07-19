@@ -1,0 +1,9 @@
+{
+  "bot": "ufc",
+  "invariants": {
+    "BOT_ID": "ufc",
+    "CREDIT_ENFORCE": "true",
+    "KNOWLEDGE_FILE": "./Knowledge/ufc_bets_playbook.md",
+    "ODDS_API_MMA_SPORT_KEY": "mma_mixed_martial_arts"
+  }
+}

@@ -17,6 +17,7 @@ Producción modificada durante esta ejecución: no
 - Baseline inicial: `npm test` terminaba con exit code 0 aunque `toolsHandlers` disparaba `Background cache refresh failed: Should not read Google Sheet when sqlite cache exists`.
 - UFC-STAB-002 cerrado: quality pack versionado, instalador compatible con worktrees, `npm run quality:gate` y regresión `qualityPack.test.js` en verde.
 - UFC-STAB-005 publicado en commit `4818365`: el cache SQLite ya no dispara refresh sin ownership y el runner falla ante rechazos no manejados o `Timeout` residuales; `npm test` queda verde sin `Background cache refresh failed`. Permanece `VERIFYING` hasta el deploy de Etapa 0.
+- UFC-STAB-003 cerrado: perfiles UFC versionados, paths locales protegidos, token local/live comparado únicamente por hash y comandos `qa:parity:ufc`/`prepush:ufc` disponibles. El gate real pasó paridad de código, entorno, suite integral y verificación DB read-only.
 - Incidente de test cerrado: `qualityPack.test.js` heredó variables Git del primer `pre-push` y creó el commit temporal `4904932`. Se restauraron branch/índice sin tocar el working tree, se eliminaron sólo sus artefactos y se agregó una regresión que sanitiza las variables locales de Git. La branch remota fue corregida bajo lease exacto y local/origin/remoto coinciden en `4818365`.
 - No se editaron bases, servicios, variables ni procesos productivos.
 
@@ -29,8 +30,8 @@ Producción modificada durante esta ejecución: no
 
 ## Próximo paso exacto
 
-1. Ejecutar UFC-STAB-003: perfil prod-like UFC con safety local y comandos `qa:parity:ufc`/`prepush:ufc`.
-2. Ejecutar UFC-STAB-004: snapshot operativo anonimizado y fixtures de incidentes.
+1. Ejecutar UFC-STAB-004: snapshot operativo anonimizado y fixtures de incidentes.
+2. Con el baseline versionado, iniciar UFC-STAB-100 (`EventTruthGate`) mediante TDD.
 
 ## Rollback actual
 

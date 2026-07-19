@@ -1,3 +1,4 @@
 # flow_id	layer	entrypoint	criticality	owner	last_review
 UFC-STAB-002	ops	npm run quality:gate	high	ufc-stabilization	2026-07-18
 UFC-STAB-005	test	npm test	critical	ufc-stabilization	2026-07-18
+UFC-STAB-003	ops	npm run qa:parity:ufc	critical	ufc-stabilization	2026-07-18

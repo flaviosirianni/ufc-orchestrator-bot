@@ -1,0 +1,23 @@
+{
+  "bot": "ufc",
+  "path_rules": [
+    {
+      "env_key": "DB_PATH",
+      "required": true,
+      "forbidden_prefixes": [
+        "/home/ubuntu/"
+      ]
+    },
+    {
+      "env_key": "UFC_STATS_DB_PATH",
+      "required": true,
+      "forbidden_prefixes": [
+        "/home/ubuntu/"
+      ]
+    }
+  ],
+  "token_diff": {
+    "local_env_key": "TELEGRAM_BOT_TOKEN",
+    "live_env_key": "TELEGRAM_BOT_TOKEN"
+  }
+}

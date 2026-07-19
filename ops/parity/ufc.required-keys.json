@@ -1,0 +1,23 @@
+{
+  "bot": "ufc",
+  "source": "/etc/bot-factory/ufc.env",
+  "required_keys": [
+    "APP_PUBLIC_URL",
+    "BILLING_API_TOKEN",
+    "BILLING_BASE_URL",
+    "BILLING_FREE_WEEKLY",
+    "BOT_ID",
+    "CREDIT_ENFORCE",
+    "DB_PATH",
+    "GOOGLE_PRIVATE_KEY",
+    "GOOGLE_SERVICE_ACCOUNT_EMAIL",
+    "KNOWLEDGE_FILE",
+    "ODDS_API_KEY",
+    "ODDS_API_MMA_SPORT_KEY",
+    "OPENAI_API_KEY",
+    "PORT",
+    "SHEET_ID",
+    "TELEGRAM_BOT_TOKEN",
+    "UFC_STATS_DB_PATH"
+  ]
+}
