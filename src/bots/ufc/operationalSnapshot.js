@@ -134,6 +134,7 @@ export function captureSqliteSnapshot({
   protectedTables = role === 'ufc' ? PROTECTED_UFC_TABLES : [],
   moduleRoot = process.cwd(),
   includeFileSha256 = role === 'ufc',
+  includeQuickCheck = role === 'ufc',
 } = {}) {
   const resolvedDbPath = path.resolve(String(dbPath || '').trim());
   if (!String(dbPath || '').trim() || !fs.existsSync(resolvedDbPath)) {
@@ -144,11 +145,13 @@ export function captureSqliteSnapshot({
   const db = new Database(resolvedDbPath, { readonly: true, fileMustExist: true });
   try {
     db.pragma('query_only = ON');
-    const quickCheck = db
-      .prepare('PRAGMA quick_check')
-      .all()
-      .map((row) => String(Object.values(row || {})[0] || '').trim())
-      .filter(Boolean);
+    const quickCheck = includeQuickCheck
+      ? db
+          .prepare('PRAGMA quick_check')
+          .all()
+          .map((row) => String(Object.values(row || {})[0] || '').trim())
+          .filter(Boolean)
+      : null;
     const schemaRows = db
       .prepare(
         `SELECT name, COALESCE(sql, '') AS sql
@@ -186,6 +189,7 @@ export function captureSqliteSnapshot({
       role,
       db_path: resolvedDbPath,
       quick_check: quickCheck,
+      quick_check_status: includeQuickCheck ? 'captured' : 'omitted_large_read',
       file: {
         size_bytes: Number(stat.size) || 0,
         mtime_iso: stat.mtime.toISOString(),

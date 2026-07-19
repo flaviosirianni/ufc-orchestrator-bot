@@ -19,7 +19,7 @@ npm run ufc:baseline:capture -- \
 - Health se sanitiza recursivamente y redacta tokens, claves y campos identificables.
 - Journal se reduce a conteos por categoría, rango temporal y digest de la secuencia; nunca conserva líneas crudas.
 - El digest de cada tabla protegida se calcula sobre valores tipados, hasheados por fila y ordenados, por lo que no depende del orden físico.
-- El archivo UFC se hashea por chunks. Para `ufc_stats.db` v1 omite el hash de archivo grande y conserva `quick_check`, metadata, schema hash, conteos y su digest. El recovery point UFC-STAB-501 incorporará SHA-256 del backup candidato.
+- El archivo UFC se hashea por chunks. Para `ufc_stats.db` v1 evita dos lecturas completas costosas: omite hash de archivo y `quick_check`, pero conserva metadata, schema hash, conteos exactos y su digest. UFC-STAB-201/203 validará `quick_check` sobre el candidato y UFC-STAB-501 incorporará SHA-256 del backup.
 
 ## Tablas protegidas v1
 

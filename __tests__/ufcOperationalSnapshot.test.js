@@ -169,6 +169,9 @@ export async function runUfcOperationalSnapshotTests() {
 
     assert.equal(beforeFileHash, afterFileHash, 'capturar debe ser byte-for-byte read-only');
     assert.deepEqual(first.quick_check, ['ok']);
+    assert.equal(first.quick_check_status, 'captured');
+    assert.equal(statsShape.quick_check, null);
+    assert.equal(statsShape.quick_check_status, 'omitted_large_read');
     assert.equal(statsShape.file.sha256, null);
     assert.equal(statsShape.file.sha256_status, 'omitted_large_read');
     assert.equal(first.tables.find((entry) => entry.name === 'bets')?.row_count, 1);
