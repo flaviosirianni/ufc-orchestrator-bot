@@ -1,0 +1,183 @@
+{
+  "schema_version": "ufc-operational-snapshot/v1",
+  "captured_at": "2026-07-20T14:32:23.911Z",
+  "git_sha": "1afddfab451b7deec58dd5935ac31fc20eedc997",
+  "host": {
+    "hostname_sha256_prefix": "8fa423c492fbedda",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "privacy": {
+    "row_values_persisted": false,
+    "sensitive_health_fields_redacted": true,
+    "raw_journal_lines_persisted": false
+  },
+  "paths": {
+    "ufc_db": {
+      "path": "/home/ubuntu/ufc-orchestrator-data/bot.db",
+      "exists": true,
+      "type": "file",
+      "size_bytes": 296472576,
+      "mtime_iso": "2026-07-20T04:05:36.939Z"
+    },
+    "ufc_stats_db": {
+      "path": "/home/ubuntu/ufc-orchestrator-data/ufc_stats.db",
+      "exists": true,
+      "type": "file",
+      "size_bytes": 6107136,
+      "mtime_iso": "2026-04-01T18:58:10.834Z"
+    }
+  },
+  "databases": {
+    "ufc": {
+      "role": "ufc",
+      "db_path": "/home/ubuntu/ufc-orchestrator-data/bot.db",
+      "quick_check": [
+        "ok"
+      ],
+      "quick_check_status": "captured",
+      "file": {
+        "size_bytes": 296472576,
+        "mtime_iso": "2026-07-20T04:05:36.939Z",
+        "sha256": "42e043bd151906d0c255e5435ce41b4d034de3c8a3e0439a3e10dbb10fc79f11",
+        "sha256_status": "captured"
+      },
+      "table_count": 36,
+      "tables": [
+        { "name": "bet_mutations", "row_count": 52, "schema_sha256": "eb9b21515e14535e4c5a86573c279b0f11fc656c34b19af2f6a2b1e377d3fca2" },
+        { "name": "bets", "row_count": 49, "schema_sha256": "06061b09e1093eb615d062cacc30b453e8e31323bad38a04cf3ee4b22cb2c5ea" },
+        { "name": "chats", "row_count": 1, "schema_sha256": "0996101202de925d96bab4405fcda7c6b999a7311bb452b49c4551308f852c2d" },
+        { "name": "credit_transactions", "row_count": 27, "schema_sha256": "ca6e5dad1380c855e6e5dd72f3e622a38976bb7a9dde2e563e10d7d5c6b2c2b5" },
+        { "name": "event_budget_sessions", "row_count": 0, "schema_sha256": "65f9db9c526d2ec99bd964f33b7717aa65fcc41f75565fa4fb8c1ebcff782e88" },
+        { "name": "event_fight_mirror", "row_count": 6, "schema_sha256": "9bef43738c28cd00da73653e5cb4bc66bd31dc962d013c739f8aa77ddbb6c7cf" },
+        { "name": "event_fighter_mirror", "row_count": 12, "schema_sha256": "47fa6494b827df8c3a0027b361884ec68df9eacc235d4ee3c1c245e7f34c4094" },
+        { "name": "event_watch_state", "row_count": 2, "schema_sha256": "8281817a9831efbc12b92e12000a9b829ebd2bef735d6605631487b11eb828b1" },
+        { "name": "fight_bet_scoring_snapshots", "row_count": 249903, "schema_sha256": "eadda49a40179e81f1086e8926762061a47179efa9422deb0a970ea07fc697b8" },
+        { "name": "fight_history_cache", "row_count": 1, "schema_sha256": "960f84f1a0cc2da096b38cde7d7db16c3e9f13ecff2952f4a6e7f875a8c619c0" },
+        { "name": "fight_projection_snapshots", "row_count": 83301, "schema_sha256": "266547bd5c936500bfadd90d72ef4f91dc6ec13441259faf847da752c1ac2067" },
+        { "name": "fighter_news_items", "row_count": 273, "schema_sha256": "0ba97b6a53a8b4614b4ff9ed0ba93bb340e074be7a22124385af511e94377219" },
+        { "name": "intel_alert_dispatch_log", "row_count": 0, "schema_sha256": "f54b629ac4869476ba47c1cecf5b4c5274ccfdd0aa7a0b7a287db0b27c102eb1" },
+        { "name": "ledger_summary", "row_count": 2, "schema_sha256": "a6324b274c983a83c4b53fb4c64d44d7e72eb72d116e5956b06f9e73a6d43b52" },
+        { "name": "messages", "row_count": 87, "schema_sha256": "68a191234ce371594185cb1243ea302b6c2a5c44cc04915c619ee26af1b9ccb4" },
+        { "name": "mp_processed_payments", "row_count": 1, "schema_sha256": "a62428f943baef3281367bc268bdb88ffce1838726c6c8389a55489fa0b54b48" },
+        { "name": "nutrition_food_catalog", "row_count": 15, "schema_sha256": "1def64c5902ad3b0a397ea854a033b2b99847115502721e655567d3051ed7651" },
+        { "name": "nutrition_intakes", "row_count": 0, "schema_sha256": "172ffb42f41cf41389f1443b569b2fb9277e15885b3183d65b5a54e046ca3548" },
+        { "name": "nutrition_journal", "row_count": 0, "schema_sha256": "71d5c25d0b54d8080cb2202ee1251492fa853618797ea2eb6f034f7b8ea5cbc9" },
+        { "name": "nutrition_operation_receipts", "row_count": 0, "schema_sha256": "e449d21b8891d72d13d1e64183e239c25687f586e20d9980ab192b002d7354d1" },
+        { "name": "nutrition_profiles", "row_count": 0, "schema_sha256": "8bf35ab65abac1b9f82344df191dfab1a88239e4f21ff8462bd3ed4c4e93b483" },
+        { "name": "nutrition_usage_records", "row_count": 0, "schema_sha256": "bf4169d52ba68ede55d02342117a5ebb967e723f3ed8690543d1c6997b978a32" },
+        { "name": "nutrition_user_product_defaults", "row_count": 0, "schema_sha256": "51338acf0550c9783f46c8dc3b67d321b09fed014b907b74ded5e4ee67acac1e" },
+        { "name": "nutrition_user_state", "row_count": 0, "schema_sha256": "cd769606e890f4dbe30eaff6be61289568f3acf67d53a7eed652406e3d9e3a3a" },
+        { "name": "nutrition_weighins", "row_count": 0, "schema_sha256": "db7db7631f4bd5b76e0ee427f10c76e51d2b6e25918ccd82fccaa1f0cfd43007" },
+        { "name": "odds_api_cache", "row_count": 1562, "schema_sha256": "ba3b56d71244092ccd97adad5a680e478a9f8194d6e8afcc3d2e7b820d1833c9" },
+        { "name": "odds_api_usage_log", "row_count": 2454, "schema_sha256": "0d0a4b251b0490d13c3a23d1efdd4e18e00ddd8206042aeb0e6b0ed09e81424c" },
+        { "name": "odds_events_index", "row_count": 492, "schema_sha256": "eb404c2b967ca43590226e10c529f9a092c35f6e3eaaa5d69716bd28a2bca988" },
+        { "name": "odds_market_snapshots", "row_count": 103994, "schema_sha256": "8270e9887edfa9e027142a863edcfc4703d0bf069075a57e8d3e7890263884d0" },
+        { "name": "odds_snapshots", "row_count": 6, "schema_sha256": "a1056f7d76d4a802232e4a50e40d86fe8169c6932f96d30de67ac0360c1558ae" },
+        { "name": "sessions", "row_count": 1, "schema_sha256": "52c01e90c68f92e98d1f9c78e8d82b2f368618951d3920a9ed8f3c571c1c3524" },
+        { "name": "usage_records", "row_count": 24, "schema_sha256": "b0d631f5dce1105456a468a9399afe39b6afc7211e9bf83cb3c849dfe866aafa" },
+        { "name": "user_credits", "row_count": 1, "schema_sha256": "9de050a989ef3d4a8372e98900c6b54c246f69a6118483cd698adbd56291f555" },
+        { "name": "user_intel_prefs", "row_count": 1, "schema_sha256": "4128f56f3e4b6b13a80ee24268cd3ce18b7d8b71347893d4e01a1243c0bd0023" },
+        { "name": "user_profiles", "row_count": 0, "schema_sha256": "4a4af2daae40291a52c898a1be2711c1870893d5fe9ab7ed7fbdf2712551ada3" },
+        { "name": "users", "row_count": 1, "schema_sha256": "0802f181b208bfb074eeb4bf99aaa199f2ed275a1a7782e65bd1f3cd21e04758" }
+      ],
+      "table_counts_sha256": "f6a52e88b31664c151a4757a5a068852663f9f9da07b552497301dda93755015",
+      "schema_sha256": "52b235e72a52ff062349e06ec5572d0b4535a089eee2f35b7fdd48ca07330157",
+      "protected_tables": [
+        { "name": "bet_mutations", "row_count": 52, "content_sha256": "7f2fc2097626993a51b9910c7a2c39bac5218fb3e545e12ba06417b504a4d2d5" },
+        { "name": "bets", "row_count": 49, "content_sha256": "569b3207662db840576aad76eca522c2284633cc339188a0aa02ae047a5cfd9c" },
+        { "name": "credit_transactions", "row_count": 27, "content_sha256": "40739d5c5d5f8d47b3ae2ba73d24c5e2314103842c9c2dcd314e6bbfcd3c7637" },
+        { "name": "ledger_summary", "row_count": 2, "content_sha256": "067a6d057fef7afb8642ac530cb3250768abf277316078d0cbaa40d2fe8030a8" },
+        { "name": "mp_processed_payments", "row_count": 1, "content_sha256": "17df393cfbd353b4192000153e1fbbc1765601c18e1e10d842fadf73333bf39e" },
+        { "name": "user_credits", "row_count": 1, "content_sha256": "aa26e9a2b91f82b59a275652ab15f3d46fafbf2d7a64fe136cbba8a5ac2b6bb3" }
+      ],
+      "missing_protected_tables": []
+    },
+    "ufc_stats": {
+      "role": "ufc_stats",
+      "db_path": "/home/ubuntu/ufc-orchestrator-data/ufc_stats.db",
+      "quick_check": null,
+      "quick_check_status": "omitted_large_read",
+      "file": {
+        "size_bytes": 6107136,
+        "mtime_iso": "2026-04-01T18:58:10.834Z",
+        "sha256": null,
+        "sha256_status": "omitted_large_read"
+      },
+      "table_count": 3,
+      "tables": [
+        { "name": "fight_rounds", "row_count": 24948, "schema_sha256": "54fa6e3b9c353f0a21799dad0fead7c512d4e6b65514566ee6c31f6268926f18" },
+        { "name": "fights", "row_count": 5103, "schema_sha256": "c243c4065babcc36a03adf4c08f5454c693d373b1fb83fcd313e9679a5c90a94" },
+        { "name": "upcoming_fights", "row_count": 78, "schema_sha256": "acba67ba3757e79dbae6cc57cabfeb7d9cdfd3c5407d02d8f5751d3dfd5d95b3" }
+      ],
+      "table_counts_sha256": "2dd77fb5565ce8045cfa96953ce6ac48eeb2efd0e11b9a00bc67c95bee8de675",
+      "schema_sha256": "7bde6dbb658549840a40161d2d13350054c1166cf2521bb959884d89aac3c73b",
+      "protected_tables": [],
+      "missing_protected_tables": []
+    }
+  },
+  "runtime": {
+    "systemd": {
+      "MainPID": 1452875,
+      "NRestarts": 0,
+      "ExecMainStartTimestamp": "Mon 2026-07-20 02:04:40 UTC",
+      "ControlGroup": "/system.slice/system-bot\\x2dfactory.slice/bot-factory@ufc.service",
+      "WorkingDirectory": "/home/ubuntu/apps/bot-factory",
+      "Id": "bot-factory@ufc.service",
+      "ActiveState": "active",
+      "SubState": "running",
+      "FragmentPath": "/etc/systemd/system/bot-factory@.service"
+    },
+    "health": {
+      "url": "http://127.0.0.1:3000/health",
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "app_name": "UFC Betting Wizard",
+        "bot_id": "ufc",
+        "now": "2026-07-20T14:33:06.982Z",
+        "runtime": {
+          "telegram": {
+            "startedAt": 1784513136869,
+            "lastUpdateAt": 1784513136869,
+            "lastMessageAt": "[redacted]",
+            "lastCallbackAt": 0,
+            "lastPollingErrorAt": 0,
+            "lastPollingConflictAt": 0,
+            "pollingConflictCount": 0,
+            "lastRecoveryAt": 0,
+            "recoveryCount": 0,
+            "lastRecoveryReason": "",
+            "lastErrorMessage": "[redacted]",
+            "watchdogChecks": 1492,
+            "idleMs": 44850113,
+            "watchdogIdleThresholdMs": 240000,
+            "watchdogIntervalMs": 30000,
+            "pollingRecoveryInFlight": false,
+            "degraded": false,
+            "recoveryWindowCount": 0,
+            "recoveryMaxPerWindow": 10,
+            "recoveryWindowMs": 3600000
+          }
+        }
+      }
+    },
+    "journal": {
+      "line_count": 1000,
+      "categorized_line_count": 928,
+      "categories": {
+        "telegram_409_conflict": 915,
+        "background_refresh_failure": 0,
+        "suspicious_event_candidate": 13,
+        "restart_signal": 0,
+        "billing_failure": 0,
+        "odds_api_auth_failure": 0,
+        "other_error": 0
+      },
+      "first_timestamp": "2026-07-20T01:50:42.000Z",
+      "latest_timestamp": "2026-07-20T14:06:59.000Z",
+      "category_sequence_sha256": "d8db7a9222ce35f5ef41e50cd2976b82004a2c25837af64ee4e5604261a8bcbb"
+    }
+  }
+}

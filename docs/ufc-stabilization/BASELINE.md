@@ -50,3 +50,5 @@ Dos snapshots se comparan por:
 5. Deltas de categorías journal.
 
 Un cambio de digest protegido bloquea cualquier migración, limpieza o settlement hasta ser explicado y autorizado por el flujo correspondiente.
+
+Baseline productivo inicial: [`evidence/2026-07-20-production-baseline.json`](evidence/2026-07-20-production-baseline.json).

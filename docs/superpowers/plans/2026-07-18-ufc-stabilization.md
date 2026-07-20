@@ -26,11 +26,11 @@
 
 - [x] Crear worktree `stabilize/ufc-runtime-integrity` desde `main` limpio.
 - [x] Instalar dependencias y correr suite baseline.
-- [ ] Crear backlog/spec/plan/handoff y enlaces históricos.
-- [ ] Aplicar y completar quality pack.
-- [ ] Agregar gate UFC prod-like con tests.
-- [ ] Reproducir el error de refresh en RED y endurecer el runner/cleanup hasta GREEN limpio.
-- [ ] Capturar snapshot operativo anonimizado antes de runtime.
+- [x] Crear backlog/spec/plan/handoff y enlaces históricos.
+- [x] Aplicar y completar quality pack.
+- [x] Agregar gate UFC prod-like con tests.
+- [x] Reproducir el error de refresh en RED y endurecer el runner/cleanup hasta GREEN limpio.
+- [x] Capturar snapshot operativo anonimizado antes de runtime.
 
 ## Task 1 — Contención
 
