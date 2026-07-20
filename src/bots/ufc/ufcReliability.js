@@ -197,6 +197,12 @@ export async function createUfcDbBackup({
   };
 }
 
+/**
+ * Inicia verificación y backup periódicos de la DB UFC con estado observable.
+ *
+ * @returns {{stop:Function,getStatus:Function}} Control del loop y snapshot seguro.
+ * @sideEffects Puede verificar, respaldar y podar backups según configuración.
+ */
 export function startUfcDbReliabilityLoop({
   enabled = isFeatureEnabled(process.env.UFC_DB_BACKUP_ENABLED, true),
   dbPath = process.env.DB_PATH || '',
@@ -206,8 +212,20 @@ export function startUfcDbReliabilityLoop({
   verifyBackup = isFeatureEnabled(process.env.UFC_DB_BACKUP_VERIFY_RESTORE, true),
   logger = console,
 } = {}) {
+  const status = {
+    enabled: Boolean(enabled),
+    inFlight: false,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+  };
+  /**
+   * @returns {object} Copia read-only del último ciclo de mantenimiento.
+   * @sideEffects Ninguno.
+   */
+  const getStatus = () => ({ ...status });
   if (!enabled) {
-    return { stop() {} };
+    return { stop() {}, getStatus };
   }
 
   let stopped = false;
@@ -217,9 +235,12 @@ export function startUfcDbReliabilityLoop({
   const runCycle = async (trigger = 'interval') => {
     if (stopped || inFlight) return;
     inFlight = true;
+    status.inFlight = true;
+    status.lastAttemptAt = new Date().toISOString();
     try {
       const verification = verifyUfcDb({ dbPath });
       if (!verification.ok) {
+        status.lastError = 'ufc_db_verification_failed';
         logger.error(`[ufc-db] verification failed (${trigger})`, JSON.stringify(verification));
         return;
       }
@@ -230,16 +251,21 @@ export function startUfcDbReliabilityLoop({
         verifyBackup,
       });
       if (!backupResult.ok) {
+        status.lastError = backupResult.error || 'ufc_db_backup_failed';
         logger.error(`[ufc-db] backup failed (${trigger})`, JSON.stringify(backupResult));
         return;
       }
+      status.lastSuccessAt = backupResult.createdAt || new Date().toISOString();
+      status.lastError = null;
       logger.log(
         `[ufc-db] backup ok (${trigger}) file=${backupResult.backupFile} size=${backupResult.sizeBytes}`
       );
     } catch (error) {
+      status.lastError = 'ufc_db_maintenance_cycle_failed';
       logger.error(`[ufc-db] reliability cycle failed (${trigger})`, error);
     } finally {
       inFlight = false;
+      status.inFlight = false;
     }
   };
 
@@ -249,6 +275,7 @@ export function startUfcDbReliabilityLoop({
   }, Math.max(60_000, toPositiveInt(intervalMs, 6 * 60 * 60 * 1000)));
 
   return {
+    getStatus,
     stop() {
       stopped = true;
       if (timer) {

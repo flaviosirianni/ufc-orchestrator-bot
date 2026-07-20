@@ -123,6 +123,45 @@ function buildResultHtml(status = 'unknown') {
   ].join('');
 }
 
+/**
+ * Construye el contrato JSON de `/health` aislando fallos de sus proveedores.
+ *
+ * @returns {Promise<object>} Payload compatible con bloques operativos aditivos.
+ * @sideEffects Ejecuta únicamente los proveedores de estado inyectados.
+ */
+export async function buildHealthPayload({
+  appName = 'Bot Factory runtime',
+  botId = 'ufc',
+  statusProvider = null,
+  healthProvider = null,
+  nowProvider = () => new Date(),
+} = {}) {
+  const runtimeStatus =
+    typeof statusProvider === 'function'
+      ? await Promise.resolve(statusProvider()).catch(() => null)
+      : null;
+  const healthStatus =
+    typeof healthProvider === 'function'
+      ? await Promise.resolve(healthProvider()).catch(() => null)
+      : null;
+  const nowValue = nowProvider();
+  const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  return {
+    ok: true,
+    app_name: appName,
+    bot_id: botId,
+    now: now.toISOString(),
+    runtime: runtimeStatus,
+    ...(healthStatus && typeof healthStatus === 'object' ? healthStatus : {}),
+  };
+}
+
+/**
+ * Inicia el servidor HTTP compartido de health, topups y webhooks.
+ *
+ * @returns {import('node:http').Server} Servidor iniciado.
+ * @sideEffects Abre un puerto HTTP y procesa callbacks externos.
+ */
 export function createHealthServer(
   port,
   {
@@ -132,6 +171,7 @@ export function createHealthServer(
     onTopupApplied = null,
     legacyTopup = null,
     statusProvider = null,
+    healthProvider = null,
   } = {}
 ) {
   const server = http.createServer(async (req, res) => {
@@ -145,17 +185,13 @@ export function createHealthServer(
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      const runtimeStatus =
-        typeof statusProvider === 'function'
-          ? await Promise.resolve(statusProvider()).catch(() => null)
-          : null;
-      sendJson(res, 200, {
-        ok: true,
-        app_name: appName,
-        bot_id: botId,
-        now: new Date().toISOString(),
-        runtime: runtimeStatus,
+      const payload = await buildHealthPayload({
+        appName,
+        botId,
+        statusProvider,
+        healthProvider,
       });
+      sendJson(res, 200, payload);
       return;
     }
 

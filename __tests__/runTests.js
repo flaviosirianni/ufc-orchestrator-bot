@@ -25,6 +25,7 @@ const SUITES = [
     exportName: 'runEventLedgerFailClosedTests',
   },
   { modulePath: './snapshotDedupe.test.js', exportName: 'runSnapshotDedupeTests' },
+  { modulePath: './ufcHealthStatus.test.js', exportName: 'runUfcHealthStatusTests' },
   { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
   { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },
   { modulePath: './telegramRuntime.test.js', exportName: 'runTelegramRuntimeTests' },

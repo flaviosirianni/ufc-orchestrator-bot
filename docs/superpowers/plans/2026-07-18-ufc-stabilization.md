@@ -40,7 +40,7 @@
 - [x] Persistir confianza/evidencia y log append-only sin cambiar ledger.
 - [x] Aplicar fail-closed a todos los consumidores.
 - [x] Dedupe projection/scoring por hash.
-- [ ] Extender health.
+- [x] Extender health.
 - [ ] Ejecutar backup, marcar estado corrupto y verificar digest ledger.
 - [ ] Gate/deploy/smoke/observación 24 h.
 

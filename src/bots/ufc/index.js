@@ -50,6 +50,7 @@ import {
   upsertOddsApiCacheEntry,
   logOddsApiUsage,
   getLatestOddsApiQuotaState,
+  getLatestOddsApiHealthState,
   listLatestOddsMarketsForFight,
   listLatestOddsMarketsForEvent,
   listUpcomingOddsEvents,
@@ -76,6 +77,7 @@ import { startUfcDbReliabilityLoop } from './ufcReliability.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
+import { createUfcHealthStatusProvider } from './ufcHealthStatus.js';
 import { evaluateEventConsumption } from '../../core/eventTruthGate.js';
 import {
   createDisabledTelegramRuntime,
@@ -182,12 +184,18 @@ export function createVerifiedEventStoreView({
   };
 }
 
+/**
+ * Ensambla e inicia el runtime UFC y sus monitores.
+ *
+ * @returns {Promise<{ok:boolean,botId:string}>} Resultado de bootstrap.
+ * @sideEffects Abre DB/health, inicia polling y timers de background.
+ */
 export async function bootstrapBot({ manifest } = {}) {
   const conversationStore = createConversationStore();
   const sessionLogger = createSessionLogger();
   getDb();
   console.log('[bootstrap][ufc] SQLite DB:', getDbPath());
-  startUfcDbReliabilityLoop({
+  const maintenanceMonitor = startUfcDbReliabilityLoop({
     dbPath: getDbPath(),
   });
 
@@ -616,12 +624,24 @@ export async function bootstrapBot({ manifest } = {}) {
     },
   };
 
+  const healthStatusProvider = createUfcHealthStatusProvider({
+    getEventWatchState,
+    getStatsFreshness: ufcStats.getFreshnessMeta,
+    getOddsApiStatus: () => ({
+      enabled: oddsApi.isEnabled(),
+      ...getLatestOddsApiHealthState(),
+    }),
+    getBillingStatus: () => billingClient.getHealthStatus(),
+    getMaintenanceStatus: () => maintenanceMonitor.getStatus(),
+  });
+
   createHealthServer(port, {
     appName: manifest?.display_name || 'UFC Bot',
     botId,
     billingClient,
     legacyTopup,
     statusProvider: () => ({ telegram: telegram?.getRuntimeStatus?.() ?? null }),
+    healthProvider: healthStatusProvider,
     onTopupApplied: async (event = {}) => {
       if (!telegram?.sendSystemMessage) return;
       const userId = String(event.user_id || '').trim();

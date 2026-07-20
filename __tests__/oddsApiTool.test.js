@@ -65,6 +65,12 @@ export async function runOddsApiToolTests() {
     assert.equal(second.meta.cached, true);
     assert.equal(usageLog.length, 1);
     assert.equal(first.meta.requestsRemaining, 499);
+    assert.equal(tool.isEnabled(), true);
+  });
+
+  tests.push(async () => {
+    const tool = createOddsApiTool({ apiKey: '' });
+    assert.equal(tool.isEnabled(), false);
   });
 
   tests.push(async () => {

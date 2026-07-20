@@ -271,6 +271,12 @@ async function fetchJsonWithTimeout(url, { fetchImpl = fetch, timeoutMs = ODDS_A
   }
 }
 
+/**
+ * Crea el adaptador cacheado de Odds API.
+ *
+ * @returns {object} Operaciones Odds y estado de configuración.
+ * @sideEffects Sus operaciones pueden leer/escribir cache y ejecutar requests; construirlo no hace I/O.
+ */
 export function createOddsApiTool({
   apiKey = ODDS_API_KEY,
   baseUrl = ODDS_API_BASE_URL,
@@ -393,6 +399,13 @@ export function createOddsApiTool({
   }
 
   return {
+    /**
+     * @returns {boolean} `true` si hay API key configurada.
+     * @sideEffects Ninguno.
+     */
+    isEnabled() {
+      return Boolean(String(apiKey || '').trim());
+    },
     request,
     getSports({
       all = true,

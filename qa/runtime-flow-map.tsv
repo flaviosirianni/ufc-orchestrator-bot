@@ -6,3 +6,4 @@ UFC-STAB-004	ops	npm run ufc:baseline:capture	critical	ufc-stabilization	2026-07
 UFC-STAB-100	domain	src/core/eventTruthGate.js#evaluateEventTruth	critical	ufc-stabilization	2026-07-20
 UFC-STAB-101	domain	src/core/eventTruthGate.js#evaluateEventConsumption	critical	ufc-stabilization	2026-07-20
 UFC-STAB-102	domain	src/core/sqliteStore.js#insertFightProjectionSnapshots	critical	ufc-stabilization	2026-07-20
+UFC-STAB-103	domain	src/bots/ufc/ufcHealthStatus.js#createUfcHealthStatusProvider	high	ufc-stabilization	2026-07-20

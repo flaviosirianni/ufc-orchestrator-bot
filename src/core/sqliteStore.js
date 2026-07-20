@@ -3018,6 +3018,54 @@ export function getLatestOddsApiQuotaState() {
   };
 }
 
+/**
+ * Lee la última llamada y el último éxito de Odds API sin activar auto-reparación.
+ *
+ * @returns {object} Snapshot read-only para health.
+ * @sideEffects Lee SQLite.
+ */
+export function getLatestOddsApiHealthState() {
+  const db = getDb();
+  const latest = db
+    .prepare(
+      `SELECT status_code, requests_remaining, requests_used, requests_last, endpoint, created_at
+       FROM odds_api_usage_log
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get();
+  const success = db
+    .prepare(
+      `SELECT created_at
+       FROM odds_api_usage_log
+       WHERE status_code >= 200 AND status_code < 300
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get();
+  return {
+    statusCode:
+      latest?.status_code === null || latest?.status_code === undefined
+        ? null
+        : Number(latest.status_code),
+    requestsRemaining:
+      latest?.requests_remaining === null || latest?.requests_remaining === undefined
+        ? null
+        : Number(latest.requests_remaining),
+    requestsUsed:
+      latest?.requests_used === null || latest?.requests_used === undefined
+        ? null
+        : Number(latest.requests_used),
+    requestsLast:
+      latest?.requests_last === null || latest?.requests_last === undefined
+        ? null
+        : Number(latest.requests_last),
+    endpoint: latest?.endpoint || null,
+    createdAt: latest?.created_at || null,
+    lastSuccessAt: success?.created_at || null,
+  };
+}
+
 function parseOddsEventIndexRow(row) {
   if (!row) return null;
   return {

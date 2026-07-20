@@ -2,7 +2,7 @@
 
 Actualizado: 2026-07-20
 
-Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102 verificando y UFC-STAB-103 en progreso
+Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102/103 verificando y UFC-STAB-104 en progreso
 
 Branch: `stabilize/ufc-runtime-integrity`
 
@@ -28,6 +28,7 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 - UFC-STAB-100 local completo: `EventTruthGate` puro, migración aditiva, lectura legacy `invalid/verification_missing`, decisiones append-only y discovery web auditado como no consumible. Tests de UFC 329, `Preview`, stale-live, store legacy y suite completa verdes. No se desplegó todavía este cambio.
 - UFC-STAB-101 local completo: revalidación al consumir, freshness stats por mtime con máximo 36 h, bloqueos de news/proyección/scoring/mirrors/settlement y vista segura para Telegram. Tests positivos y negativos verdes; una DB real conservó apuesta pending y conteo de mutaciones exacto.
 - UFC-STAB-102 local completo: hashes SHA-256 canónicos excluyen sólo el timestamp de observación, índices únicos parciales deduplican proyecciones/scoring nuevos y las filas legacy permanecen intactas con hash nulo. RED produjo 96 snapshots idénticos por tabla en 24 h; GREEN conserva uno y agrega otro únicamente ante un cambio material. Lecturas exponen `snapshotHash` y la suite completa pasa.
+- UFC-STAB-103 local completo: `/health` conserva `runtime` y agrega `process`, `event_intel`, `ufc_stats`, `odds_api`, `billing` y `maintenance`. El payload revalida TTL, informa reason/último éxito y usa allowlists que excluyen tokens, paths, evidencias y cartelera. Billing y backup mantienen telemetría segura en memoria; Odds se lee desde su log SQLite sin auto-heal. Tests focalizados, suite completa, quality gate y `qa:parity:ufc` verdes.
 
 ## Estado de datos protegido
 
@@ -38,8 +39,8 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 
 ## Próximo paso exacto
 
-1. Continuar UFC-STAB-103 relevando `createHealthServer` y el `statusProvider` UFC actual.
-2. Crear un test RED del contrato `/health` con bloques aditivos `process`, `event_intel`, `ufc_stats`, `odds_api`, `billing` y `maintenance`, comprobando que no ejecuta I/O mutante ni expone secretos.
+1. Continuar UFC-STAB-104 con un fixture SQLite contaminado y un test RED del CLI `ufc:containment` en modo dry-run.
+2. Implementar backup obligatorio, selección allowlisted de UFC 329/live viejo/mirrors contaminados y apply transaccional; verificar digests protegidos antes/después antes de tocar producción.
 
 ## Rollback actual
 
