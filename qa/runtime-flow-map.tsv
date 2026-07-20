@@ -3,3 +3,4 @@ UFC-STAB-002	ops	npm run quality:gate	high	ufc-stabilization	2026-07-18
 UFC-STAB-005	test	npm test	critical	ufc-stabilization	2026-07-18
 UFC-STAB-003	ops	npm run qa:parity:ufc	critical	ufc-stabilization	2026-07-18
 UFC-STAB-004	ops	npm run ufc:baseline:capture	critical	ufc-stabilization	2026-07-18
+UFC-STAB-100	domain	src/core/eventTruthGate.js#evaluateEventTruth	critical	ufc-stabilization	2026-07-20

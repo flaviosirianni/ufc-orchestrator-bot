@@ -37,7 +37,7 @@
 
 **Files:** módulos nuevos de truth gate, `eventIntel`, `preFightAnalysis`, `eventMirrorService`, `autoSettlement`, `sqliteStore`, health y tests asociados.
 
-- [ ] Persistir confianza/evidencia y log append-only sin cambiar ledger.
+- [x] Persistir confianza/evidencia y log append-only sin cambiar ledger.
 - [ ] Aplicar fail-closed a todos los consumidores.
 - [ ] Dedupe projection/scoring por hash.
 - [ ] Extender health.

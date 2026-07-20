@@ -2,7 +2,7 @@
 
 Actualizado: 2026-07-20
 
-Estado general: Etapa 0 cerrada; UFC-STAB-100 en progreso
+Estado general: Etapa 0 cerrada; UFC-STAB-100 verificando y UFC-STAB-101 en progreso
 
 Branch: `stabilize/ufc-runtime-integrity`
 
@@ -25,6 +25,7 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 - Etapa 0 fusionada a `main`, publicada y desplegada por fast-forward `1afddfa..1323308`. `billing-service` y `bot-factory@ufc` quedaron `active/running`; UFC tiene un único proceso de su cgroup, health 200 y `NRestarts=0`.
 - La captura post-deploy read-only confirmó `quick_check=ok` y coincidencia exacta de los seis conteos/digests protegidos. El archivo temporal remoto fue eliminado. Evidencia: `docs/ufc-stabilization/evidence/2026-07-20-stage0-deploy-verification.md`.
 - El arranque UFC tardó aproximadamente 218 segundos hasta abrir `/health`; queda como señal de performance/runtime a investigar. Desde el boot verificado hubo cero 409, pero se volvió a publicar UFC 329 y se escribieron 5 proyecciones/15 scoring desde stats vencidas. La Etapa 1 debe contener esto antes de cualquier reconstrucción.
+- UFC-STAB-100 local completo: `EventTruthGate` puro, migración aditiva, lectura legacy `invalid/verification_missing`, decisiones append-only y discovery web auditado como no consumible. Tests de UFC 329, `Preview`, stale-live, store legacy y suite completa verdes. No se desplegó todavía este cambio.
 
 ## Estado de datos protegido
 
@@ -35,8 +36,8 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 
 ## Próximo paso exacto
 
-1. Continuar UFC-STAB-100 con tests RED para UFC 329, títulos `Preview`, estado stale y stats vencidas.
-2. Implementar el contrato de confianza y persistencia append-only sin conectar todavía consumidores mutantes; ejecutar suite completa y ledger tests.
+1. Continuar UFC-STAB-101 con tests RED que demuestren cero writes en proyecciones/scoring/news/mirrors y auto-settlement ante evento no verificado o stats vencidas.
+2. Integrar el gate consumidor por consumidor y comparar el ledger sintético antes/después.
 
 ## Rollback actual
 

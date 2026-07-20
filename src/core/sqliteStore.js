@@ -350,9 +350,41 @@ function initSchema(db) {
       source_secondary TEXT,
       main_card_json TEXT NOT NULL,
       monitored_fighters_json TEXT NOT NULL,
+      verification_confidence TEXT,
+      verification_reasons_json TEXT,
+      verification_version TEXT,
+      last_verified_at TEXT,
+      verification_expires_at TEXT,
+      verification_source_count INTEGER,
+      verification_evidence_json TEXT,
+      consumer_allowed INTEGER,
+      ledger_mutation_allowed INTEGER,
+      candidate_hash TEXT,
+      last_evaluated_at TEXT,
       last_reconciled_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS event_verification_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      watch_key TEXT NOT NULL,
+      event_id TEXT,
+      event_name TEXT,
+      event_status TEXT,
+      confidence TEXT NOT NULL,
+      consumer_allowed INTEGER NOT NULL DEFAULT 0,
+      ledger_mutation_allowed INTEGER NOT NULL DEFAULT 0,
+      reasons_json TEXT NOT NULL,
+      evidence_json TEXT,
+      candidate_hash TEXT NOT NULL,
+      evaluated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_event_verification_watch_time
+      ON event_verification_runs (watch_key, evaluated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_event_verification_candidate
+      ON event_verification_runs (candidate_hash, evaluated_at DESC);
 
     CREATE TABLE IF NOT EXISTS fighter_news_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -523,6 +555,58 @@ function ensureUserProfileSchema(db) {
   if (!names.has('target_event_utilization_pct')) {
     db.exec('ALTER TABLE user_profiles ADD COLUMN target_event_utilization_pct REAL');
   }
+}
+
+/**
+ * Agrega metadata de confianza y auditoría a DB legacy sin promover estados históricos.
+ *
+ * @returns {void}
+ * @sideEffects Ejecuta DDL aditivo sobre SQLite.
+ */
+function ensureEventTruthSchema(db) {
+  const columns = db.prepare("PRAGMA table_info('event_watch_state')").all();
+  const names = new Set(columns.map((row) => row?.name).filter(Boolean));
+  const additions = [
+    ['verification_confidence', 'TEXT'],
+    ['verification_reasons_json', 'TEXT'],
+    ['verification_version', 'TEXT'],
+    ['last_verified_at', 'TEXT'],
+    ['verification_expires_at', 'TEXT'],
+    ['verification_source_count', 'INTEGER'],
+    ['verification_evidence_json', 'TEXT'],
+    ['consumer_allowed', 'INTEGER'],
+    ['ledger_mutation_allowed', 'INTEGER'],
+    ['candidate_hash', 'TEXT'],
+    ['last_evaluated_at', 'TEXT'],
+  ];
+  for (const [name, type] of additions) {
+    if (!names.has(name)) {
+      db.exec(`ALTER TABLE event_watch_state ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS event_verification_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      watch_key TEXT NOT NULL,
+      event_id TEXT,
+      event_name TEXT,
+      event_status TEXT,
+      confidence TEXT NOT NULL,
+      consumer_allowed INTEGER NOT NULL DEFAULT 0,
+      ledger_mutation_allowed INTEGER NOT NULL DEFAULT 0,
+      reasons_json TEXT NOT NULL,
+      evidence_json TEXT,
+      candidate_hash TEXT NOT NULL,
+      evaluated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_event_verification_watch_time
+      ON event_verification_runs (watch_key, evaluated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_event_verification_candidate
+      ON event_verification_runs (candidate_hash, evaluated_at DESC);
+  `);
 }
 
 function ensureOddsApiCacheSchema(db) {
@@ -699,6 +783,7 @@ export function getDb() {
   initSchema(db);
   ensureBetSchema(db);
   ensureUserProfileSchema(db);
+  ensureEventTruthSchema(db);
   ensureOddsApiCacheSchema(db);
   runStartupDbHealthCheck(db);
   dbInstance = db;
@@ -3679,6 +3764,16 @@ function parseEventWatchStateRow(row) {
   if (!row) return null;
   const mainCard = parseJsonSafe(row.main_card_json, []);
   const monitoredFighters = parseJsonSafe(row.monitored_fighters_json, []);
+  const rawConfidence = String(row.verification_confidence || '').trim().toLowerCase();
+  const confidence = ['verified', 'degraded', 'invalid', 'stale'].includes(rawConfidence)
+    ? rawConfidence
+    : 'invalid';
+  const parsedReasons = parseJsonSafe(row.verification_reasons_json, null);
+  const verificationReasons = Array.isArray(parsedReasons)
+    ? parsedReasons
+    : ['verification_missing'];
+  const verificationEvidence = parseJsonSafe(row.verification_evidence_json, {});
+  const consumerAllowed = confidence === 'verified' && Number(row.consumer_allowed) === 1;
   return {
     watchKey: row.watch_key || 'next_event',
     eventId: row.event_id || null,
@@ -3689,6 +3784,20 @@ function parseEventWatchStateRow(row) {
     sourceSecondary: row.source_secondary || null,
     mainCard: Array.isArray(mainCard) ? mainCard : [],
     monitoredFighters: Array.isArray(monitoredFighters) ? monitoredFighters : [],
+    confidence,
+    consumerAllowed,
+    ledgerMutationAllowed: consumerAllowed && Number(row.ledger_mutation_allowed) === 1,
+    verificationReasons,
+    verificationVersion: row.verification_version || null,
+    lastVerifiedAt: row.last_verified_at || null,
+    verificationExpiresAt: row.verification_expires_at || null,
+    compatibleSourceCount: Number(row.verification_source_count) || 0,
+    verificationEvidence:
+      verificationEvidence && typeof verificationEvidence === 'object'
+        ? verificationEvidence
+        : {},
+    candidateHash: row.candidate_hash || null,
+    lastEvaluatedAt: row.last_evaluated_at || null,
     lastReconciledAt: row.last_reconciled_at || null,
     updatedAt: row.updated_at || null,
   };
@@ -3700,6 +3809,10 @@ export function getEventWatchState(watchKey = 'next_event') {
     .prepare(
       `SELECT watch_key, event_id, event_name, event_date_utc, event_status,
               source_primary, source_secondary, main_card_json, monitored_fighters_json,
+              verification_confidence, verification_reasons_json, verification_version,
+              last_verified_at, verification_expires_at, verification_source_count,
+              verification_evidence_json, consumer_allowed, ledger_mutation_allowed,
+              candidate_hash, last_evaluated_at,
               last_reconciled_at, updated_at
        FROM event_watch_state
        WHERE watch_key = ?`
@@ -3708,46 +3821,217 @@ export function getEventWatchState(watchKey = 'next_event') {
   return parseEventWatchStateRow(row);
 }
 
+/**
+ * Genera un hash estable para escrituras legacy que llegan sin decisión del truth gate.
+ *
+ * @returns {string} SHA-256 del candidato deportivo.
+ * @sideEffects Ninguno.
+ */
+function hashEventWatchCandidate(snapshot = {}, watchKey = 'next_event') {
+  const payload = {
+    watchKey: String(watchKey || 'next_event'),
+    eventId: snapshot.eventId || null,
+    eventName: snapshot.eventName || null,
+    eventDateUtc: snapshot.eventDateUtc || null,
+    eventStatus: snapshot.eventStatus || null,
+    sourcePrimary: snapshot.sourcePrimary || null,
+    sourceSecondary: snapshot.sourceSecondary || null,
+    mainCard: Array.isArray(snapshot.mainCard) ? snapshot.mainCard : [],
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+/**
+ * Normaliza una decisión del truth gate y aplica defaults fail-closed a callers legacy.
+ *
+ * @returns {object} Metadata lista para persistir.
+ * @sideEffects Ninguno.
+ */
+function normalizeEventVerification(snapshot = {}, watchKey = 'next_event', timestamp = nowIso()) {
+  const verification =
+    snapshot.verification && typeof snapshot.verification === 'object'
+      ? snapshot.verification
+      : null;
+  const rawConfidence = String(verification?.confidence || '').trim().toLowerCase();
+  const validConfidence = ['verified', 'degraded', 'invalid', 'stale'].includes(rawConfidence);
+  const confidence = validConfidence ? rawConfidence : 'invalid';
+  const rawReasons = Array.isArray(verification?.reasons) ? verification.reasons : [];
+  const reasons = Array.from(
+    new Set(
+      rawReasons
+        .map((reason) => String(reason || '').trim())
+        .filter(Boolean)
+        .concat(verification ? (validConfidence ? [] : ['verification_confidence_invalid']) : ['verification_missing'])
+    )
+  );
+  const consumerAllowed = confidence === 'verified' && verification?.consumerAllowed === true;
+  const compatibleSourceCount = Number(verification?.compatibleSourceCount);
+  const evidence =
+    verification?.evidence && typeof verification.evidence === 'object'
+      ? verification.evidence
+      : {};
+  return {
+    confidence,
+    reasons,
+    version: String(verification?.version || 'event-truth/v1'),
+    lastVerifiedAt: verification?.lastVerifiedAt || null,
+    expiresAt: verification?.expiresAt || null,
+    compatibleSourceCount:
+      Number.isFinite(compatibleSourceCount) && compatibleSourceCount >= 0
+        ? Math.floor(compatibleSourceCount)
+        : 0,
+    evidence,
+    consumerAllowed,
+    ledgerMutationAllowed:
+      consumerAllowed && verification?.ledgerMutationAllowed === true,
+    candidateHash:
+      String(verification?.candidateHash || '').trim() ||
+      hashEventWatchCandidate(snapshot, watchKey),
+    evaluatedAt: verification?.evaluatedAt || timestamp,
+  };
+}
+
 export function upsertEventWatchState(snapshot = {}, watchKey = 'next_event') {
   const db = getDb();
   const ts = nowIso();
+  const normalizedWatchKey = String(watchKey || snapshot.watchKey || 'next_event');
   const mainCard = Array.isArray(snapshot.mainCard) ? snapshot.mainCard : [];
   const monitoredFighters = Array.isArray(snapshot.monitoredFighters)
     ? snapshot.monitoredFighters
     : [];
+  const verification = normalizeEventVerification(snapshot, normalizedWatchKey, ts);
 
-  db.prepare(
-    `INSERT INTO event_watch_state
-      (watch_key, event_id, event_name, event_date_utc, event_status,
-       source_primary, source_secondary, main_card_json, monitored_fighters_json,
-       last_reconciled_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(watch_key) DO UPDATE SET
-       event_id = excluded.event_id,
-       event_name = excluded.event_name,
-       event_date_utc = excluded.event_date_utc,
-       event_status = excluded.event_status,
-       source_primary = excluded.source_primary,
-       source_secondary = excluded.source_secondary,
-       main_card_json = excluded.main_card_json,
-       monitored_fighters_json = excluded.monitored_fighters_json,
-       last_reconciled_at = excluded.last_reconciled_at,
-       updated_at = excluded.updated_at`
-  ).run(
-    String(watchKey || 'next_event'),
-    snapshot.eventId || null,
-    snapshot.eventName || 'Unknown UFC Event',
-    snapshot.eventDateUtc || null,
-    snapshot.eventStatus || null,
-    snapshot.sourcePrimary || null,
-    snapshot.sourceSecondary || null,
-    JSON.stringify(mainCard),
-    JSON.stringify(monitoredFighters),
-    snapshot.lastReconciledAt || ts,
-    ts
-  );
+  const persist = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO event_verification_runs
+        (watch_key, event_id, event_name, event_status, confidence,
+         consumer_allowed, ledger_mutation_allowed, reasons_json, evidence_json,
+         candidate_hash, evaluated_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      normalizedWatchKey,
+      snapshot.eventId || null,
+      snapshot.eventName || 'Unknown UFC Event',
+      snapshot.eventStatus || null,
+      verification.confidence,
+      verification.consumerAllowed ? 1 : 0,
+      verification.ledgerMutationAllowed ? 1 : 0,
+      JSON.stringify(verification.reasons),
+      JSON.stringify(verification.evidence),
+      verification.candidateHash,
+      verification.evaluatedAt,
+      ts
+    );
 
-  return getEventWatchState(watchKey);
+    db.prepare(
+      `INSERT INTO event_watch_state
+        (watch_key, event_id, event_name, event_date_utc, event_status,
+         source_primary, source_secondary, main_card_json, monitored_fighters_json,
+         verification_confidence, verification_reasons_json, verification_version,
+         last_verified_at, verification_expires_at, verification_source_count,
+         verification_evidence_json, consumer_allowed, ledger_mutation_allowed,
+         candidate_hash, last_evaluated_at, last_reconciled_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(watch_key) DO UPDATE SET
+         event_id = excluded.event_id,
+         event_name = excluded.event_name,
+         event_date_utc = excluded.event_date_utc,
+         event_status = excluded.event_status,
+         source_primary = excluded.source_primary,
+         source_secondary = excluded.source_secondary,
+         main_card_json = excluded.main_card_json,
+         monitored_fighters_json = excluded.monitored_fighters_json,
+         verification_confidence = excluded.verification_confidence,
+         verification_reasons_json = excluded.verification_reasons_json,
+         verification_version = excluded.verification_version,
+         last_verified_at = excluded.last_verified_at,
+         verification_expires_at = excluded.verification_expires_at,
+         verification_source_count = excluded.verification_source_count,
+         verification_evidence_json = excluded.verification_evidence_json,
+         consumer_allowed = excluded.consumer_allowed,
+         ledger_mutation_allowed = excluded.ledger_mutation_allowed,
+         candidate_hash = excluded.candidate_hash,
+         last_evaluated_at = excluded.last_evaluated_at,
+         last_reconciled_at = excluded.last_reconciled_at,
+         updated_at = excluded.updated_at`
+    ).run(
+      normalizedWatchKey,
+      snapshot.eventId || null,
+      snapshot.eventName || 'Unknown UFC Event',
+      snapshot.eventDateUtc || null,
+      snapshot.eventStatus || null,
+      snapshot.sourcePrimary || null,
+      snapshot.sourceSecondary || null,
+      JSON.stringify(mainCard),
+      JSON.stringify(monitoredFighters),
+      verification.confidence,
+      JSON.stringify(verification.reasons),
+      verification.version,
+      verification.lastVerifiedAt,
+      verification.expiresAt,
+      verification.compatibleSourceCount,
+      JSON.stringify(verification.evidence),
+      verification.consumerAllowed ? 1 : 0,
+      verification.ledgerMutationAllowed ? 1 : 0,
+      verification.candidateHash,
+      verification.evaluatedAt,
+      snapshot.lastReconciledAt || ts,
+      ts
+    );
+  });
+  persist();
+
+  return getEventWatchState(normalizedWatchKey);
+}
+
+/**
+ * Lista decisiones append-only recientes para diagnóstico y reconstrucción auditable.
+ *
+ * @returns {Array<object>} Corridas más nuevas primero.
+ * @sideEffects Lee SQLite.
+ */
+export function listEventVerificationRuns({ watchKey = '', limit = 100 } = {}) {
+  const db = getDb();
+  const normalizedWatchKey = String(watchKey || '').trim();
+  const boundedLimit = Math.min(1000, Math.max(1, Number(limit) || 100));
+  const rows = normalizedWatchKey
+    ? db
+        .prepare(
+          `SELECT id, watch_key, event_id, event_name, event_status, confidence,
+                  consumer_allowed, ledger_mutation_allowed, reasons_json, evidence_json,
+                  candidate_hash, evaluated_at, created_at
+           FROM event_verification_runs
+           WHERE watch_key = ?
+           ORDER BY evaluated_at DESC, id DESC
+           LIMIT ?`
+        )
+        .all(normalizedWatchKey, boundedLimit)
+    : db
+        .prepare(
+          `SELECT id, watch_key, event_id, event_name, event_status, confidence,
+                  consumer_allowed, ledger_mutation_allowed, reasons_json, evidence_json,
+                  candidate_hash, evaluated_at, created_at
+           FROM event_verification_runs
+           ORDER BY evaluated_at DESC, id DESC
+           LIMIT ?`
+        )
+        .all(boundedLimit);
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    watchKey: row.watch_key || null,
+    eventId: row.event_id || null,
+    eventName: row.event_name || null,
+    eventStatus: row.event_status || null,
+    confidence: row.confidence || 'invalid',
+    consumerAllowed: Number(row.consumer_allowed) === 1,
+    ledgerMutationAllowed: Number(row.ledger_mutation_allowed) === 1,
+    reasons: parseJsonSafe(row.reasons_json, []),
+    evidence: parseJsonSafe(row.evidence_json, {}),
+    candidateHash: row.candidate_hash || null,
+    evaluatedAt: row.evaluated_at || null,
+    createdAt: row.created_at || null,
+  }));
 }
 
 function normalizeImpactLevel(value = 'high') {

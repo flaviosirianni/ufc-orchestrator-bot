@@ -1,15 +1,15 @@
 # Code Quality Tracker Summary
 
-Fecha: 2026-07-18
+Fecha: 2026-07-20
 
 ## Totales por capa
-- domain: 1
+- domain: 18
 - ops: 24
-- test: 18
+- test: 24
 
 ## Totales por modo de test
-- auto_unit: 18
-- auto_integration: 25
+- auto_unit: 31
+- auto_integration: 35
 - e2e: 0
 - runtime_qa: 0
 

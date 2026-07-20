@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import '../core/env.js';
+import { evaluateEventTruth } from './eventTruthGate.js';
 
 const EVENT_INTEL_DISCOVERY_INTERVAL_MS = Number(
   process.env.EVENT_INTEL_DISCOVERY_INTERVAL_MS ?? String(6 * 60 * 60 * 1000)
@@ -23,8 +24,8 @@ const EVENT_INTEL_NEWS_MAX_PER_FIGHTER = Number(
   process.env.EVENT_INTEL_NEWS_MAX_PER_FIGHTER ?? '6'
 );
 
-function nowIso() {
-  return new Date().toISOString();
+function nowIso(date = new Date()) {
+  return date.toISOString();
 }
 
 function normalize(value = '') {
@@ -198,10 +199,17 @@ function mapNewsItem({ raw = {}, fighterName = '', eventId = '' } = {}) {
   };
 }
 
-async function discoverNextEvent({
+/**
+ * Descubre un candidato web, lo evalúa fail-closed y persiste candidato más veredicto.
+ *
+ * @returns {Promise<object>} Resultado del descubrimiento con decisión de confianza.
+ * @sideEffects Consulta web y escribe estado/auditoría mediante el store inyectado.
+ */
+export async function discoverNextEvent({
   buildWebContextForMessage,
   upsertEventWatchState,
   fetchImpl,
+  now = new Date(),
 } = {}) {
   if (typeof buildWebContextForMessage !== 'function' || typeof upsertEventWatchState !== 'function') {
     return { ok: false, error: 'missing_dependencies' };
@@ -223,7 +231,11 @@ async function discoverNextEvent({
   const fights = Array.isArray(context.fights) ? context.fights : [];
   const monitoredFighters = extractUniqueFighters(fights);
   const eventDate = toIsoDate(context.date);
-  const snapshot = upsertEventWatchState({
+  const evaluatedAt = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(evaluatedAt.getTime())) {
+    return { ok: false, error: 'invalid_evaluation_time' };
+  }
+  const candidate = {
     watchKey: 'next_event',
     eventId: buildEventId({ eventName: context.eventName, eventDate }),
     eventName: context.eventName,
@@ -237,12 +249,33 @@ async function discoverNextEvent({
       fighterB: fight.fighterB,
     })),
     monitoredFighters,
-    lastReconciledAt: nowIso(),
+    lastReconciledAt: nowIso(evaluatedAt),
+  };
+  const declaredSourceCount = Number(context.compatibleSourceCount);
+  const compatibleSourceCount = Number.isFinite(declaredSourceCount)
+    ? declaredSourceCount
+    : Array.isArray(context.compatibleSources)
+      ? context.compatibleSources.length
+      : context.source
+        ? 1
+        : 0;
+  const verification = evaluateEventTruth({
+    watchKey: 'next_event',
+    candidate,
+    verification: {
+      compatibleSourceCount,
+      structuredCardSource: context.structuredCardSource === true,
+      liveSignalCount: Number(context.liveSignalCount || 0),
+      verifiedAt: nowIso(evaluatedAt),
+    },
+    now: evaluatedAt,
   });
+  const snapshot = upsertEventWatchState({ ...candidate, verification }, 'next_event');
 
   return {
     ok: true,
     event: snapshot,
+    verification,
   };
 }
 
@@ -393,5 +426,6 @@ export function startEventIntelMonitor({
 }
 
 export default {
+  discoverNextEvent,
   startEventIntelMonitor,
 };
