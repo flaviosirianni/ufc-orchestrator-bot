@@ -427,6 +427,7 @@ function initSchema(db) {
       reasoning_version TEXT NOT NULL,
       changed_from_prev INTEGER NOT NULL DEFAULT 0,
       change_summary TEXT,
+      snapshot_hash TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -454,6 +455,7 @@ function initSchema(db) {
       books_count INTEGER NOT NULL DEFAULT 0,
       inputs_json TEXT NOT NULL,
       reasoning_version TEXT NOT NULL,
+      snapshot_hash TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -606,6 +608,41 @@ function ensureEventTruthSchema(db) {
       ON event_verification_runs (watch_key, evaluated_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_event_verification_candidate
       ON event_verification_runs (candidate_hash, evaluated_at DESC);
+  `);
+}
+
+/**
+ * Agrega hashes e índices únicos parciales sin indexar ni reescribir filas legacy.
+ *
+ * @returns {void}
+ * @sideEffects Ejecuta DDL aditivo sobre tablas de telemetría SQLite.
+ */
+function ensureSnapshotDedupeSchema(db) {
+  const projectionColumns = db
+    .prepare("PRAGMA table_info('fight_projection_snapshots')")
+    .all();
+  const projectionNames = new Set(
+    projectionColumns.map((row) => row?.name).filter(Boolean)
+  );
+  if (!projectionNames.has('snapshot_hash')) {
+    db.exec('ALTER TABLE fight_projection_snapshots ADD COLUMN snapshot_hash TEXT');
+  }
+
+  const scoringColumns = db
+    .prepare("PRAGMA table_info('fight_bet_scoring_snapshots')")
+    .all();
+  const scoringNames = new Set(scoringColumns.map((row) => row?.name).filter(Boolean));
+  if (!scoringNames.has('snapshot_hash')) {
+    db.exec('ALTER TABLE fight_bet_scoring_snapshots ADD COLUMN snapshot_hash TEXT');
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_projection_snapshot_hash
+      ON fight_projection_snapshots (event_id, fight_id, snapshot_hash)
+      WHERE snapshot_hash IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_scoring_snapshot_hash
+      ON fight_bet_scoring_snapshots (event_id, fight_id, market_key, snapshot_hash)
+      WHERE snapshot_hash IS NOT NULL;
   `);
 }
 
@@ -784,6 +821,7 @@ export function getDb() {
   ensureBetSchema(db);
   ensureUserProfileSchema(db);
   ensureEventTruthSchema(db);
+  ensureSnapshotDedupeSchema(db);
   ensureOddsApiCacheSchema(db);
   runStartupDbHealthCheck(db);
   dbInstance = db;
@@ -3322,6 +3360,7 @@ function parseProjectionSnapshotRow(row) {
     reasoningVersion: row.reasoning_version || null,
     changedFromPrev: Boolean(row.changed_from_prev),
     changeSummary: row.change_summary || null,
+    snapshotHash: row.snapshot_hash || null,
     createdAt: row.created_at || null,
   };
 }
@@ -3369,8 +3408,115 @@ function parseBetScoringSnapshotRow(row) {
       row.books_count === null || row.books_count === undefined ? 0 : Number(row.books_count),
     inputs: parseJsonSafe(row.inputs_json, {}),
     reasoningVersion: row.reasoning_version || null,
+    snapshotHash: row.snapshot_hash || null,
     createdAt: row.created_at || null,
   };
+}
+
+/**
+ * Canonicaliza valores de snapshot para que el hash no dependa del orden de claves.
+ *
+ * @returns {*} Valor JSON estable.
+ * @sideEffects Ninguno.
+ */
+function canonicalizeSnapshotValue(value) {
+  if (Array.isArray(value)) return value.map((item) => canonicalizeSnapshotValue(item));
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalizeSnapshotValue(value[key])])
+  );
+}
+
+/**
+ * Calcula un hash SHA-256 estable de contenido, excluyendo timestamps de observación.
+ *
+ * @returns {string} Digest hexadecimal.
+ * @sideEffects Ninguno.
+ */
+function hashSnapshotContent(payload = {}) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonicalizeSnapshotValue(payload)))
+    .digest('hex');
+}
+
+/**
+ * Construye el hash material de una proyección.
+ *
+ * @returns {string} SHA-256 sin `createdAt`.
+ * @sideEffects Ninguno.
+ */
+function buildProjectionSnapshotHash(row = {}) {
+  return hashSnapshotContent({
+    eventId: String(row.eventId || '').trim(),
+    fightId: String(row.fightId || '').trim(),
+    fighterA: String(row.fighterA || '').trim(),
+    fighterB: String(row.fighterB || '').trim(),
+    predictedWinner: row.predictedWinner || null,
+    predictedMethod: row.predictedMethod || null,
+    confidencePct:
+      row.confidencePct === null || row.confidencePct === undefined
+        ? 0
+        : Number(row.confidencePct),
+    keyFactors: Array.isArray(row.keyFactors) ? row.keyFactors : [],
+    relevantNewsIds: Array.isArray(row.relevantNewsIds) ? row.relevantNewsIds : [],
+    reasoningVersion: row.reasoningVersion || 'v1',
+    changedFromPrev: Boolean(row.changedFromPrev),
+    changeSummary: row.changeSummary || null,
+  });
+}
+
+/**
+ * Construye el hash material de un scoring de mercado.
+ *
+ * @returns {string} SHA-256 sin `createdAt`.
+ * @sideEffects Ninguno.
+ */
+function buildBetScoringSnapshotHash(row = {}) {
+  return hashSnapshotContent({
+    eventId: String(row.eventId || '').trim(),
+    fightId: String(row.fightId || '').trim(),
+    fighterA: String(row.fighterA || '').trim(),
+    fighterB: String(row.fighterB || '').trim(),
+    marketKey: String(row.marketKey || '').trim(),
+    selection: row.selection || null,
+    recommendation: row.recommendation || 'no_bet',
+    edgePct: row.edgePct === null || row.edgePct === undefined ? 0 : Number(row.edgePct),
+    confidencePct:
+      row.confidencePct === null || row.confidencePct === undefined
+        ? 0
+        : Number(row.confidencePct),
+    riskLevel: row.riskLevel || 'high',
+    suggestedStakeUnits:
+      row.suggestedStakeUnits === null || row.suggestedStakeUnits === undefined
+        ? null
+        : Number(row.suggestedStakeUnits),
+    suggestedStakeAmount:
+      row.suggestedStakeAmount === null || row.suggestedStakeAmount === undefined
+        ? null
+        : Number(row.suggestedStakeAmount),
+    noBetReason: row.noBetReason || null,
+    modelProbabilityPct:
+      row.modelProbabilityPct === null || row.modelProbabilityPct === undefined
+        ? null
+        : Number(row.modelProbabilityPct),
+    impliedProbabilityPct:
+      row.impliedProbabilityPct === null || row.impliedProbabilityPct === undefined
+        ? null
+        : Number(row.impliedProbabilityPct),
+    consensusOdds:
+      row.consensusOdds === null || row.consensusOdds === undefined
+        ? null
+        : Number(row.consensusOdds),
+    booksCount:
+      row.booksCount === null || row.booksCount === undefined ? 0 : Number(row.booksCount),
+    inputs: row.inputs && typeof row.inputs === 'object' ? row.inputs : {},
+    reasoningVersion: row.reasoningVersion || 'v1_market_pack',
+  });
 }
 
 export function insertFightProjectionSnapshots(items = []) {
@@ -3382,11 +3528,11 @@ export function insertFightProjectionSnapshots(items = []) {
   const ts = nowIso();
 
   const insert = db.prepare(
-    `INSERT INTO fight_projection_snapshots
+    `INSERT OR IGNORE INTO fight_projection_snapshots
       (event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
        confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
-       changed_from_prev, change_summary, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       changed_from_prev, change_summary, snapshot_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const run = db.transaction((inputRows) => {
@@ -3398,7 +3544,7 @@ export function insertFightProjectionSnapshots(items = []) {
       const fighterB = String(row?.fighterB || '').trim();
       if (!eventId || !fightId || !fighterA || !fighterB) continue;
 
-      insert.run(
+      const info = insert.run(
         eventId,
         fightId,
         fighterA,
@@ -3413,9 +3559,10 @@ export function insertFightProjectionSnapshots(items = []) {
         row.reasoningVersion || 'v1',
         row.changedFromPrev ? 1 : 0,
         row.changeSummary || null,
+        buildProjectionSnapshotHash(row),
         row.createdAt || ts
       );
-      insertedCount += 1;
+      insertedCount += Number(info.changes) || 0;
     }
     return { insertedCount };
   });
@@ -3438,7 +3585,7 @@ export function getLatestProjectionForFight({
       .prepare(
         `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
                 confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
-                changed_from_prev, change_summary, created_at
+                changed_from_prev, change_summary, snapshot_hash, created_at
          FROM fight_projection_snapshots
          WHERE event_id = ? AND fight_id = ?
          ORDER BY created_at DESC, id DESC
@@ -3456,7 +3603,7 @@ export function getLatestProjectionForFight({
     .prepare(
       `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
               confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
-              changed_from_prev, change_summary, created_at
+              changed_from_prev, change_summary, snapshot_hash, created_at
        FROM fight_projection_snapshots
        WHERE event_id = ?
          AND (
@@ -3484,7 +3631,7 @@ export function listLatestProjectionSnapshotsForEvent({
     .prepare(
       `SELECT id, event_id, fight_id, fighter_a, fighter_b, predicted_winner, predicted_method,
               confidence_pct, key_factors_json, relevant_news_ids_json, reasoning_version,
-              changed_from_prev, change_summary, created_at
+              changed_from_prev, change_summary, snapshot_hash, created_at
        FROM fight_projection_snapshots
        WHERE event_id = ?
        ORDER BY created_at DESC, id DESC
@@ -3516,12 +3663,12 @@ export function insertFightBetScoringSnapshots(items = []) {
   const db = getDb();
   const ts = nowIso();
   const insert = db.prepare(
-    `INSERT INTO fight_bet_scoring_snapshots
+    `INSERT OR IGNORE INTO fight_bet_scoring_snapshots
       (event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
        edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
        no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
-       inputs_json, reasoning_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       inputs_json, reasoning_version, snapshot_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const run = db.transaction((inputRows) => {
@@ -3534,7 +3681,7 @@ export function insertFightBetScoringSnapshots(items = []) {
       const marketKey = String(row?.marketKey || '').trim();
       if (!eventId || !fightId || !fighterA || !fighterB || !marketKey) continue;
 
-      insert.run(
+      const info = insert.run(
         eventId,
         fightId,
         fighterA,
@@ -3568,9 +3715,10 @@ export function insertFightBetScoringSnapshots(items = []) {
           row.inputs && typeof row.inputs === 'object' ? row.inputs : {}
         ),
         row.reasoningVersion || 'v1_market_pack',
+        buildBetScoringSnapshotHash(row),
         row.createdAt || ts
       );
-      insertedCount += 1;
+      insertedCount += Number(info.changes) || 0;
     }
     return { insertedCount };
   });
@@ -3596,7 +3744,7 @@ export function getLatestBetScoringForFight({
         `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
                 edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
                 no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
-                inputs_json, reasoning_version, created_at
+                inputs_json, reasoning_version, snapshot_hash, created_at
          FROM fight_bet_scoring_snapshots
          WHERE event_id = ?
            AND fight_id = ?
@@ -3617,7 +3765,7 @@ export function getLatestBetScoringForFight({
       `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
               edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
               no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
-              inputs_json, reasoning_version, created_at
+              inputs_json, reasoning_version, snapshot_hash, created_at
        FROM fight_bet_scoring_snapshots
        WHERE event_id = ?
          AND (? = '' OR market_key = ?)
@@ -3650,7 +3798,7 @@ export function listLatestBetScoringForEvent({
       `SELECT id, event_id, fight_id, fighter_a, fighter_b, market_key, selection, recommendation,
               edge_pct, confidence_pct, risk_level, suggested_stake_units, suggested_stake_amount,
               no_bet_reason, model_probability_pct, implied_probability_pct, consensus_odds, books_count,
-              inputs_json, reasoning_version, created_at
+              inputs_json, reasoning_version, snapshot_hash, created_at
        FROM fight_bet_scoring_snapshots
        WHERE event_id = ?
          AND (? = '' OR market_key = ?)

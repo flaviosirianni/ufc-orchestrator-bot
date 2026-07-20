@@ -24,6 +24,7 @@ const SUITES = [
     modulePath: './eventLedgerFailClosed.test.js',
     exportName: 'runEventLedgerFailClosedTests',
   },
+  { modulePath: './snapshotDedupe.test.js', exportName: 'runSnapshotDedupeTests' },
   { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
   { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },
   { modulePath: './telegramRuntime.test.js', exportName: 'runTelegramRuntimeTests' },

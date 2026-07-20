@@ -2,7 +2,7 @@
 
 Actualizado: 2026-07-20
 
-Estado general: Etapa 0 cerrada; UFC-STAB-100/101 verificando y UFC-STAB-102 en progreso
+Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102 verificando y UFC-STAB-103 en progreso
 
 Branch: `stabilize/ufc-runtime-integrity`
 
@@ -27,6 +27,7 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 - El arranque UFC tardó aproximadamente 218 segundos hasta abrir `/health`; queda como señal de performance/runtime a investigar. Desde el boot verificado hubo cero 409, pero se volvió a publicar UFC 329 y se escribieron 5 proyecciones/15 scoring desde stats vencidas. La Etapa 1 debe contener esto antes de cualquier reconstrucción.
 - UFC-STAB-100 local completo: `EventTruthGate` puro, migración aditiva, lectura legacy `invalid/verification_missing`, decisiones append-only y discovery web auditado como no consumible. Tests de UFC 329, `Preview`, stale-live, store legacy y suite completa verdes. No se desplegó todavía este cambio.
 - UFC-STAB-101 local completo: revalidación al consumir, freshness stats por mtime con máximo 36 h, bloqueos de news/proyección/scoring/mirrors/settlement y vista segura para Telegram. Tests positivos y negativos verdes; una DB real conservó apuesta pending y conteo de mutaciones exacto.
+- UFC-STAB-102 local completo: hashes SHA-256 canónicos excluyen sólo el timestamp de observación, índices únicos parciales deduplican proyecciones/scoring nuevos y las filas legacy permanecen intactas con hash nulo. RED produjo 96 snapshots idénticos por tabla en 24 h; GREEN conserva uno y agrega otro únicamente ante un cambio material. Lecturas exponen `snapshotHash` y la suite completa pasa.
 
 ## Estado de datos protegido
 
@@ -37,8 +38,8 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 
 ## Próximo paso exacto
 
-1. Continuar UFC-STAB-102 con test RED de snapshots idénticos repetidos y cambio material.
-2. Agregar hash persistido e índices únicos compatibles con filas legacy; simular 24 h antes de marcar verificando.
+1. Continuar UFC-STAB-103 relevando `createHealthServer` y el `statusProvider` UFC actual.
+2. Crear un test RED del contrato `/health` con bloques aditivos `process`, `event_intel`, `ufc_stats`, `odds_api`, `billing` y `maintenance`, comprobando que no ejecuta I/O mutante ni expone secretos.
 
 ## Rollback actual
 
