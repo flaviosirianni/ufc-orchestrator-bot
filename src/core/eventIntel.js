@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import '../core/env.js';
-import { evaluateEventTruth } from './eventTruthGate.js';
+import { evaluateEventConsumption, evaluateEventTruth } from './eventTruthGate.js';
 
 const EVENT_INTEL_DISCOVERY_INTERVAL_MS = Number(
   process.env.EVENT_INTEL_DISCOVERY_INTERVAL_MS ?? String(6 * 60 * 60 * 1000)
@@ -279,11 +279,18 @@ export async function discoverNextEvent({
   };
 }
 
-async function scanFighterNews({
+/**
+ * Escanea noticias sólo cuando el evento mantiene verificación consumible vigente.
+ *
+ * @returns {Promise<object>} Resultado de inserción o bloqueo con razones.
+ * @sideEffects Consulta RSS y puede insertar noticias mediante dependencias inyectadas.
+ */
+export async function scanFighterNews({
   getEventWatchState,
   fetchGoogleNewsRss,
   insertFighterNewsItems,
   fetchImpl,
+  now = new Date(),
 } = {}) {
   if (
     typeof getEventWatchState !== 'function' ||
@@ -296,6 +303,15 @@ async function scanFighterNews({
   const event = getEventWatchState('next_event');
   if (!event?.eventId || !Array.isArray(event.monitoredFighters) || !event.monitoredFighters.length) {
     return { ok: false, error: 'no_event_to_scan' };
+  }
+  const consumption = evaluateEventConsumption({ eventState: event, now });
+  if (!consumption.allowed) {
+    return {
+      ok: false,
+      blocked: true,
+      error: 'event_not_verified',
+      reasons: consumption.reasons,
+    };
   }
 
   const eventName = String(event.eventName || '').trim();
@@ -427,5 +443,6 @@ export function startEventIntelMonitor({
 
 export default {
   discoverNextEvent,
+  scanFighterNews,
   startEventIntelMonitor,
 };

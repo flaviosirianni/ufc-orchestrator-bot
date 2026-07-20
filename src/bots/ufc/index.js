@@ -76,6 +76,7 @@ import { startUfcDbReliabilityLoop } from './ufcReliability.js';
 import { createBillingApiClient } from '../../platform/billing/billingApiClient.js';
 import { createBillingUserStoreBridge } from '../../platform/billing/billingBridge.js';
 import { createHealthServer } from '../../platform/runtime/healthServer.js';
+import { evaluateEventConsumption } from '../../core/eventTruthGate.js';
 import {
   createDisabledTelegramRuntime,
   resolveManifestTelegramToken,
@@ -132,6 +133,55 @@ function formatCreditsValue(value = 0) {
   return (Number(value) || 0).toFixed(2);
 }
 
+/**
+ * Crea una vista read-only que oculta eventos y mirrors no verificados a Telegram.
+ *
+ * @returns {{getEventWatchState:Function,getEventFightMirror:Function,getEventFighterMirror:Function}} Lectores fail-closed.
+ * @sideEffects Lee estado, stats y mirrors mediante dependencias inyectadas.
+ */
+export function createVerifiedEventStoreView({
+  getEventWatchState: readEventState,
+  getEventFightMirror: readFightMirror,
+  getEventFighterMirror: readFighterMirror,
+  getStatsFreshness,
+  nowProvider = () => new Date(),
+} = {}) {
+  const getEventWatchState = (watchKey = 'next_event') => {
+    if (typeof readEventState !== 'function') return null;
+    const eventState = readEventState(watchKey);
+    const decision = evaluateEventConsumption({
+      eventState,
+      now: nowProvider(),
+    });
+    return decision.allowed ? eventState : null;
+  };
+
+  const canReadStatsMirror = (watchKey) => {
+    if (typeof readEventState !== 'function') return false;
+    const eventState = readEventState(watchKey);
+    const statsFreshness =
+      typeof getStatsFreshness === 'function' ? getStatsFreshness() : null;
+    return evaluateEventConsumption({
+      eventState,
+      statsFreshness,
+      requireStats: true,
+      now: nowProvider(),
+    }).allowed;
+  };
+
+  return {
+    getEventWatchState,
+    getEventFightMirror(watchKey = 'next_event') {
+      if (!canReadStatsMirror(watchKey) || typeof readFightMirror !== 'function') return [];
+      return readFightMirror(watchKey) || [];
+    },
+    getEventFighterMirror(watchKey = 'next_event') {
+      if (!canReadStatsMirror(watchKey) || typeof readFighterMirror !== 'function') return [];
+      return readFighterMirror(watchKey) || [];
+    },
+  };
+}
+
 export async function bootstrapBot({ manifest } = {}) {
   const conversationStore = createConversationStore();
   const sessionLogger = createSessionLogger();
@@ -165,6 +215,12 @@ export async function bootstrapBot({ manifest } = {}) {
   });
 
   ufcStats.initUfcStatsTool({ dbPath: process.env.UFC_STATS_DB_PATH });
+  const verifiedEventStoreView = createVerifiedEventStoreView({
+    getEventWatchState,
+    getEventFightMirror,
+    getEventFighterMirror,
+    getStatsFreshness: ufcStats.getFreshnessMeta,
+  });
 
   if (process.env.UFC_ENABLE_LEGACY_SHEETS === 'true') {
     fightsScalper.configureFightHistoryStore({
@@ -244,13 +300,13 @@ export async function bootstrapBot({ manifest } = {}) {
         }
         return getUsageCounters(params);
       },
-      getEventWatchState,
+      getEventWatchState: verifiedEventStoreView.getEventWatchState,
       upsertEventWatchState,
       listLatestRelevantNews,
       getUserIntelPrefs,
       updateUserIntelPrefs,
-      getEventFightMirror,
-      getEventFighterMirror,
+      getEventFightMirror: verifiedEventStoreView.getEventFightMirror,
+      getEventFighterMirror: verifiedEventStoreView.getEventFighterMirror,
       listLatestOddsMarketsForFight,
       listLatestOddsMarketsForEvent,
       listUpcomingOddsEvents,
@@ -347,6 +403,8 @@ export async function bootstrapBot({ manifest } = {}) {
 
   startAutoSettlementMonitor({
     intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+    getEventWatchState,
+    getStatsFreshness: ufcStats.getFreshnessMeta,
     getFightHistoryRows: ufcStats.getFightHistoryRows,
     getFightHistoryCacheSnapshot,
     listPendingBetsForAutoSettlement,
@@ -376,6 +434,7 @@ export async function bootstrapBot({ manifest } = {}) {
 
   startPreFightAnalysisMonitor({
     getEventWatchState,
+    getStatsFreshness: ufcStats.getFreshnessMeta,
     listLatestRelevantNews,
     listLatestOddsMarketsForFight,
     getLatestProjectionForFight,

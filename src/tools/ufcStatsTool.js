@@ -9,12 +9,15 @@
  */
 
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
 const TAG = '[ufcStatsTool]';
 
 let db = null;
+let loadedDbPath = null;
+let loadedDbMtimeIso = null;
 
 // ---------------------------------------------------------------------------
 // Init
@@ -28,9 +31,14 @@ export function initUfcStatsTool({ dbPath } = {}) {
 
   try {
     db = new Database(resolved, { readonly: true, fileMustExist: true });
+    const stat = fs.statSync(resolved);
+    loadedDbPath = path.resolve(resolved);
+    loadedDbMtimeIso = stat.mtime.toISOString();
     console.log(`${TAG} Loaded ufc_stats.db from ${resolved}`);
   } catch (err) {
     db = null;
+    loadedDbPath = null;
+    loadedDbMtimeIso = null;
     console.warn(`${TAG} ufc_stats.db not found at ${resolved} — tool disabled. (${err.message})`);
   }
 }
@@ -46,6 +54,13 @@ export function isAvailable() {
  */
 export function getFreshnessMeta() {
   if (!db) return null;
+  const maxAgeHoursRaw = Number(process.env.UFC_STATS_MAX_AGE_HOURS ?? '36');
+  const maxAgeHours =
+    Number.isFinite(maxAgeHoursRaw) && maxAgeHoursRaw > 0 ? maxAgeHoursRaw : 36;
+  const generatedAtMs = Date.parse(String(loadedDbMtimeIso || ''));
+  const ageHours = Number.isFinite(generatedAtMs)
+    ? Math.max(0, (Date.now() - generatedAtMs) / 3_600_000)
+    : null;
   try {
     const meta = db
       .prepare(
@@ -60,10 +75,26 @@ export function getFreshnessMeta() {
       latestFightDate: meta?.latest_fight_date || null,
       fightCount: Number(meta?.fight_count) || 0,
       upcomingCount: Number(upcomingRow?.cnt) || 0,
-      dbPath: db.name || null,
+      dbPath: loadedDbPath || db.name || null,
+      generatedAt: loadedDbMtimeIso,
+      freshnessSource: 'file_mtime',
+      ageHours: ageHours === null ? null : Number(ageHours.toFixed(3)),
+      maxAgeHours,
+      isFresh: ageHours !== null && ageHours <= maxAgeHours,
     };
   } catch {
-    return { isAvailable: true, latestFightDate: null, fightCount: 0, upcomingCount: 0, dbPath: null };
+    return {
+      isAvailable: true,
+      latestFightDate: null,
+      fightCount: 0,
+      upcomingCount: 0,
+      dbPath: loadedDbPath,
+      generatedAt: loadedDbMtimeIso,
+      freshnessSource: 'file_mtime',
+      ageHours: ageHours === null ? null : Number(ageHours.toFixed(3)),
+      maxAgeHours,
+      isFresh: ageHours !== null && ageHours <= maxAgeHours,
+    };
   }
 }
 

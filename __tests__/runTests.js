@@ -16,6 +16,14 @@ const SUITES = [
   { modulePath: './eventTruthGate.test.js', exportName: 'runEventTruthGateTests' },
   { modulePath: './eventTruthStore.test.js', exportName: 'runEventTruthStoreTests' },
   { modulePath: './eventIntel.test.js', exportName: 'runEventIntelTests' },
+  {
+    modulePath: './eventConsumersFailClosed.test.js',
+    exportName: 'runEventConsumersFailClosedTests',
+  },
+  {
+    modulePath: './eventLedgerFailClosed.test.js',
+    exportName: 'runEventLedgerFailClosedTests',
+  },
   { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
   { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },
   { modulePath: './telegramRuntime.test.js', exportName: 'runTelegramRuntimeTests' },

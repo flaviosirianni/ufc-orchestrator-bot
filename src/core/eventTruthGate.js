@@ -298,9 +298,115 @@ export function evaluateEventTruth({
   };
 }
 
+/**
+ * Revalida permisos de consumo en el instante de uso, incluyendo expiración y stats.
+ *
+ * @returns {{allowed:boolean,reasons:string[],eventAllowed:boolean,statsAllowed:boolean,ledgerMutationAllowed:boolean,evaluatedAt:string,statsAgeHours:number|null}} Decisión fail-closed de consumo.
+ * @sideEffects Lee `UFC_STATS_MAX_AGE_HOURS` cuando no se pasa override.
+ */
+export function evaluateEventConsumption({
+  eventState = null,
+  statsFreshness = null,
+  requireStats = false,
+  requireLedgerMutation = false,
+  now = new Date(),
+  statsMaxAgeHours,
+} = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : parseTimestamp(now);
+  if (!Number.isFinite(nowMs)) {
+    throw new Error('event_consumption_invalid_evaluation_time');
+  }
+  const reasons = [];
+  const confidence = String(eventState?.confidence || 'invalid').trim().toLowerCase();
+  if (!eventState?.eventId) {
+    reasons.push('event_state_missing');
+  }
+  if (confidence !== EVENT_CONFIDENCE.VERIFIED) {
+    reasons.push(`event_confidence_${confidence || EVENT_CONFIDENCE.INVALID}`);
+  }
+  if (eventState?.consumerAllowed !== true) {
+    reasons.push('event_consumer_not_allowed');
+  }
+
+  const expiresAtMs = parseTimestamp(eventState?.verificationExpiresAt);
+  if (expiresAtMs === null) {
+    reasons.push('event_verification_expiry_missing');
+  } else if (nowMs > expiresAtMs) {
+    reasons.push('event_verification_stale');
+  }
+
+  const eventReasonCount = reasons.length;
+  let statsAgeHours = null;
+  if (requireStats) {
+    if (!statsFreshness || statsFreshness.isAvailable !== true) {
+      reasons.push('stats_unavailable');
+    } else {
+      if (
+        statsFreshness.integrityOk === false ||
+        statsFreshness.quickCheckOk === false
+      ) {
+        reasons.push('stats_integrity_failed');
+      }
+      const generatedAtMs = parseTimestamp(
+        statsFreshness.generatedAt ||
+          statsFreshness.fileMtimeIso ||
+          statsFreshness.mtimeIso ||
+          statsFreshness.dbGeneratedAt
+      );
+      if (generatedAtMs === null) {
+        reasons.push('stats_generated_at_missing');
+      } else if (generatedAtMs > nowMs + 5 * 60 * 1000) {
+        reasons.push('stats_timestamp_future');
+      } else {
+        statsAgeHours = Math.max(0, (nowMs - generatedAtMs) / 3_600_000);
+        const configuredMaxAge = Number(
+          statsMaxAgeHours ?? process.env.UFC_STATS_MAX_AGE_HOURS ?? '36'
+        );
+        const maxAgeHours =
+          Number.isFinite(configuredMaxAge) && configuredMaxAge > 0 ? configuredMaxAge : 36;
+        if (statsAgeHours > maxAgeHours) {
+          reasons.push('stats_stale');
+        }
+      }
+    }
+  }
+
+  if (requireLedgerMutation) {
+    if (String(eventState?.eventStatus || '').toLowerCase() !== EVENT_STATUS.COMPLETED) {
+      reasons.push('event_not_completed');
+    }
+    if (eventState?.ledgerMutationAllowed !== true) {
+      reasons.push('event_ledger_mutation_not_allowed');
+    }
+  }
+
+  const uniqueReasons = Array.from(new Set(reasons));
+  const statsReasons = new Set([
+    'stats_unavailable',
+    'stats_integrity_failed',
+    'stats_generated_at_missing',
+    'stats_timestamp_future',
+    'stats_stale',
+  ]);
+  return {
+    allowed: uniqueReasons.length === 0,
+    reasons: uniqueReasons,
+    eventAllowed: eventReasonCount === 0,
+    statsAllowed: !uniqueReasons.some((reason) => statsReasons.has(reason)),
+    ledgerMutationAllowed:
+      requireLedgerMutation &&
+      uniqueReasons.length === 0 &&
+      eventState?.ledgerMutationAllowed === true,
+    evaluatedAt: new Date(nowMs).toISOString(),
+    statsAgeHours:
+      statsAgeHours === null ? null : Number(statsAgeHours.toFixed(3)),
+  };
+}
+
 export default {
   EVENT_STATUS,
   EVENT_CONFIDENCE,
   EVENT_TRUTH_VERSION,
   evaluateEventTruth,
+  evaluateEventConsumption,
 };

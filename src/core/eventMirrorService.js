@@ -10,6 +10,8 @@
  *   2. Immediate trigger when event_watch_state changes event_id
  */
 
+import { evaluateEventConsumption } from './eventTruthGate.js';
+
 const TAG = '[eventMirrorService]';
 
 function slugify(name = '') {
@@ -24,10 +26,31 @@ function slugify(name = '') {
 /**
  * Build mirror rows for a single watch_key from event_watch_state.
  */
-async function buildMirrorForWatchKey(watchKey, { ufcStats, store }) {
+export async function buildMirrorForWatchKey(
+  watchKey,
+  { ufcStats, store, now = new Date(), statsMaxAgeHours } = {}
+) {
   const eventState = store.getEventWatchState(watchKey);
   if (!eventState?.mainCard?.length) {
     return { builtAt: null, fightCount: 0, fighterCount: 0 };
+  }
+  const statsFreshness =
+    typeof ufcStats?.getFreshnessMeta === 'function' ? ufcStats.getFreshnessMeta() : null;
+  const consumption = evaluateEventConsumption({
+    eventState,
+    statsFreshness,
+    requireStats: true,
+    now,
+    statsMaxAgeHours,
+  });
+  if (!consumption.allowed) {
+    return {
+      builtAt: null,
+      fightCount: 0,
+      fighterCount: 0,
+      blocked: true,
+      reasons: consumption.reasons,
+    };
   }
 
   const { eventId, eventName } = eventState;

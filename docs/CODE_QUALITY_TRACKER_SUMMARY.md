@@ -3,13 +3,13 @@
 Fecha: 2026-07-20
 
 ## Totales por capa
-- domain: 18
+- domain: 24
 - ops: 24
-- test: 24
+- test: 29
 
 ## Totales por modo de test
-- auto_unit: 31
-- auto_integration: 35
+- auto_unit: 36
+- auto_integration: 41
 - e2e: 0
 - runtime_qa: 0
 

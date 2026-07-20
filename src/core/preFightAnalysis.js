@@ -1,5 +1,6 @@
 import '../core/env.js';
 import { buildFightBetScoringPack } from './betScoringEngine.js';
+import { evaluateEventConsumption } from './eventTruthGate.js';
 
 const PRE_FIGHT_ANALYSIS_INTERVAL_MS = Number(
   process.env.PRE_FIGHT_ANALYSIS_INTERVAL_MS ?? String(3 * 60 * 60 * 1000)
@@ -274,8 +275,127 @@ function computeProjection({
   };
 }
 
+/**
+ * Ejecuta un ciclo de proyección/scoring sólo con evento y stats consumibles.
+ *
+ * @returns {Promise<object>} Conteos insertados o bloqueo fail-closed con razones.
+ * @sideEffects Lee news/odds y puede insertar snapshots mediante dependencias inyectadas.
+ */
+export async function runPreFightAnalysisCycle({
+  getEventWatchState,
+  getStatsFreshness,
+  listLatestRelevantNews,
+  listLatestOddsMarketsForFight,
+  getLatestProjectionForFight,
+  insertFightProjectionSnapshots,
+  insertFightBetScoringSnapshots,
+  now = new Date(),
+  statsMaxAgeHours,
+} = {}) {
+  if (
+    typeof getEventWatchState !== 'function' ||
+    typeof listLatestRelevantNews !== 'function' ||
+    typeof listLatestOddsMarketsForFight !== 'function' ||
+    typeof getLatestProjectionForFight !== 'function' ||
+    typeof insertFightProjectionSnapshots !== 'function'
+  ) {
+    return { ok: false, error: 'missing_dependencies' };
+  }
+
+  const eventState = getEventWatchState('next_event');
+  if (!eventState?.eventId || !Array.isArray(eventState?.mainCard)) {
+    return { ok: false, error: 'event_state_missing' };
+  }
+  const statsFreshness =
+    typeof getStatsFreshness === 'function' ? getStatsFreshness() : null;
+  const consumption = evaluateEventConsumption({
+    eventState,
+    statsFreshness,
+    requireStats: true,
+    now,
+    statsMaxAgeHours,
+  });
+  if (!consumption.allowed) {
+    return {
+      ok: false,
+      blocked: true,
+      error: 'event_or_stats_not_verified',
+      reasons: consumption.reasons,
+    };
+  }
+
+  const fights = eventState.mainCard
+    .map((fight, idx) => ({
+      fightId: fight?.fightId || `fight_${idx + 1}`,
+      fighterA: fight?.fighterA,
+      fighterB: fight?.fighterB,
+    }))
+    .filter((fight) => fight.fightId && fight.fighterA && fight.fighterB);
+  if (!fights.length) return { ok: false, error: 'event_card_empty' };
+
+  const newsRows = listLatestRelevantNews({
+    eventId: eventState.eventId,
+    limit: 180,
+    minImpact: 'low',
+  });
+
+  const snapshots = [];
+  const betScoringSnapshots = [];
+  for (const fight of fights) {
+    const oddsRows = listLatestOddsMarketsForFight({
+      fighterA: fight.fighterA,
+      fighterB: fight.fighterB,
+      marketKey: 'h2h',
+      limit: 60,
+      maxAgeHours: 96,
+    });
+    const previous = getLatestProjectionForFight({
+      eventId: eventState.eventId,
+      fightId: fight.fightId,
+    });
+    const snapshot = computeProjection({
+      eventId: eventState.eventId,
+      fight,
+      oddsRows,
+      newsRows,
+      previous,
+    });
+    if (!snapshot) continue;
+    snapshots.push(snapshot);
+
+    const marketPack = buildFightBetScoringPack({
+      eventId: eventState.eventId,
+      fight,
+      projection: snapshot,
+      oddsRows,
+    });
+    if (Array.isArray(marketPack) && marketPack.length) {
+      betScoringSnapshots.push(...marketPack);
+    }
+  }
+
+  if (!snapshots.length) return { ok: true, insertedCount: 0, scoringInsertedCount: 0 };
+  const inserted = insertFightProjectionSnapshots(snapshots);
+  const insertedCount = Number(inserted?.insertedCount) || 0;
+  let scoringInsertedCount = 0;
+  if (
+    typeof insertFightBetScoringSnapshots === 'function' &&
+    betScoringSnapshots.length
+  ) {
+    const insertedScoring = insertFightBetScoringSnapshots(betScoringSnapshots);
+    scoringInsertedCount = Number(insertedScoring?.insertedCount) || 0;
+  }
+  return {
+    ok: true,
+    eventName: eventState.eventName,
+    insertedCount,
+    scoringInsertedCount,
+  };
+}
+
 export function startPreFightAnalysisMonitor({
   getEventWatchState,
+  getStatsFreshness,
   listLatestRelevantNews,
   listLatestOddsMarketsForFight,
   getLatestProjectionForFight,
@@ -284,6 +404,7 @@ export function startPreFightAnalysisMonitor({
 } = {}) {
   if (
     typeof getEventWatchState !== 'function' ||
+    typeof getStatsFreshness !== 'function' ||
     typeof listLatestRelevantNews !== 'function' ||
     typeof listLatestOddsMarketsForFight !== 'function' ||
     typeof getLatestProjectionForFight !== 'function' ||
@@ -298,72 +419,23 @@ export function startPreFightAnalysisMonitor({
     if (inFlight) return;
     inFlight = true;
     try {
-      const eventState = getEventWatchState('next_event');
-      if (!eventState?.eventId || !Array.isArray(eventState?.mainCard)) return;
-
-      const fights = eventState.mainCard
-        .map((fight, idx) => ({
-          fightId: fight?.fightId || `fight_${idx + 1}`,
-          fighterA: fight?.fighterA,
-          fighterB: fight?.fighterB,
-        }))
-        .filter((fight) => fight.fightId && fight.fighterA && fight.fighterB);
-      if (!fights.length) return;
-
-      const newsRows = listLatestRelevantNews({
-        eventId: eventState.eventId,
-        limit: 180,
-        minImpact: 'low',
+      const result = await runPreFightAnalysisCycle({
+        getEventWatchState,
+        getStatsFreshness,
+        listLatestRelevantNews,
+        listLatestOddsMarketsForFight,
+        getLatestProjectionForFight,
+        insertFightProjectionSnapshots,
+        insertFightBetScoringSnapshots,
       });
-
-      const snapshots = [];
-      const betScoringSnapshots = [];
-      for (const fight of fights) {
-        const oddsRows = listLatestOddsMarketsForFight({
-          fighterA: fight.fighterA,
-          fighterB: fight.fighterB,
-          marketKey: 'h2h',
-          limit: 60,
-          maxAgeHours: 96,
-        });
-        const previous = getLatestProjectionForFight({
-          eventId: eventState.eventId,
-          fightId: fight.fightId,
-        });
-        const snapshot = computeProjection({
-          eventId: eventState.eventId,
-          fight,
-          oddsRows,
-          newsRows,
-          previous,
-        });
-        if (!snapshot) continue;
-        snapshots.push(snapshot);
-
-        const marketPack = buildFightBetScoringPack({
-          eventId: eventState.eventId,
-          fight,
-          projection: snapshot,
-          oddsRows,
-        });
-        if (Array.isArray(marketPack) && marketPack.length) {
-          betScoringSnapshots.push(...marketPack);
-        }
-      }
-
-      if (!snapshots.length) return;
-      const inserted = insertFightProjectionSnapshots(snapshots);
-      console.log(
-        `[preFightAnalysis] Stored ${inserted?.insertedCount || 0} projection snapshot(s) for ${eventState.eventName}.`
-      );
-
-      if (
-        typeof insertFightBetScoringSnapshots === 'function' &&
-        betScoringSnapshots.length
-      ) {
-        const insertedScoring = insertFightBetScoringSnapshots(betScoringSnapshots);
+      if (result?.ok && result.insertedCount > 0) {
         console.log(
-          `[preFightAnalysis] Stored ${insertedScoring?.insertedCount || 0} bet scoring snapshot(s) for ${eventState.eventName}.`
+          `[preFightAnalysis] Stored ${result.insertedCount} projection snapshot(s) for ${result.eventName}.`
+        );
+      }
+      if (result?.ok && result.scoringInsertedCount > 0) {
+        console.log(
+          `[preFightAnalysis] Stored ${result.scoringInsertedCount} bet scoring snapshot(s) for ${result.eventName}.`
         );
       }
     } catch (error) {
@@ -391,5 +463,6 @@ export function startPreFightAnalysisMonitor({
 }
 
 export default {
+  runPreFightAnalysisCycle,
   startPreFightAnalysisMonitor,
 };

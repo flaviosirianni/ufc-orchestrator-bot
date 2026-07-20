@@ -1,3 +1,5 @@
+import { evaluateEventConsumption } from './eventTruthGate.js';
+
 function normalizeText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -220,8 +222,117 @@ function buildNotificationText({ bet, settlement }) {
   return lines.join('\n');
 }
 
+/**
+ * Ejecuta un ciclo de auto-settlement sólo con evento completado y stats verificadas.
+ *
+ * @returns {Promise<object>} Cantidad cerrada o bloqueo fail-closed con razones.
+ * @sideEffects Puede aplicar mutaciones de ledger y enviar notificaciones mediante dependencias.
+ */
+export async function runAutoSettlementCycle({
+  getEventWatchState,
+  getStatsFreshness,
+  getFightHistoryRows,
+  getFightHistoryCacheSnapshot,
+  listPendingBetsForAutoSettlement,
+  applyBetMutation,
+  getLatestChatIdForUser,
+  notify,
+  now = new Date(),
+  statsMaxAgeHours,
+} = {}) {
+  if (
+    typeof getEventWatchState !== 'function' ||
+    typeof listPendingBetsForAutoSettlement !== 'function' ||
+    typeof applyBetMutation !== 'function'
+  ) {
+    return { ok: false, error: 'missing_dependencies' };
+  }
+  if (
+    typeof getFightHistoryRows !== 'function' &&
+    typeof getFightHistoryCacheSnapshot !== 'function'
+  ) {
+    return { ok: false, error: 'missing_history_source' };
+  }
+
+  const eventState = getEventWatchState('current_event');
+  const statsFreshness =
+    typeof getStatsFreshness === 'function' ? getStatsFreshness() : null;
+  const consumption = evaluateEventConsumption({
+    eventState,
+    statsFreshness,
+    requireStats: true,
+    requireLedgerMutation: true,
+    now,
+    statsMaxAgeHours,
+  });
+  if (!consumption.allowed) {
+    return {
+      ok: false,
+      blocked: true,
+      error: 'settlement_sources_not_verified',
+      reasons: consumption.reasons,
+    };
+  }
+
+  let rows = [];
+  if (typeof getFightHistoryRows === 'function') {
+    rows = getFightHistoryRows() || [];
+  } else {
+    const cache = getFightHistoryCacheSnapshot('default');
+    rows = Array.isArray(cache?.rows) ? cache.rows : [];
+  }
+  if (!rows.length) {
+    return { ok: true, settledCount: 0, reason: 'history_empty' };
+  }
+
+  const pendingBets = listPendingBetsForAutoSettlement({ limit: 300 });
+  if (!pendingBets.length) {
+    return { ok: true, settledCount: 0, reason: 'no_pending_bets' };
+  }
+
+  let settledCount = 0;
+  for (const bet of pendingBets) {
+    if (!bet?.telegramUserId || !bet?.id) continue;
+    const settlement = resolveAutoSettlementCandidate(bet, rows);
+    if (!settlement || settlement.confidence !== 'high') continue;
+
+    const applied = applyBetMutation(bet.telegramUserId, {
+      operation: 'settle',
+      result: settlement.result,
+      betIds: [bet.id],
+      confirm: true,
+      metadata: {
+        source: 'auto_verified',
+        matchedRow: settlement.matchedRow,
+        classification: settlement.classification,
+      },
+    });
+    if (!applied?.ok || !Number(applied.affectedCount)) continue;
+
+    settledCount += 1;
+    if (typeof notify === 'function') {
+      const chatId =
+        typeof getLatestChatIdForUser === 'function'
+          ? getLatestChatIdForUser(bet.telegramUserId)
+          : null;
+      if (chatId) {
+        const text = buildNotificationText({ bet, settlement });
+        try {
+          await notify({ chatId, text, bet, settlement });
+        } catch (notifyError) {
+          console.error('⚠️ Auto-settlement notification failed:', notifyError);
+        }
+      }
+    }
+  }
+
+  return { ok: true, settledCount };
+}
+
 export function startAutoSettlementMonitor({
   intervalMs = Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
+  getEventWatchState,
+  getStatsFreshness,
   getFightHistoryRows,
   getFightHistoryCacheSnapshot,
   listPendingBetsForAutoSettlement,
@@ -230,6 +341,8 @@ export function startAutoSettlementMonitor({
   notify,
 } = {}) {
   if (
+    typeof getEventWatchState !== 'function' ||
+    typeof getStatsFreshness !== 'function' ||
     typeof listPendingBetsForAutoSettlement !== 'function' ||
     typeof applyBetMutation !== 'function'
   ) {
@@ -248,65 +361,18 @@ export function startAutoSettlementMonitor({
     if (inFlight) return;
     inFlight = true;
     try {
-      let rows = [];
-      if (typeof getFightHistoryRows === 'function') {
-        rows = getFightHistoryRows() || [];
-      } else {
-        const cache = getFightHistoryCacheSnapshot('default');
-        rows = Array.isArray(cache?.rows) ? cache.rows : [];
-      }
-      if (!rows.length) {
-        return;
-      }
-
-      const pendingBets = listPendingBetsForAutoSettlement({ limit: 300 });
-      if (!pendingBets.length) {
-        return;
-      }
-
-      let settledCount = 0;
-      for (const bet of pendingBets) {
-        if (!bet?.telegramUserId || !bet?.id) continue;
-        const settlement = resolveAutoSettlementCandidate(bet, rows);
-        if (!settlement || settlement.confidence !== 'high') {
-          continue;
-        }
-
-        const applied = applyBetMutation(bet.telegramUserId, {
-          operation: 'settle',
-          result: settlement.result,
-          betIds: [bet.id],
-          confirm: true,
-          metadata: {
-            source: 'auto_verified',
-            matchedRow: settlement.matchedRow,
-            classification: settlement.classification,
-          },
-        });
-
-        if (!applied?.ok || !Number(applied.affectedCount)) {
-          continue;
-        }
-
-        settledCount += 1;
-        if (typeof notify === 'function') {
-          const chatId =
-            typeof getLatestChatIdForUser === 'function'
-              ? getLatestChatIdForUser(bet.telegramUserId)
-              : null;
-          if (chatId) {
-            const text = buildNotificationText({ bet, settlement });
-            try {
-              await notify({ chatId, text, bet, settlement });
-            } catch (notifyError) {
-              console.error('⚠️ Auto-settlement notification failed:', notifyError);
-            }
-          }
-        }
-      }
-
-      if (settledCount > 0) {
-        console.log(`[autoSettlement] Settled ${settledCount} pending bet(s).`);
+      const result = await runAutoSettlementCycle({
+        getEventWatchState,
+        getStatsFreshness,
+        getFightHistoryRows,
+        getFightHistoryCacheSnapshot,
+        listPendingBetsForAutoSettlement,
+        applyBetMutation,
+        getLatestChatIdForUser,
+        notify,
+      });
+      if (result?.ok && result.settledCount > 0) {
+        console.log(`[autoSettlement] Settled ${result.settledCount} pending bet(s).`);
       }
     } catch (error) {
       console.error('❌ Auto-settlement monitor error:', error);
@@ -333,6 +399,7 @@ export function startAutoSettlementMonitor({
 }
 
 export default {
+  runAutoSettlementCycle,
   startAutoSettlementMonitor,
   resolveAutoSettlementCandidate,
 };
