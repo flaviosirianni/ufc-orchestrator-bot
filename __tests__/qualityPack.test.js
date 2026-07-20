@@ -52,6 +52,13 @@ function run(command, args, options = {}) {
  * @sideEffects Crea repositorios y worktrees efímeros bajo el directorio temporal del sistema.
  */
 export async function runQualityPackTests() {
+  const repositoryRoot = path.resolve('.');
+  const repositoryHeadBefore = run('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot });
+  assert.equal(
+    run('git', ['rev-parse', '--is-bare-repository'], { cwd: repositoryRoot }),
+    'false',
+    'el quality pack debe ejecutarse únicamente sobre un working tree no-bare'
+  );
   const packageJson = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));
   assert.equal(
     packageJson.scripts?.['quality:gate'],
@@ -139,6 +146,17 @@ export async function runQualityPackTests() {
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
+
+  assert.equal(
+    run('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot }),
+    repositoryHeadBefore,
+    'el fixture no puede mover HEAD del repositorio real'
+  );
+  assert.equal(
+    run('git', ['rev-parse', '--is-bare-repository'], { cwd: repositoryRoot }),
+    'false',
+    'el fixture no puede convertir el repositorio real en bare'
+  );
 
   console.log('All quality pack tests passed.');
 }
