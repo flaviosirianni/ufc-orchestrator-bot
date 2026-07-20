@@ -31,6 +31,7 @@
 - [x] Agregar gate UFC prod-like con tests.
 - [x] Reproducir el error de refresh en RED y endurecer el runner/cleanup hasta GREEN limpio.
 - [x] Capturar snapshot operativo anonimizado antes de runtime.
+- [x] Fusionar, desplegar y verificar Etapa 0 con health, proceso único y digest protegido pre/post.
 
 ## Task 1 — Contención
 

@@ -1,6 +1,6 @@
 # UFC Betting Bot Stabilization Backlog
 
-Actualizado: 2026-07-18
+Actualizado: 2026-07-20
 
 Branch de trabajo: `stabilize/ufc-runtime-integrity`
 
@@ -19,8 +19,8 @@ Objetivo: recuperar veracidad deportiva, consistencia de billing, estabilidad op
 
 | Etapa | Estado | Resultado requerido |
 | --- | --- | --- |
-| 0. Control y baseline | IN_PROGRESS | Backlog retomable, workspace aislado, calidad y paridad ejecutables |
-| 1. Contención | BLOCKED | Ningún dato deportivo dudoso produce output o mutaciones |
+| 0. Control y baseline | DONE | Backlog retomable, workspace aislado, calidad y paridad ejecutables |
+| 1. Contención | IN_PROGRESS | Ningún dato deportivo dudoso produce output o mutaciones |
 | 2. Fuentes deportivas | BLOCKED | Stats frescas y current/next reconciliados por fuentes corroboradas |
 | 3. Billing | BLOCKED | Wallet global como única fuente productiva, sin dobles movimientos |
 | 4. Runtime | BLOCKED | Un poller por token y restart budget persistente |
@@ -36,13 +36,13 @@ Objetivo: recuperar veracidad deportiva, consistencia de billing, estabilidad op
 | UFC-STAB-002 | alta | DONE | UFC-STAB-001 | Aplicar quality pack, documentar símbolos nuevos y asociar tests/evidencia runtime. | `check-quality-pack.sh` sin bloqueos. | `qualityPack.test.js`, `npm run quality:gate` y fixture Git/worktree en verde; el fixture sanitiza variables Git heredadas por hooks, se autolimpia y configura `core.hooksPath=.githooks`. |
 | UFC-STAB-003 | crítica | DONE | UFC-STAB-002 | Crear perfil de paridad UFC, safety local, required keys y scripts `qa:parity:ufc`/`prepush:ufc`. | El gate detecta token/path productivo local y valida code/env/test parity. | RED bloqueó `UFC_STATS_DB_PATH` productivo y perfiles ausentes. GREEN: `qa:parity:ufc` pasó code/env/test parity y DB verify read-only; perfil local sintético ignorado por Git. |
 | UFC-STAB-004 | crítica | DONE | UFC-STAB-001 | Versionar formato de snapshot operativo anonimizado: ledger digests, tablas, paths, systemd, health y logs. | Dos snapshots pueden compararse sin exponer tokens, chat IDs ni PII. | [Baseline productivo](evidence/2026-07-20-production-baseline.json): `quick_check=ok`, 36 tablas, protected digests completos, health 200 y systemd active. Detectó stats del 1/4, 249.903 scoring, 83.301 proyecciones y 915 conflictos 409 en las últimas 1.000 líneas. Temp OCI eliminado. |
-| UFC-STAB-005 | alta | VERIFYING | UFC-STAB-001 | Endurecer el runner para fallar ante errores de background, unhandled rejections y timers abiertos. | El incidente de `toolsHandlers` falla en RED y queda verde sólo al esperar/cancelar el refresh. | Commit `4818365` publicado. RED confirmó 1 lectura indebida; GREEN sirve SQLite sin I/O oculto. Marcar `DONE` junto con deploy/verificación de Etapa 0. |
+| UFC-STAB-005 | alta | DONE | UFC-STAB-001 | Endurecer el runner para fallar ante errores de background, unhandled rejections y timers abiertos. | El incidente de `toolsHandlers` falla en RED y queda verde sólo al esperar/cancelar el refresh. | Commit `4818365`; fusionado y desplegado en `1323308`. Suite/gates verdes, health 200, un proceso UFC y ledger protegido idéntico antes/después. [Evidencia](evidence/2026-07-20-stage0-deploy-verification.md). |
 
 ## Etapa 1 — Contención inmediata y fail-closed
 
 | ID | Prioridad | Estado | Dependencias | Acción y diseño | Aceptación y pruebas | Evidencia / próximo paso |
 | --- | --- | --- | --- | --- | --- | --- |
-| UFC-STAB-100 | crítica | BLOCKED | Etapa 0 | Introducir `EventTruthGate`; separar estado deportivo de confianza y persistir evidencia/reasons. | Eventos `invalid/stale/degraded` no son consumibles; tests UFC 329 y fragmentos `Preview`. | Desbloquear tras gates de Etapa 0. |
+| UFC-STAB-100 | crítica | IN_PROGRESS | Etapa 0 | Introducir `EventTruthGate`; separar estado deportivo de confianza y persistir evidencia/reasons. | Eventos `invalid/stale/degraded` no son consumibles; tests UFC 329 y fragmentos `Preview`. | Escribir primero tests RED con fixtures UFC 329, `Preview` y stats vencidas; luego integrar el gate sin mutar ledger. |
 | UFC-STAB-101 | crítica | BLOCKED | UFC-STAB-100 | Aplicar gate a proyecciones, scoring, news, mirrors y auto-settlement; exigir stats frescas. | Stats vencidas no escriben snapshots ni cierran apuestas; la apuesta abierta permanece igual. | Capturar digest de ledger antes/después. |
 | UFC-STAB-102 | crítica | BLOCKED | UFC-STAB-100 | Hash determinístico e índices de dedupe para projection/scoring. | Fake clock 24 h inserta sólo snapshot inicial y cambios reales. | Migración con backup y rollback definidos. |
 | UFC-STAB-103 | alta | BLOCKED | UFC-STAB-100 | Ampliar `/health` con evento, stats, Odds, billing y mantenimiento sin secretos. | Campos aditivos, timestamps y reasons verificables; tests del contrato HTTP. | Health no debe disparar I/O mutante. |
