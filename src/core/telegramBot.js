@@ -59,8 +59,6 @@ const GUIDED_MENU_IDS = new Set(['default', 'ufc_default', 'ufc_v1', 'nutrition_
 const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
   process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict'
 );
-const GUIDED_QUOTES_TEXT_FALLBACK =
-  String(process.env.GUIDED_QUOTES_TEXT_FALLBACK ?? 'true').toLowerCase() !== 'false';
 const GUIDED_ACTION_MAX_AGE_MS = toPositiveInt(process.env.GUIDED_ACTION_MAX_AGE_MS, 45 * 60 * 1000);
 const GUIDED_INPUT_ACTIONS = new Set([
   'analyze_quotes',
@@ -907,38 +905,24 @@ export function isGuidedCallbackAllowed(
   return /^qa:topup_pack:\d+$/i.test(value);
 }
 
-export function looksLikeStructuredOddsText(message = '') {
-  const text = normalizeText(message);
-  if (!text) return false;
-
-  if (/@\s*\d+([.,]\d+)?/.test(text)) {
-    return true;
-  }
-
-  const hasMarketKeyword =
-    /\b(cuota|cuotas|odds?|quote|quotes|moneyline|ml|over|under|totales?|props?|linea|lineas)\b/.test(
-      text
-    );
-  const hasNumericSignal =
-    /\b\d+([.,]\d+)?\b/.test(text) || /\b(o|u)\s*\d+([.,]\d+)?\b/.test(text);
-
-  if (hasMarketKeyword && hasNumericSignal) {
-    return true;
-  }
-
-  const hasFightContext = /\b(vs|versus|evento|pelea|fight)\b/.test(text);
-  if (hasFightContext && hasNumericSignal && /\b(stake|u|units?|bookie)\b/.test(text)) {
-    return true;
-  }
-
-  return false;
+// Task 2 (guided-menu-unification): pure freshness check for a caller-owned
+// guided-action state object. Kept separate from isGuidedActionFresh (which
+// lives inside startTelegramBot's closure and reads guidedActionByChat via
+// the injectable nowProvider seam) because this function is module-level --
+// outside startTelegramBot entirely -- so nowProvider is not in scope here.
+// `state` is always a fresh, caller-owned object with no shared storage
+// behind it (unlike getGuidedActionState's stored map entries), so there is
+// nothing to leak by taking `now` as a plain parameter defaulting to
+// Date.now() per call.
+function isGuidedActionFreshState(state, { maxAgeMs = GUIDED_ACTION_MAX_AGE_MS, now = Date.now() } = {}) {
+  if (!state || !Number.isFinite(state.setAt)) return false;
+  return now - state.setAt <= maxAgeMs;
 }
 
 export function resolveGuidedMessageDecision({
   cleanMessage = '',
   hasMedia = false,
-  allowTextFallback = GUIDED_QUOTES_TEXT_FALLBACK,
-  activeGuidedAction = 'analyze_quotes',
+  activeGuidedActionState = null,
   guidedMenuId = 'ufc_v1',
 } = {}) {
   const menuId = normalizeGuidedMenuId(guidedMenuId);
@@ -946,51 +930,27 @@ export function resolveGuidedMessageDecision({
     return resolveNutritionGuidedMessageDecision({
       cleanMessage,
       hasMedia,
-      activeGuidedAction,
+      activeGuidedAction: activeGuidedActionState?.action,
     });
   }
 
-  const guidedAction = normalizeGuidedAction(activeGuidedAction, {
+  if (!activeGuidedActionState) {
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  const fresh = hasMedia || isGuidedActionFreshState(activeGuidedActionState);
+  if (!fresh) {
+    return { action: 'block', guidedAction: null, inputType: null };
+  }
+
+  const guidedAction = normalizeGuidedAction(activeGuidedActionState.action, {
     defaultAction: 'analyze_quotes',
   });
-  if (hasMedia) {
-    return {
-      action: 'route',
-      guidedAction,
-      inputType: 'image',
-    };
-  }
-
-  if (allowTextFallback) {
-    if (looksLikeStructuredBetSettleText(cleanMessage)) {
-      return {
-        action: 'route',
-        guidedAction: 'settle_bet',
-        inputType: 'text_bet_settle',
-      };
-    }
-
-    if (looksLikeStructuredBetRecordText(cleanMessage)) {
-      return {
-        action: 'route',
-        guidedAction: 'record_bet',
-        inputType: 'text_bet_record',
-      };
-    }
-
-    if (looksLikeStructuredOddsText(cleanMessage)) {
-      return {
-        action: 'route',
-        guidedAction: 'analyze_quotes',
-        inputType: 'text_odds',
-      };
-    }
-  }
-
   return {
-    action: 'block',
-    guidedAction: null,
-    inputType: null,
+    action: 'route',
+    guidedAction,
+    inputType: hasMedia ? 'image' : 'text',
+    fightContext: activeGuidedActionState.fightContext || null,
   };
 }
 
@@ -1124,39 +1084,6 @@ function resolveNutritionGuidedMessageDecision({
   }
 
   return { action: 'block', guidedAction: null, inputType: null };
-}
-
-function looksLikeStructuredBetRecordText(message = '') {
-  const text = normalizeText(message);
-  if (!text) return false;
-
-  const hasOdds = /@\s*\d+([.,]\d+)?/.test(text);
-  const hasStake =
-    /\b(stake|u|units?|unidades?)\b/.test(text) ||
-    /\$\s*\d+/.test(text) ||
-    /\b\d+\s*(ars|usd)\b/.test(text);
-  const hasFight = /\b(vs|versus|pelea|fight)\b/.test(text);
-  const hasPickContext = /\b(ml|moneyline|over|under|pick|metodo|method|ko|tko|submission)\b/.test(
-    text
-  );
-
-  return hasOdds && hasStake && (hasFight || hasPickContext);
-}
-
-function looksLikeStructuredBetSettleText(message = '') {
-  const text = normalizeText(message);
-  if (!text) return false;
-
-  const hasBetId = /\bbet[_\s-]?id\b[^0-9]{0,4}\d+/.test(text) || /\b#\d+\b/.test(text);
-  const hasResult = /\b(won|lost|push|win|loss|ganad|perdid|nula|void|pendiente|pending)\b/.test(
-    text
-  );
-  if (hasBetId && hasResult) {
-    return true;
-  }
-
-  const hasCloseVerb = /\b(cerrar|cerra|settle|marcar|actualizar)\b/.test(text);
-  return hasCloseVerb && hasResult;
 }
 
 function parsePositiveNumber(value) {
@@ -1543,10 +1470,6 @@ export function startTelegramBot(router, options = {}) {
     options.guidedMenuId || options.domainGuidedMenu || 'ufc_v1'
   );
   const guidedLedgerEnabled = options.guidedLedgerEnabled !== false;
-  const guidedQuotesTextFallback =
-    typeof options.guidedQuotesTextFallback === 'boolean'
-      ? options.guidedQuotesTextFallback
-      : GUIDED_QUOTES_TEXT_FALLBACK;
   const callbackDedupWindowMs = toPositiveInt(
     options.callbackDedupWindowMs ??
       process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ??
@@ -2147,6 +2070,7 @@ export function startTelegramBot(router, options = {}) {
     isAlbum = false,
     guidedAction = null,
     guidedInputType = null,
+    fightContext = null,
   } = {}) {
     const chatId = msg.chat.id;
     const from = msg.from || {};
@@ -2195,6 +2119,7 @@ export function startTelegramBot(router, options = {}) {
         guidedAction,
         inputType: guidedInputType,
         guidedInputType,
+        fightContext,
         user: {
           id: from.id ? String(from.id) : null,
           username: from.username || null,
@@ -2295,23 +2220,26 @@ export function startTelegramBot(router, options = {}) {
     }
 
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      const activeGuidedAction = getGuidedAction(chatId);
+      const activeGuidedActionState = getGuidedActionState(chatId);
       const decision = resolveGuidedMessageDecision({
         cleanMessage,
         hasMedia: inputItems.length > 0,
-        allowTextFallback: guidedQuotesTextFallback,
-        activeGuidedAction,
+        activeGuidedActionState,
         guidedMenuId,
       });
 
       if (decision.action !== 'route') {
-        await sendBotMessage(
-          chatId,
-          resolveGuidedBlockHintByAction(activeGuidedAction, { guidedMenuId }),
-          {
-            menuScope: guidedMenuScopeForAction(activeGuidedAction, { guidedMenuId }),
-          }
-        );
+        if (guidedMenuId === 'ufc_v1' || guidedMenuId === 'ufc_default' || guidedMenuId === 'default') {
+          setGuidedActionState(chatId, defaultGuidedAction);
+          await sendMenu(chatId, 'main');
+        } else {
+          const fallbackAction = activeGuidedActionState?.action || defaultGuidedAction;
+          await sendBotMessage(
+            chatId,
+            resolveGuidedBlockHintByAction(fallbackAction, { guidedMenuId }),
+            { menuScope: guidedMenuScopeForAction(fallbackAction, { guidedMenuId }) }
+          );
+        }
         return;
       }
 
@@ -2329,6 +2257,7 @@ export function startTelegramBot(router, options = {}) {
         mediaStats,
         guidedAction: decision.guidedAction,
         guidedInputType: decision.inputType,
+        fightContext: decision.fightContext || null,
       });
       if (shouldResetFeedbackMode) {
         setGuidedAction(chatId, 'log_intake');
@@ -2407,23 +2336,26 @@ export function startTelegramBot(router, options = {}) {
     }
 
     if (isGuidedStrictInteractionMode(interactionMode)) {
-      const activeGuidedAction = getGuidedAction(chatId);
+      const activeGuidedActionState = getGuidedActionState(chatId);
       const decision = resolveGuidedMessageDecision({
         cleanMessage: userMessage,
         hasMedia: inputItems.length > 0,
-        allowTextFallback: guidedQuotesTextFallback,
-        activeGuidedAction,
+        activeGuidedActionState,
         guidedMenuId,
       });
 
       if (decision.action !== 'route') {
-        await sendBotMessage(
-          chatId,
-          resolveGuidedBlockHintByAction(activeGuidedAction, { guidedMenuId }),
-          {
-            menuScope: guidedMenuScopeForAction(activeGuidedAction, { guidedMenuId }),
-          }
-        );
+        if (guidedMenuId === 'ufc_v1' || guidedMenuId === 'ufc_default' || guidedMenuId === 'default') {
+          setGuidedActionState(chatId, defaultGuidedAction);
+          await sendMenu(chatId, 'main');
+        } else {
+          const fallbackAction = activeGuidedActionState?.action || defaultGuidedAction;
+          await sendBotMessage(
+            chatId,
+            resolveGuidedBlockHintByAction(fallbackAction, { guidedMenuId }),
+            { menuScope: guidedMenuScopeForAction(fallbackAction, { guidedMenuId }) }
+          );
+        }
         return;
       }
 
@@ -2442,6 +2374,7 @@ export function startTelegramBot(router, options = {}) {
         isAlbum: true,
         guidedAction: decision.guidedAction,
         guidedInputType: decision.inputType,
+        fightContext: decision.fightContext || null,
       });
       if (shouldResetFeedbackMode) {
         setGuidedAction(chatId, 'log_intake');

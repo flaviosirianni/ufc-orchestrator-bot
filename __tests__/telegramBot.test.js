@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { normalizeGuidedMenuId, startTelegramBot } from '../src/core/telegramBot.js';
+import {
+  normalizeGuidedMenuId,
+  resolveGuidedMessageDecision,
+  startTelegramBot,
+} from '../src/core/telegramBot.js';
 
 class FakeTelegramBot {
   constructor() {
@@ -201,6 +205,11 @@ export async function runTelegramBotTests() {
     runtime.close();
   });
 
+  // Task 3 (guided-menu-unification): cold start -- no active guided-action state
+  // has ever been set for this chat (no /start, no button press) -- now shows the
+  // UFC main menu instead of a "modo guiado activo" reencauce hint. A blocked
+  // guided message routes the user back to the menu instead of guessing intent
+  // from free text.
   tests.push(async () => {
     const fakeBot = new FakeTelegramBot();
     const router = createRouterSpy();
@@ -221,7 +230,7 @@ export async function runTelegramBotTests() {
 
     assert.equal(router.calls.length, 0);
     const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
-    assert.match(out.text, /modo guiado activo/i);
+    assert.match(out.text, /Men[uú] principal|🧾 Ledger|📰 Evento/i);
   });
 
   tests.push(async () => {
@@ -235,6 +244,11 @@ export async function runTelegramBotTests() {
       downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
     });
 
+    // /start establishes the default guided-action state (analyze_quotes for the
+    // UFC menu) -- routing now comes from that persisted state, never from the
+    // odds-shaped text itself (Task 2: guided-menu-unification).
+    await fakeBot.emit('message', createBaseMessage({ text: '/start' }));
+
     await fakeBot.emit(
       'message',
       createBaseMessage({
@@ -245,7 +259,7 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls.length, 1);
     assert.equal(router.calls[0].interactionMode, 'guided_strict');
     assert.equal(router.calls[0].guidedAction, 'analyze_quotes');
-    assert.equal(router.calls[0].inputType, 'text_odds');
+    assert.equal(router.calls[0].inputType, 'text');
   });
 
   tests.push(async () => {
@@ -261,6 +275,11 @@ export async function runTelegramBotTests() {
         filePath: 'ticket.jpg',
       }),
     });
+
+    // /start establishes the default guided-action state -- a photo with no
+    // active state is now blocked (Task 2: guided-menu-unification), so a
+    // real chat always starts from /start before media routes anywhere.
+    await fakeBot.emit('message', createBaseMessage({ text: '/start' }));
 
     await fakeBot.emit(
       'message',
@@ -291,6 +310,10 @@ export async function runTelegramBotTests() {
         filePath: 'ticket.jpg',
       }),
     });
+
+    // /start establishes the default guided-action state -- an album with no
+    // active state is now blocked (Task 2: guided-menu-unification).
+    await fakeBot.emit('message', createBaseMessage({ text: '/start' }));
 
     await fakeBot.emit(
       'message',
@@ -407,7 +430,9 @@ export async function runTelegramBotTests() {
 
     assert.equal(router.calls.length, 1);
     assert.equal(router.calls[0].guidedAction, 'record_bet');
-    assert.equal(router.calls[0].inputType, 'text_bet_record');
+    // inputType is now the generic 'text' -- routing comes from the active
+    // record_bet session state, not from sniffing the text shape (Task 2).
+    assert.equal(router.calls[0].inputType, 'text');
   });
 
   tests.push(async () => {
@@ -428,6 +453,10 @@ export async function runTelegramBotTests() {
       })
     );
 
+    // Regression guard for the bug class this plan removes: "bet_id 42 LOST"
+    // is settle-shaped text, but the active session state is record_bet -- it
+    // must stay record_bet, never get reclassified by keyword-sniffing the
+    // message (Task 2: guided-menu-unification).
     await fakeBot.emit(
       'message',
       createBaseMessage({
@@ -436,8 +465,8 @@ export async function runTelegramBotTests() {
     );
 
     assert.equal(router.calls.length, 1);
-    assert.equal(router.calls[0].guidedAction, 'settle_bet');
-    assert.equal(router.calls[0].inputType, 'text_bet_settle');
+    assert.equal(router.calls[0].guidedAction, 'record_bet');
+    assert.equal(router.calls[0].inputType, 'text');
   });
 
   tests.push(async () => {
@@ -468,7 +497,7 @@ export async function runTelegramBotTests() {
     assert.equal(router.calls.length, 2);
     assert.equal(router.calls[0].guidedAction, 'ledger_list_pending');
     assert.equal(router.calls[1].guidedAction, 'settle_bet');
-    assert.equal(router.calls[1].inputType, 'text_bet_settle');
+    assert.equal(router.calls[1].inputType, 'text');
   });
 
   tests.push(async () => {
@@ -489,6 +518,10 @@ export async function runTelegramBotTests() {
       })
     );
 
+    // With a fresh active state, any text now routes under that state's action
+    // -- the guided layer no longer judges whether the text "looks like" a
+    // valid settle message; that's the router's job downstream (Task 2:
+    // guided-menu-unification, "intent comes from state, never from text").
     await fakeBot.emit(
       'message',
       createBaseMessage({
@@ -496,9 +529,10 @@ export async function runTelegramBotTests() {
       })
     );
 
-    assert.equal(router.calls.length, 0);
-    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
-    assert.match(out.text, /modo guiado - cerrar apuesta/i);
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].guidedAction, 'settle_bet');
+    assert.equal(router.calls[0].inputType, 'text');
+    assert.equal(router.calls[0].message, 'hola');
   });
 
   tests.push(async () => {
@@ -1415,6 +1449,75 @@ export async function runTelegramBotTests() {
     assert.equal(status.degraded, false, 'ventana expirada → degraded resetea');
     assert.equal(fakeBot.startPollingCalls, 2, 'una recovery adicional tras reset');
     runtime.close();
+  });
+
+  // Task 2 — resolveGuidedMessageDecision routes from session state, never from
+  // keyword-guessed text. Regression coverage for the confirmed production incident
+  // (2026-08-12 session): "le puse $2000 a Hooper por Sumisión @2.40" with an active
+  // record_bet state must route as record_bet, not get reclassified as analyze_quotes
+  // by an odds-shaped regex (the old keyword list only had the English "submission").
+  tests.push(() => {
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'le puse $2000 a Hooper por Sumisión @2.40',
+      hasMedia: false,
+      activeGuidedActionState: { action: 'record_bet', fightContext: null, setAt: Date.now() },
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.action, 'route');
+    assert.equal(decision.guidedAction, 'record_bet');
+  });
+
+  tests.push(() => {
+    // Same message, but the active state is analyze_quotes: must stay analyze_quotes.
+    // Proves intent comes from state, never from text content.
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'le puse $2000 a Hooper por Sumisión @2.40',
+      hasMedia: false,
+      activeGuidedActionState: { action: 'analyze_quotes', fightContext: null, setAt: Date.now() },
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.guidedAction, 'analyze_quotes');
+  });
+
+  tests.push(() => {
+    // No active state at all: block (show menu), never guess.
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'le puse $2000 a Hooper por Sumisión @2.40',
+      hasMedia: false,
+      activeGuidedActionState: null,
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.action, 'block');
+  });
+
+  tests.push(() => {
+    // Active state exists but is stale (46 min old): block (show menu), don't reuse it.
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'le puse $2000 a Hooper por Sumisión @2.40',
+      hasMedia: false,
+      activeGuidedActionState: { action: 'record_bet', fightContext: null, setAt: Date.now() - 46 * 60 * 1000 },
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.action, 'block');
+  });
+
+  tests.push(() => {
+    // Media (photo) always routes with whatever the active state is, regardless of freshness
+    // rules for text -- unchanged from today's behavior, still exercised here as a regression
+    // guard since this function is being rewritten.
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: '',
+      hasMedia: true,
+      activeGuidedActionState: { action: 'analyze_quotes', fightContext: null, setAt: Date.now() - 46 * 60 * 1000 },
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.action, 'route');
+    assert.equal(decision.guidedAction, 'analyze_quotes');
   });
 
   // Task 1 — guided-action state carries a setAt timestamp for staleness checks
