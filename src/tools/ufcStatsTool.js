@@ -52,19 +52,31 @@ export function isAvailable() {
  *
  * Returns basic metadata about the loaded ufc_stats.db for freshness reporting.
  */
+function readEmbeddedGeneratedAt() {
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'generated_at'").get();
+    return row?.value || null;
+  } catch {
+    return null;
+  }
+}
+
 export function getFreshnessMeta() {
   if (!db) return null;
   const maxAgeHoursRaw = Number(process.env.UFC_STATS_MAX_AGE_HOURS ?? '36');
   const maxAgeHours =
     Number.isFinite(maxAgeHoursRaw) && maxAgeHoursRaw > 0 ? maxAgeHoursRaw : 36;
-  const generatedAtMs = Date.parse(String(loadedDbMtimeIso || ''));
+  const embeddedGeneratedAt = readEmbeddedGeneratedAt();
+  const generatedAt = embeddedGeneratedAt || loadedDbMtimeIso;
+  const freshnessSource = embeddedGeneratedAt ? 'meta_table' : 'file_mtime';
+  const generatedAtMs = Date.parse(String(generatedAt || ''));
   const ageHours = Number.isFinite(generatedAtMs)
     ? Math.max(0, (Date.now() - generatedAtMs) / 3_600_000)
     : null;
   try {
     const meta = db
       .prepare(
-        `SELECT MAX(event_date) AS latest_fight_date,
+        `SELECT MAX(event_date_iso) AS latest_fight_date,
                 COUNT(*) AS fight_count
          FROM fights`
       )
@@ -76,8 +88,8 @@ export function getFreshnessMeta() {
       fightCount: Number(meta?.fight_count) || 0,
       upcomingCount: Number(upcomingRow?.cnt) || 0,
       dbPath: loadedDbPath || db.name || null,
-      generatedAt: loadedDbMtimeIso,
-      freshnessSource: 'file_mtime',
+      generatedAt,
+      freshnessSource,
       ageHours: ageHours === null ? null : Number(ageHours.toFixed(3)),
       maxAgeHours,
       isFresh: ageHours !== null && ageHours <= maxAgeHours,
@@ -89,8 +101,8 @@ export function getFreshnessMeta() {
       fightCount: 0,
       upcomingCount: 0,
       dbPath: loadedDbPath,
-      generatedAt: loadedDbMtimeIso,
-      freshnessSource: 'file_mtime',
+      generatedAt,
+      freshnessSource,
       ageHours: ageHours === null ? null : Number(ageHours.toFixed(3)),
       maxAgeHours,
       isFresh: ageHours !== null && ageHours <= maxAgeHours,

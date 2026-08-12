@@ -1,0 +1,14 @@
+[Unit]
+Description=UFC Stats Scraper — scrape, validate, atomic swap into ufc_stats.db
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/apps/data-scrapper
+ExecStart=/home/ubuntu/apps/bot-factory/ops/scripts/run-ufc-data-scrapper.sh
+Environment=SCRAPER_LOG_FILE=/tmp/ufc-data-scrapper.log
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,11 @@
+[Unit]
+Description=UFC Stats Scraper — daily run
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
