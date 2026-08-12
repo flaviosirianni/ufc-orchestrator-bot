@@ -61,7 +61,7 @@ const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
 );
 const GUIDED_QUOTES_TEXT_FALLBACK =
   String(process.env.GUIDED_QUOTES_TEXT_FALLBACK ?? 'true').toLowerCase() !== 'false';
-const GUIDED_ACTION_MAX_AGE_MS = Number(process.env.GUIDED_ACTION_MAX_AGE_MS ?? String(45 * 60 * 1000));
+const GUIDED_ACTION_MAX_AGE_MS = toPositiveInt(process.env.GUIDED_ACTION_MAX_AGE_MS, 45 * 60 * 1000);
 const GUIDED_INPUT_ACTIONS = new Set([
   'analyze_quotes',
   'record_bet',
@@ -1746,18 +1746,21 @@ export function startTelegramBot(router, options = {}) {
   function getGuidedActionState(chatId) {
     const key = String(chatId || '').trim();
     if (!key) return null;
-    return guidedActionByChat.get(key) || null;
+    const state = guidedActionByChat.get(key);
+    return state ? { ...state } : null;
   }
 
   function isGuidedActionFresh(chatId, { maxAgeMs = GUIDED_ACTION_MAX_AGE_MS } = {}) {
     const state = getGuidedActionState(chatId);
     if (!state || !Number.isFinite(state.setAt)) return false;
-    return Date.now() - state.setAt <= maxAgeMs;
+    const nowMs = Number(nowProvider()) || Date.now();
+    return nowMs - state.setAt <= maxAgeMs;
   }
 
   function setGuidedActionState(chatId, action = defaultGuidedAction, fightContext = null) {
     const key = String(chatId || '').trim();
-    if (!key) return { action: defaultGuidedAction, fightContext: null, setAt: Date.now() };
+    const nowMs = Number(nowProvider()) || Date.now();
+    if (!key) return { action: defaultGuidedAction, fightContext: null, setAt: nowMs };
     let normalized = normalizeGuidedAction(action, {
       defaultAction: defaultGuidedAction,
     });
@@ -1767,7 +1770,7 @@ export function startTelegramBot(router, options = {}) {
     ) {
       normalized = defaultGuidedAction;
     }
-    const state = { action: normalized, fightContext: fightContext || null, setAt: Date.now() };
+    const state = { action: normalized, fightContext: fightContext || null, setAt: nowMs };
     guidedActionByChat.set(key, state);
     return state;
   }
@@ -3389,6 +3392,8 @@ export function startTelegramBot(router, options = {}) {
     getGuidedActionState,
     isGuidedActionFresh,
     setGuidedActionState,
+    getGuidedAction,
+    setGuidedAction,
     getRuntimeStatus() {
       const nowMs = Date.now();
       return {

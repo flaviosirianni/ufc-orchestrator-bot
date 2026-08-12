@@ -1439,18 +1439,19 @@ export async function runTelegramBotTests() {
   });
 
   tests.push(async () => {
+    let mockNow = 1_000_000;
     const runtime = startTelegramBot(createRouterSpy(), {
       botInstance: new FakeTelegramBot(),
       interactionMode: 'guided_strict',
       guidedQuotesTextFallback: true,
       pollingIdleWatchdogMs: 0,
       pollingWatchdogIntervalMs: 0,
+      nowProvider: () => mockNow,
     });
 
     const chatId = 'chat-guided-state-stale-1';
     runtime.setGuidedActionState(chatId, 'record_bet');
-    const state = runtime.getGuidedActionState(chatId);
-    state.setAt = Date.now() - 46 * 60 * 1000; // simula 46 minutos de inactividad
+    mockNow += 46 * 60 * 1000; // avanza el reloj inyectado 46 minutos (sin tocar el estado devuelto)
 
     assert.equal(runtime.isGuidedActionFresh(chatId, { maxAgeMs: 45 * 60 * 1000 }), false);
     runtime.close();
@@ -1469,6 +1470,37 @@ export async function runTelegramBotTests() {
       runtime.isGuidedActionFresh('chat-never-set-1', { maxAgeMs: 45 * 60 * 1000 }),
       false
     );
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: new FakeTelegramBot(),
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    const chatId = 'chat-guided-state-fightcontext-1';
+    runtime.setGuidedActionState(chatId, 'record_bet', { fightId: 'x' });
+
+    assert.deepEqual(runtime.getGuidedActionState(chatId).fightContext, { fightId: 'x' });
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: new FakeTelegramBot(),
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    const chatId = 'chat-guided-action-wrapper-1';
+    runtime.setGuidedAction(chatId, 'record_bet');
+    assert.equal(runtime.getGuidedAction(chatId), 'record_bet');
     runtime.close();
   });
 
