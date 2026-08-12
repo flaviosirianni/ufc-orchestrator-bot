@@ -61,6 +61,26 @@ function readEmbeddedGeneratedAt() {
   }
 }
 
+/**
+ * hasColumn(table, column)
+ *
+ * Checks column presence via PRAGMA table_info so callers can support both the
+ * pre-migration ufc_stats.db schema and the event_date_iso-aware one without throwing.
+ *
+ * @returns {boolean} true if the column exists on the given table.
+ * @sideEffects Ninguno.
+ */
+function hasColumn(table, column) {
+  try {
+    return db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all()
+      .some((col) => col.name === column);
+  } catch {
+    return false;
+  }
+}
+
 export function getFreshnessMeta() {
   if (!db) return null;
   const maxAgeHoursRaw = Number(process.env.UFC_STATS_MAX_AGE_HOURS ?? '36');
@@ -73,10 +93,13 @@ export function getFreshnessMeta() {
   const ageHours = Number.isFinite(generatedAtMs)
     ? Math.max(0, (Date.now() - generatedAtMs) / 3_600_000)
     : null;
+  const latestFightDateColumn = hasColumn('fights', 'event_date_iso')
+    ? 'event_date_iso'
+    : 'event_date';
   try {
     const meta = db
       .prepare(
-        `SELECT MAX(event_date_iso) AS latest_fight_date,
+        `SELECT MAX(${latestFightDateColumn}) AS latest_fight_date,
                 COUNT(*) AS fight_count
          FROM fights`
       )

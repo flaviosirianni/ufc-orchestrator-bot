@@ -5,18 +5,24 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { initUfcStatsTool, getFreshnessMeta } from '../src/tools/ufcStatsTool.js';
 
-function buildDb({ dbPath, rows, meta }) {
+function buildDb({ dbPath, rows, meta, withIsoColumn = true }) {
   fs.rmSync(dbPath, { force: true });
   const db = new Database(dbPath);
   db.exec(
-    'CREATE TABLE fights (fight_id TEXT PRIMARY KEY, event_date TEXT, event_date_iso TEXT)'
+    withIsoColumn
+      ? 'CREATE TABLE fights (fight_id TEXT PRIMARY KEY, event_date TEXT, event_date_iso TEXT)'
+      : 'CREATE TABLE fights (fight_id TEXT PRIMARY KEY, event_date TEXT)'
   );
   db.exec('CREATE TABLE upcoming_fights (fight_id TEXT PRIMARY KEY)');
-  const insert = db.prepare(
-    'INSERT INTO fights (fight_id, event_date, event_date_iso) VALUES (?, ?, ?)'
-  );
+  const insert = withIsoColumn
+    ? db.prepare('INSERT INTO fights (fight_id, event_date, event_date_iso) VALUES (?, ?, ?)')
+    : db.prepare('INSERT INTO fights (fight_id, event_date) VALUES (?, ?)');
   for (const row of rows) {
-    insert.run(row.id, row.eventDate, row.eventDateIso ?? null);
+    if (withIsoColumn) {
+      insert.run(row.id, row.eventDate, row.eventDateIso ?? null);
+    } else {
+      insert.run(row.id, row.eventDate);
+    }
   }
   if (meta) {
     db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -80,6 +86,31 @@ export async function runUfcStatsToolTests() {
 
     assert.equal(meta.generatedAt, embeddedGeneratedAt);
     assert.equal(meta.freshnessSource, 'meta_table');
+  }
+
+  {
+    // The exact production incident this guards against: the live ufc_stats.db predates the
+    // event_date_iso migration entirely -- the column doesn't exist at all (not just NULL).
+    // MAX(event_date_iso) on that schema throws "no such column", which must not surface as
+    // fightCount:0/upcomingCount:0 (a real regression this shipped once already).
+    const dbPath = path.join(tmpDir, 'pre-migration-schema.db');
+    buildDb({
+      dbPath,
+      withIsoColumn: false,
+      rows: [
+        { id: 'f1', eventDate: 'March 07, 2026' },
+        { id: 'f2', eventDate: 'April 04, 2026' },
+      ],
+    });
+
+    initUfcStatsTool({ dbPath });
+    const meta = getFreshnessMeta();
+
+    assert.equal(meta.fightCount, 2, 'debe seguir contando fights en DBs pre-migracion');
+    // Textual MAX() on "event_date" picks "March" over "April" (M > A alphabetically) --
+    // the same known limitation as before this change. Documents the fallback honestly
+    // instead of pretending it fixes the sorting without the column.
+    assert.equal(meta.latestFightDate, 'March 07, 2026', 'cae a event_date textual (con su limitacion conocida) si event_date_iso no existe');
   }
 
   console.log('All ufc stats tool tests passed.');
