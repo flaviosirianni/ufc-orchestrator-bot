@@ -290,14 +290,16 @@ export function resolveGuidedMessageDecision({
 }
 ```
 
-Add this small pure helper right above it (kept separate from `isGuidedActionFresh` because that one reads from `guidedActionByChat` by `chatId`, while this one checks a state object directly — the function under test above passes a raw state object, matching how `resolveGuidedMessageDecision` will be called from `deliverToRouter`/`flushMediaGroup` after Task 3):
+Add this small pure helper right above it (kept separate from `isGuidedActionFresh` because that one reads from `guidedActionByChat` by `chatId` and lives inside `startTelegramBot`'s closure where the injectable `nowProvider` seam lives (`src/core/telegramBot.js:1614`, added/fixed by Task 1's review), while this one is a **module-level** function — same scope as `resolveGuidedMessageDecision` itself, confirmed outside `startTelegramBot` entirely, so `nowProvider` is not in scope here and must not be referenced directly (doing so would throw `ReferenceError: nowProvider is not defined`)):
 
 ```js
-function isGuidedActionFreshState(state, { maxAgeMs = GUIDED_ACTION_MAX_AGE_MS } = {}) {
+function isGuidedActionFreshState(state, { maxAgeMs = GUIDED_ACTION_MAX_AGE_MS, now = Date.now() } = {}) {
   if (!state || !Number.isFinite(state.setAt)) return false;
-  return Date.now() - state.setAt <= maxAgeMs;
+  return now - state.setAt <= maxAgeMs;
 }
 ```
+
+This takes `now` as an ordinary parameter (defaulting to a fresh `Date.now()` per call) instead of reaching for a shared clock, which is why the Step 1 tests above don't need any time-injection plumbing — each test constructs its own plain `activeGuidedActionState` object with an already-relative `setAt` (e.g. `Date.now() - 46 * 60 * 1000`) baked in at construction time, so the comparison against the real `Date.now()` a few milliseconds later inside this function is correct without mocking anything. This is a different situation from Task 1's leaked-mutable-reference issue: there, `getGuidedActionState` returned a live reference into long-lived stored state that a caller could later mutate; here, `state` is always a fresh, caller-owned object with no shared storage behind it, so there's nothing to leak.
 
 Note the Nutrition branch (`resolveNutritionGuidedMessageDecision`) is untouched by this plan — it keeps its own existing text-based logic; only the UFC (`ufc_v1`) path changes. Do not modify `resolveNutritionGuidedMessageDecision`.
 
