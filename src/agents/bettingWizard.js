@@ -3,6 +3,7 @@ import path from 'node:path';
 import OpenAI from 'openai';
 import '../core/env.js';
 import { resolveAutoSettlementCandidate } from '../core/autoSettlement.js';
+import { evaluateEventTruth } from '../core/eventTruthGate.js';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MODEL = process.env.BETTING_MODEL || 'gpt-4.1-mini';
@@ -6408,17 +6409,33 @@ export function createBettingWizard({
               String(liveOddsContext?.eventId || '').trim() ||
               String(liveWebContext?.eventId || '').trim() ||
               buildSyntheticEventId(resolvedEventName, resolvedEventDate || null);
+            const liveCandidate = {
+              watchKey: 'current_event',
+              eventId: resolvedEventId,
+              eventName: resolvedEventName,
+              eventDateUtc: resolvedEventDate || null,
+              eventStatus: 'live',
+              sourcePrimary: preferOddsContext ? 'odds_scores_live' : liveWebContext?.source || null,
+              sourceSecondary: preferOddsContext ? liveWebContext?.source || null : null,
+              mainCard,
+            };
+            const liveVerifiedAtIso = new Date().toISOString();
+            const liveVerification = evaluateEventTruth({
+              watchKey: 'current_event',
+              candidate: liveCandidate,
+              verification: {
+                compatibleSourceCount: oddsEventName && webEventName ? 2 : 1,
+                structuredCardSource: preferOddsContext === true,
+                liveSignalCount: liveOddsHints.length || (webEventName ? 1 : 0),
+                verifiedAt: liveVerifiedAtIso,
+              },
+            });
             userStore.upsertEventWatchState(
               {
-                eventId: resolvedEventId,
-                eventName: resolvedEventName,
-                eventDateUtc: resolvedEventDate || null,
-                eventStatus: 'live',
-                sourcePrimary: preferOddsContext ? 'odds_scores_live' : liveWebContext?.source || null,
-                sourceSecondary: preferOddsContext ? liveWebContext?.source || null : null,
-                mainCard,
+                ...liveCandidate,
                 monitoredFighters: collectMonitoredFightersFromMainCard(mainCard),
-                lastReconciledAt: new Date().toISOString(),
+                lastReconciledAt: liveVerifiedAtIso,
+                verification: liveVerification,
               },
               'current_event'
             );
@@ -6715,19 +6732,35 @@ export function createBettingWizard({
                   hasScores: Boolean(fight?.hasScores),
                 }))
             : [];
+          const intelCandidate = {
+            watchKey: 'current_event',
+            eventId:
+              String(eventState?.eventId || '').trim() ||
+              buildSyntheticEventId(eventState?.eventName || '', eventState?.eventDateUtc || null),
+            eventName: String(eventState?.eventName || '').trim(),
+            eventDateUtc: selectedEventDate || null,
+            eventStatus: 'live',
+            sourcePrimary: eventState?.sourcePrimary || null,
+            sourceSecondary: reconciledWithWeb ? String(liveWebContext?.source || '').trim() || null : null,
+            mainCard: normalizedMainCard,
+          };
+          const intelVerifiedAtIso = new Date().toISOString();
+          const intelVerification = evaluateEventTruth({
+            watchKey: 'current_event',
+            candidate: intelCandidate,
+            verification: {
+              compatibleSourceCount: reconciledWithLive && reconciledWithWeb ? 2 : 1,
+              structuredCardSource: reconciledWithLive || mergedLiveSignals,
+              liveSignalCount: liveSignalsDetected ? 1 : 0,
+              verifiedAt: intelVerifiedAtIso,
+            },
+          });
           userStore.upsertEventWatchState(
             {
-              eventId:
-                String(eventState?.eventId || '').trim() ||
-                buildSyntheticEventId(eventState?.eventName || '', eventState?.eventDateUtc || null),
-              eventName: String(eventState?.eventName || '').trim(),
-              eventDateUtc: selectedEventDate || null,
-              eventStatus: 'live',
-              sourcePrimary: eventState?.sourcePrimary || null,
-              sourceSecondary: null,
-              mainCard: normalizedMainCard,
+              ...intelCandidate,
               monitoredFighters: collectMonitoredFightersFromMainCard(normalizedMainCard),
-              lastReconciledAt: new Date().toISOString(),
+              lastReconciledAt: intelVerifiedAtIso,
+              verification: intelVerification,
             },
             'current_event'
           );

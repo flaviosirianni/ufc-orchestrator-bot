@@ -2185,6 +2185,99 @@ export async function runBettingWizardTests() {
   });
 
   tests.push(async () => {
+    // Same odds+web reconciliation fixture as the "live status" test above, but this time
+    // asserting the persisted current_event carries a real EventTruthGate verdict (not just a
+    // raw write with no verification, which would always read back as invalid/verification_missing).
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
+    const syncOddsIso = new Date(nowMs - 4 * 60 * 1000).toISOString();
+    const syncScoresIso = new Date(nowMs - 2 * 60 * 1000).toISOString();
+    const writes = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return {
+            eventId: 'ufc_324_2026-04-18',
+            eventName: 'UFC 324',
+            eventDateUtc: '2026-04-18',
+            updatedAt: '2026-03-07T10:00:00Z',
+          };
+        },
+        async resolveLiveEventContext() {
+          return {
+            eventName: 'UFC 326',
+            date: '2026-03-08',
+            source: 'open-web',
+            fights: [{ fighterA: 'Max Holloway', fighterB: 'Charles Oliveira' }],
+          };
+        },
+        listUpcomingOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              lastOddsSyncAt: syncOddsIso,
+              updatedAt: syncOddsIso,
+            },
+          ];
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_326_2026-03-08',
+              eventName: 'UFC 326',
+              commenceTime: commenceIso,
+              homeTeam: 'Max Holloway',
+              awayTeam: 'Charles Oliveira',
+              completed: false,
+              scores: [{ name: 'Max Holloway', score: '0' }],
+              lastScoresSyncAt: syncScoresIso,
+              updatedAt: syncScoresIso,
+            },
+          ];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 1 };
+        },
+        upsertEventWatchState(snapshot, watchKey) {
+          writes.push({ snapshot, watchKey });
+          return snapshot;
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('fijate online el evento en vivo de la ufc', {
+      chatId: 'chat-live-status-verification-1',
+      originalMessage: 'fijate online el evento en vivo de la ufc',
+      resolution: {
+        resolvedMessage: 'fijate online el evento en vivo de la ufc',
+      },
+    });
+
+    assert.match(result.reply, /Estado UFC en vivo/i);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].watchKey, 'current_event');
+    assert.equal(writes[0].snapshot.verification?.evidence?.structuredCardSource, true);
+    assert.equal(writes[0].snapshot.verification?.compatibleSourceCount, 2);
+    assert.equal(writes[0].snapshot.verification?.confidence, 'verified');
+    assert.equal(writes[0].snapshot.verification?.consumerAllowed, true);
+  });
+
+  tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
       responseWithText('Pick principal: Max Holloway ML.'),
@@ -4029,6 +4122,100 @@ export async function runBettingWizardTests() {
     } finally {
       Date.now = realDateNow;
     }
+  });
+
+  tests.push(async () => {
+    // No stored current/next event at all, so odds-derived live reconciliation takes over
+    // (shouldPreferOddsEventForIntel short-circuits true on empty fallback). Single-source
+    // (odds only, no web corroboration) must persist a verification that stays degraded/not
+    // consumable, same EventTruthGate contract as the wantsLiveEventStatus write site.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 20 * 60 * 1000).toISOString();
+    const syncIso = new Date(nowMs - 3 * 60 * 1000).toISOString();
+    const writes = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return null;
+        },
+        listUpcomingOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_330_odds_only',
+              eventName: 'UFC 330',
+              commenceTime: commenceIso,
+              homeTeam: 'Islam Makhachev',
+              awayTeam: 'Ian Garry',
+              completed: false,
+              lastOddsSyncAt: syncIso,
+              updatedAt: syncIso,
+            },
+          ];
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_330_odds_only',
+              eventName: 'UFC 330',
+              commenceTime: commenceIso,
+              homeTeam: 'Islam Makhachev',
+              awayTeam: 'Ian Garry',
+              completed: false,
+              scores: [{ name: 'Islam Makhachev', score: '0' }],
+              lastScoresSyncAt: syncIso,
+              updatedAt: syncIso,
+            },
+          ];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 0 };
+        },
+        listLatestRelevantNews() {
+          return [];
+        },
+        listLatestProjectionSnapshotsForEvent() {
+          return [];
+        },
+        listLatestBetScoringForEvent() {
+          return [];
+        },
+        listLatestOddsMarketsForFight() {
+          return [];
+        },
+        upsertEventWatchState(snapshot, watchKey) {
+          writes.push({ snapshot, watchKey });
+          return snapshot;
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('mostrame proyecciones para el proximo evento', {
+      chatId: 'chat-intel-proj-odds-only-verification-1',
+      userId: 'u-intel-proj-odds-only-verification-1',
+      originalMessage: 'mostrame proyecciones para el proximo evento',
+      resolution: {
+        resolvedMessage: 'mostrame proyecciones para el proximo evento',
+      },
+    });
+
+    assert.ok(result.reply.length > 0);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].watchKey, 'current_event');
+    assert.equal(writes[0].snapshot.eventName, 'UFC 330');
+    assert.equal(writes[0].snapshot.verification?.evidence?.structuredCardSource, true);
+    assert.equal(writes[0].snapshot.verification?.compatibleSourceCount, 1);
+    assert.equal(writes[0].snapshot.verification?.confidence, 'degraded');
+    assert.equal(writes[0].snapshot.verification?.consumerAllowed, false);
   });
 
   tests.push(async () => {

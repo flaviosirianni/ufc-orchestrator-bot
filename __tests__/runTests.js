@@ -16,6 +16,7 @@ const SUITES = [
   { modulePath: './eventTruthGate.test.js', exportName: 'runEventTruthGateTests' },
   { modulePath: './eventTruthStore.test.js', exportName: 'runEventTruthStoreTests' },
   { modulePath: './eventIntel.test.js', exportName: 'runEventIntelTests' },
+  { modulePath: './oddsEventResolver.test.js', exportName: 'runOddsEventResolverTests' },
   {
     modulePath: './eventConsumersFailClosed.test.js',
     exportName: 'runEventConsumersFailClosedTests',

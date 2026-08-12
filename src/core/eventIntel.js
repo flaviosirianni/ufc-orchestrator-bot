@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import '../core/env.js';
 import { evaluateEventConsumption, evaluateEventTruth } from './eventTruthGate.js';
+import { resolveNextEventFromOddsRows } from './oddsEventResolver.js';
 
 const EVENT_INTEL_DISCOVERY_INTERVAL_MS = Number(
   process.env.EVENT_INTEL_DISCOVERY_INTERVAL_MS ?? String(6 * 60 * 60 * 1000)
@@ -134,6 +135,42 @@ function classifyImpact(title = '') {
   };
 }
 
+/**
+ * Extrae el último token de un nombre normalizado (apellido) para matching tolerante entre fuentes.
+ *
+ * @returns {string} Último token en minúsculas sin acentos, o cadena vacía.
+ * @sideEffects Ninguno.
+ */
+function surname(name = '') {
+  return normalize(name).split(/\s+/).filter(Boolean).slice(-1)[0] || '';
+}
+
+/**
+ * Verifica si el contexto web menciona al mismo main event que el candidato de Odds API,
+ * comparando apellidos (nombre completo puede variar entre fuentes, ej. "Garry" vs "Machado Garry").
+ *
+ * @returns {boolean} true si el contexto web corrobora el main event de Odds API.
+ * @sideEffects Ninguno.
+ */
+function webCorroboratesOddsMainEvent(context = {}, fighterA = '', fighterB = '') {
+  const surnameA = surname(fighterA);
+  const surnameB = surname(fighterB);
+  if (!surnameA || !surnameB) return false;
+
+  const fights = Array.isArray(context?.fights) ? context.fights : [];
+  const inFights = fights.some((fight) => {
+    const a = normalize(fight?.fighterA || '');
+    const b = normalize(fight?.fighterB || '');
+    const direct = a.includes(surnameA) && b.includes(surnameB);
+    const reverse = a.includes(surnameB) && b.includes(surnameA);
+    return direct || reverse;
+  });
+  if (inFights) return true;
+
+  const eventNameNorm = normalize(context?.eventName || '');
+  return eventNameNorm.includes(surnameA) && eventNameNorm.includes(surnameB);
+}
+
 function extractUniqueFighters(fights = []) {
   if (!Array.isArray(fights)) return [];
   const seen = new Set();
@@ -200,7 +237,9 @@ function mapNewsItem({ raw = {}, fighterName = '', eventId = '' } = {}) {
 }
 
 /**
- * Descubre un candidato web, lo evalúa fail-closed y persiste candidato más veredicto.
+ * Descubre el próximo candidato de evento (Odds API como fuente estructurada primaria si está
+ * disponible, con noticias web como corroboración de quorum; cae al camino web puro si no hay
+ * filas de Odds), lo evalúa fail-closed y persiste candidato más veredicto.
  *
  * @returns {Promise<object>} Resultado del descubrimiento con decisión de confianza.
  * @sideEffects Consulta web y escribe estado/auditoría mediante el store inyectado.
@@ -208,12 +247,23 @@ function mapNewsItem({ raw = {}, fighterName = '', eventId = '' } = {}) {
 export async function discoverNextEvent({
   buildWebContextForMessage,
   upsertEventWatchState,
+  listUpcomingOddsEvents,
   fetchImpl,
   now = new Date(),
 } = {}) {
   if (typeof buildWebContextForMessage !== 'function' || typeof upsertEventWatchState !== 'function') {
     return { ok: false, error: 'missing_dependencies' };
   }
+
+  const evaluatedAt = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(evaluatedAt.getTime())) {
+    return { ok: false, error: 'invalid_evaluation_time' };
+  }
+
+  const oddsCandidate =
+    typeof listUpcomingOddsEvents === 'function'
+      ? resolveNextEventFromOddsRows(listUpcomingOddsEvents())
+      : null;
 
   const context = await buildWebContextForMessage(
     'cual es el proximo evento de ufc y su main card?',
@@ -224,48 +274,73 @@ export async function discoverNextEvent({
     }
   );
 
-  if (!context?.eventName) {
-    return { ok: false, error: 'event_not_found' };
-  }
+  let eventName;
+  let eventDate;
+  let mainCard;
+  let sourcePrimary;
+  let sourceSecondary = null;
+  let structuredCardSource;
+  let compatibleSourceCount;
 
-  const fights = Array.isArray(context.fights) ? context.fights : [];
-  const monitoredFighters = extractUniqueFighters(fights);
-  const eventDate = toIsoDate(context.date);
-  const evaluatedAt = now instanceof Date ? now : new Date(now);
-  if (Number.isNaN(evaluatedAt.getTime())) {
-    return { ok: false, error: 'invalid_evaluation_time' };
-  }
-  const candidate = {
-    watchKey: 'next_event',
-    eventId: buildEventId({ eventName: context.eventName, eventDate }),
-    eventName: context.eventName,
-    eventDateUtc: eventDate,
-    eventStatus: 'scheduled',
-    sourcePrimary: context.source || null,
-    sourceSecondary: null,
-    mainCard: fights.map((fight, index) => ({
+  if (oddsCandidate) {
+    eventName = oddsCandidate.eventName;
+    eventDate = oddsCandidate.eventDateUtc;
+    mainCard = oddsCandidate.mainCard;
+    sourcePrimary = oddsCandidate.sourcePrimary;
+    structuredCardSource = oddsCandidate.structuredCardSource;
+    const corroborated = webCorroboratesOddsMainEvent(
+      context,
+      oddsCandidate.mainEventFighterA,
+      oddsCandidate.mainEventFighterB
+    );
+    if (corroborated) {
+      sourceSecondary = context.source || 'web_news';
+    }
+    compatibleSourceCount = corroborated ? 2 : 1;
+  } else {
+    if (!context?.eventName) {
+      return { ok: false, error: 'event_not_found' };
+    }
+    const fights = Array.isArray(context.fights) ? context.fights : [];
+    eventName = context.eventName;
+    eventDate = toIsoDate(context.date);
+    mainCard = fights.map((fight, index) => ({
       fightId: `fight_${index + 1}`,
       fighterA: fight.fighterA,
       fighterB: fight.fighterB,
-    })),
+    }));
+    sourcePrimary = context.source || null;
+    structuredCardSource = context.structuredCardSource === true;
+    const declaredSourceCount = Number(context.compatibleSourceCount);
+    compatibleSourceCount = Number.isFinite(declaredSourceCount)
+      ? declaredSourceCount
+      : Array.isArray(context.compatibleSources)
+        ? context.compatibleSources.length
+        : context.source
+          ? 1
+          : 0;
+  }
+
+  const monitoredFighters = extractUniqueFighters(mainCard);
+  const candidate = {
+    watchKey: 'next_event',
+    eventId: buildEventId({ eventName, eventDate }),
+    eventName,
+    eventDateUtc: eventDate,
+    eventStatus: 'scheduled',
+    sourcePrimary,
+    sourceSecondary,
+    mainCard,
     monitoredFighters,
     lastReconciledAt: nowIso(evaluatedAt),
   };
-  const declaredSourceCount = Number(context.compatibleSourceCount);
-  const compatibleSourceCount = Number.isFinite(declaredSourceCount)
-    ? declaredSourceCount
-    : Array.isArray(context.compatibleSources)
-      ? context.compatibleSources.length
-      : context.source
-        ? 1
-        : 0;
   const verification = evaluateEventTruth({
     watchKey: 'next_event',
     candidate,
     verification: {
       compatibleSourceCount,
-      structuredCardSource: context.structuredCardSource === true,
-      liveSignalCount: Number(context.liveSignalCount || 0),
+      structuredCardSource,
+      liveSignalCount: Number(context?.liveSignalCount || 0),
       verifiedAt: nowIso(evaluatedAt),
     },
     now: evaluatedAt,
@@ -350,6 +425,7 @@ export function startEventIntelMonitor({
   getEventWatchState,
   upsertEventWatchState,
   insertFighterNewsItems,
+  listUpcomingOddsEvents,
   fetchImpl = fetch,
 } = {}) {
   if (
@@ -373,6 +449,7 @@ export function startEventIntelMonitor({
       const discovered = await discoverNextEvent({
         buildWebContextForMessage,
         upsertEventWatchState,
+        listUpcomingOddsEvents,
         fetchImpl,
       });
       if (discovered?.ok) {

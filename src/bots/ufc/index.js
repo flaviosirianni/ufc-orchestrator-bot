@@ -430,6 +430,7 @@ export async function bootstrapBot({ manifest } = {}) {
     getEventWatchState,
     upsertEventWatchState,
     insertFighterNewsItems,
+    listUpcomingOddsEvents,
   });
 
   startOddsIntelMonitor({
