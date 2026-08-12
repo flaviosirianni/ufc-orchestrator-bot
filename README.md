@@ -172,7 +172,6 @@ BOT_ENV_FILE=
 OPENAI_API_KEY=sk-...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_INTERACTION_MODE=guided_strict
-GUIDED_QUOTES_TEXT_FALLBACK=true
 TELEGRAM_CALLBACK_DEDUP_WINDOW_MS=2500
 TELEGRAM_CALLBACK_DEDUP_MAX_KEYS_PER_CHAT=80
 BOT_ALLOWED_TELEGRAM_USER_IDS=
@@ -344,13 +343,17 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
   - `Ledger`
   - `Creditos`
   - `Ayuda`
-- Free-form text is blocked by default and re-routed to the guided flow, except when it looks like structured odds input.
-- Structured text fallback is controlled with `GUIDED_QUOTES_TEXT_FALLBACK=true|false`.
+- Guided routing is driven purely by which menu button was pressed (persisted session
+  state, up to 45 minutes idle), never by sniffing the shape of the message text. If
+  there is no active guided action for the chat, or it went stale, the bot shows the
+  main menu instead of trying to interpret the message. There is no structured-text
+  fallback format or toggle anymore (the old `GUIDED_QUOTES_TEXT_FALLBACK` env var was
+  removed along with the keyword-based text matching it controlled).
 - In this bot, "quotes" means sportsbook odds/cuotas for a specific fight.
-- For actionable quote analysis, the recommended input is a full screenshot of the betting page for that fight (no crop). Text fallback format: `evento, pelea, mercado, cuota`.
+- For actionable quote analysis, the recommended input is a full screenshot of the betting page for that fight (no crop); free text is also forwarded to the analysis flow once `Analizar cuotas` is the active guided action.
 - In guided ledger:
-  - `Registrar`: screenshot ticket first, text fallback `evento, pelea, pick, cuota, stake`.
-  - `Cerrar`: screenshot resultado first, text fallback `bet_id + WON/LOST/PUSH`.
+  - `Registrar`: screenshot del ticket es lo más confiable; también acepta texto libre una vez que `Registrar apuesta` es la acción guiada activa.
+  - `Cerrar`: screenshot del resultado es lo más confiable; también acepta texto libre una vez que `Cerrar apuesta` es la acción guiada activa.
   - `Pendientes` and `Historial`: consultas de lectura del ledger.
 - Rollback to previous behavior is immediate by setting `TELEGRAM_INTERACTION_MODE=hybrid` and restarting the process.
 - QA privado opcional por allowlist: `BOT_ALLOWED_TELEGRAM_USER_IDS=123,456`.

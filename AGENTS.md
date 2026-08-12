@@ -63,7 +63,10 @@ Estas reglas son para este repo y deben aplicarse por defecto cuando el usuario 
 
 - Modo guiado estricto por defecto:
   - `TELEGRAM_INTERACTION_MODE=guided_strict`
-  - `GUIDED_QUOTES_TEXT_FALLBACK=true`
+  - Ruteo puramente por boton/estado de sesion: no hay fallback por texto libre
+    (la variable `GUIDED_QUOTES_TEXT_FALLBACK` fue retirada, ya no existe en el
+    codigo). Si no hay accion guiada activa (o quedo stale, >45 min), el bot
+    muestra el menu principal en vez de intentar interpretar el texto.
 - Si se necesita rollback funcional rapido de UX:
   - pasar temporalmente a `TELEGRAM_INTERACTION_MODE=hybrid`
   - reiniciar servicio.

@@ -276,9 +276,10 @@ export async function runTelegramBotTests() {
       }),
     });
 
-    // /start establishes the default guided-action state -- a photo with no
-    // active state is now blocked (Task 2: guided-menu-unification), so a
-    // real chat always starts from /start before media routes anywhere.
+    // /start establishes the default guided-action state so this photo has
+    // something to route under (a photo with zero active state is blocked
+    // instead -- see the resolveGuidedMessageDecision unit test for
+    // hasMedia:true + activeGuidedActionState:null, Task 2: guided-menu-unification).
     await fakeBot.emit('message', createBaseMessage({ text: '/start' }));
 
     await fakeBot.emit(
@@ -311,8 +312,10 @@ export async function runTelegramBotTests() {
       }),
     });
 
-    // /start establishes the default guided-action state -- an album with no
-    // active state is now blocked (Task 2: guided-menu-unification).
+    // /start establishes the default guided-action state so this album has
+    // something to route under (see the resolveGuidedMessageDecision unit
+    // test for hasMedia:true + activeGuidedActionState:null -> block,
+    // Task 2: guided-menu-unification).
     await fakeBot.emit('message', createBaseMessage({ text: '/start' }));
 
     await fakeBot.emit(
@@ -1518,6 +1521,22 @@ export async function runTelegramBotTests() {
 
     assert.equal(decision.action, 'route');
     assert.equal(decision.guidedAction, 'analyze_quotes');
+  });
+
+  tests.push(() => {
+    // Highest-risk branch ordering: a photo (or any media) arriving at a chat
+    // with zero prior guided state must still block. The implementation checks
+    // `!activeGuidedActionState` before `hasMedia` is ever consulted, so this
+    // guards against a future reordering silently letting media bypass the
+    // "no state at all" gate. (Every other hasMedia:true test above pairs it
+    // with a non-null state -- this is the one that pins the null case.)
+    const decision = resolveGuidedMessageDecision({
+      hasMedia: true,
+      activeGuidedActionState: null,
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.action, 'block');
   });
 
   // Task 1 — guided-action state carries a setAt timestamp for staleness checks
