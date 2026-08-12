@@ -1,8 +1,8 @@
 # UFC Stabilization Handoff
 
-Actualizado: 2026-07-20
+Actualizado: 2026-08-11
 
-Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102/103 verificando y UFC-STAB-104 en progreso
+Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102/103 verificando, UFC-STAB-104 rolled back (no se completa), UFC-STAB-105 en progreso (deploy de contención)
 
 Branch: `stabilize/ufc-runtime-integrity`
 
@@ -37,10 +37,13 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 - `event_watch_state`, mirrors y snapshots productivos: el runtime existente volvió a escribir estado/snapshots dudosos; no se borró ni reescribió evidencia.
 - `ufc_stats.db`: sigue vencida, mtime `2026-04-01T18:58:10.834Z`.
 
+- Checkpoint 2026-08-11: nueva auditoría de producción confirmó exactamente los síntomas que UFC-STAB-100/101 ya contienen (UFC 329 fantasma con fecha 2026-09-12 pese a haber ocurrido el 2026-07-11, cartelera mezclada con fragmentos "Preview"/"Gregor", `current_event` pegado en `Jiri Prochazka vs Carlos Ulberg` desde 2026-04-12). Se decidió no completar UFC-STAB-104 (ver fila en BACKLOG.md): el gate fail-closed ya construido resuelve ambos síntomas por TTL/quorum sin necesitar reetiquetado manual de filas productivas. Se encontró y eliminó un intento huérfano sin commitear de esa vía (`__tests__/ufcContainment.test.js` + registro en `runTests.js`), worktree vuelto a estado limpio (`git status` sin diffs, coincide con `origin/stabilize/ufc-runtime-integrity`).
+- Plan aprobado (Fases A/B/C) en `/Users/flaviosirianniv2/.claude/plans/imperative-toasting-rainbow.md`: A = desplegar esta branch tal cual (UFC-STAB-105); B = discovery real de next_event vía Odds API (nuevo trabajo, fuera de esta branch); C = automatizar `data_scrapper` como timer diario en `ufc-oci` (nuevo trabajo, repo separado).
+
 ## Próximo paso exacto
 
-1. Continuar UFC-STAB-104 con un fixture SQLite contaminado y un test RED del CLI `ufc:containment` en modo dry-run.
-2. Implementar backup obligatorio, selección allowlisted de UFC 329/live viejo/mirrors contaminados y apply transaccional; verificar digests protegidos antes/después antes de tocar producción.
+1. Correr gates en el worktree (`npm test`, `npm run quality:gate`, `npm run qa:parity:ufc`/`prepush:ufc`) y confirmar que `ops/parity/ufc.required-keys.json` exige `EVENT_CURRENT_VERIFICATION_TTL_MS`, `EVENT_NEXT_VERIFICATION_TTL_MS`, `UFC_STATS_MAX_AGE_HOURS`.
+2. Preparar esas 3 env vars en `/etc/bot-factory/ufc.env` del server, merge `--ff-only` a `main`, deploy a `ufc-oci` con snapshot pre/post (mismo mecanismo de `docs/ufc-stabilization/evidence/2026-07-20-production-baseline.json`) y smoke no mutante. Cerrar UFC-STAB-105 → `DONE` sólo después de la verificación productiva.
 
 ## Rollback actual
 
