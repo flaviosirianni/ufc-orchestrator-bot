@@ -1417,6 +1417,61 @@ export async function runTelegramBotTests() {
     runtime.close();
   });
 
+  // Task 1 — guided-action state carries a setAt timestamp for staleness checks
+  tests.push(async () => {
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: new FakeTelegramBot(),
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    const chatId = 'chat-guided-state-fresh-1';
+    const before = Date.now();
+    const state = runtime.setGuidedActionState(chatId, 'record_bet');
+    const after = Date.now();
+
+    assert.equal(state.action, 'record_bet');
+    assert.ok(state.setAt >= before && state.setAt <= after, 'setAt debe ser el timestamp del set');
+    assert.equal(runtime.isGuidedActionFresh(chatId, { maxAgeMs: 45 * 60 * 1000 }), true);
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: new FakeTelegramBot(),
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    const chatId = 'chat-guided-state-stale-1';
+    runtime.setGuidedActionState(chatId, 'record_bet');
+    const state = runtime.getGuidedActionState(chatId);
+    state.setAt = Date.now() - 46 * 60 * 1000; // simula 46 minutos de inactividad
+
+    assert.equal(runtime.isGuidedActionFresh(chatId, { maxAgeMs: 45 * 60 * 1000 }), false);
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    const runtime = startTelegramBot(createRouterSpy(), {
+      botInstance: new FakeTelegramBot(),
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    assert.equal(
+      runtime.isGuidedActionFresh('chat-never-set-1', { maxAgeMs: 45 * 60 * 1000 }),
+      false
+    );
+    runtime.close();
+  });
+
   for (const test of tests) {
     await test();
   }

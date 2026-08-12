@@ -61,6 +61,7 @@ const TELEGRAM_INTERACTION_MODE = normalizeInteractionMode(
 );
 const GUIDED_QUOTES_TEXT_FALLBACK =
   String(process.env.GUIDED_QUOTES_TEXT_FALLBACK ?? 'true').toLowerCase() !== 'false';
+const GUIDED_ACTION_MAX_AGE_MS = Number(process.env.GUIDED_ACTION_MAX_AGE_MS ?? String(45 * 60 * 1000));
 const GUIDED_INPUT_ACTIONS = new Set([
   'analyze_quotes',
   'record_bet',
@@ -1738,24 +1739,25 @@ export function startTelegramBot(router, options = {}) {
     return normalized;
   }
 
-  function getGuidedAction(chatId) {
+  // Task 1 (guided-menu-unification): guided-action state now carries a setAt
+  // timestamp so later tasks can detect a chat's guided action has gone stale
+  // (idle beyond GUIDED_ACTION_MAX_AGE_MS) and fall back to the main menu
+  // instead of guessing intent from message text.
+  function getGuidedActionState(chatId) {
     const key = String(chatId || '').trim();
-    if (!key) return defaultGuidedAction;
-    const current = normalizeGuidedAction(guidedActionByChat.get(key) || defaultGuidedAction, {
-      defaultAction: defaultGuidedAction,
-    });
-    if (
-      !guidedLedgerEnabled &&
-      (current === 'record_bet' || current === 'settle_bet')
-    ) {
-      return defaultGuidedAction;
-    }
-    return current;
+    if (!key) return null;
+    return guidedActionByChat.get(key) || null;
   }
 
-  function setGuidedAction(chatId, action = defaultGuidedAction) {
+  function isGuidedActionFresh(chatId, { maxAgeMs = GUIDED_ACTION_MAX_AGE_MS } = {}) {
+    const state = getGuidedActionState(chatId);
+    if (!state || !Number.isFinite(state.setAt)) return false;
+    return Date.now() - state.setAt <= maxAgeMs;
+  }
+
+  function setGuidedActionState(chatId, action = defaultGuidedAction, fightContext = null) {
     const key = String(chatId || '').trim();
-    if (!key) return defaultGuidedAction;
+    if (!key) return { action: defaultGuidedAction, fightContext: null, setAt: Date.now() };
     let normalized = normalizeGuidedAction(action, {
       defaultAction: defaultGuidedAction,
     });
@@ -1765,8 +1767,19 @@ export function startTelegramBot(router, options = {}) {
     ) {
       normalized = defaultGuidedAction;
     }
-    guidedActionByChat.set(key, normalized);
-    return normalized;
+    const state = { action: normalized, fightContext: fightContext || null, setAt: Date.now() };
+    guidedActionByChat.set(key, state);
+    return state;
+  }
+
+  // Thin 2-arg wrappers kept for backward compatibility: every existing
+  // caller in this file (message/callback handlers) keeps working unchanged.
+  function getGuidedAction(chatId) {
+    return getGuidedActionState(chatId)?.action || defaultGuidedAction;
+  }
+
+  function setGuidedAction(chatId, action = defaultGuidedAction) {
+    return setGuidedActionState(chatId, action).action;
   }
 
   function buildCallbackDedupKey({ data = '', messageId = '', userId = '' } = {}) {
@@ -3373,6 +3386,9 @@ export function startTelegramBot(router, options = {}) {
   return {
     bot,
     interactionMode,
+    getGuidedActionState,
+    isGuidedActionFresh,
+    setGuidedActionState,
     getRuntimeStatus() {
       const nowMs = Date.now();
       return {
