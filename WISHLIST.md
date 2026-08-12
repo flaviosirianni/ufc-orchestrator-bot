@@ -28,7 +28,7 @@ Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UF
 ### Estructura actual del backlog
 
 - **Plataforma/Billing (cross-bot):** items 1, 2, 3, 8, 9, 11, 13, 14, 20, 29, 34, 35, 37.
-- **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 38, 39, 40, 41, 42.
+- **UFC (dominio apuestas):** items 4, 5, 6, 7, 10, 12, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 38, 39, 40, 41, 42, 43.
 - **Nutrition (dominio nutricion):** item 36 (mas backlog incremental a crear en esta seccion en siguientes iteraciones).
 
 ### Leyenda de estado
@@ -1501,3 +1501,36 @@ Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UF
      - El cierre de runtime queda en `WAITING_OBSERVATION` durante el soak de siete dias.
    - **Prioridad:** critico.
    - **Estado:** en progreso. El detalle por item, evidencia y proximo paso vive en `docs/ufc-stabilization/BACKLOG.md`.
+
+43. **Seccion "Historial": consulta de datos deportivos viejos por evento, peleador o pelea**
+   - **Objetivo de negocio/UX:** poder consultar informacion historica (no solo del evento actual/proximo) desde el bot, buscando por evento especifico, por peleador o por cruce puntual, sin depender de que el dato este "activo" en el ciclo actual.
+   - **Problema observado (ejemplo real):**
+     - Hoy `Evento` (item 40) resuelve navegar el evento actual/proximo y propone un archivo de "eventos pasados" como lista cronologica, pero no cubre busqueda por peleador (ej. "mostrame el historial de Fighter X" cruzando todos sus eventos) ni busqueda directa por cruce puntual sin pasar por la lista de eventos.
+     - Con `ufc_stats.db` ahora manteniendose fresca via timer diario (ver `docs/ufc-stabilization/BACKLOG.md`, UFC-STAB-200/201/202/203), el dataset historico real (5288+ peleas, 2016-2026) ya esta disponible y confiable como fuente — falta la capa de consulta conversacional/guiada sobre el.
+   - **Comportamiento deseado para el usuario final:**
+     - Nueva entrada de menu "🗂 Historial" (top-level o dentro de `Evento`, a definir en diseno) con tres formas de buscar:
+       - **Por evento:** elegir un evento pasado (lista/busqueda) y ver su cartelera completa con resultados.
+       - **Por peleador:** buscar un nombre y ver su historial de peleas (resultado, metodo, fecha, evento) ordenado cronologicamente.
+       - **Por pelea puntual:** dado un cruce (Fighter A vs Fighter B), ver el resultado y detalle de esa pelea especifica si existe en el dataset.
+     - Resultados con paginacion/resumen (no volcar tablas crudas largas) y opcion de "ver mas detalle" por pelea individual.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Fuente de datos: `ufc_stats.db` (`fights`, `fight_rounds`) via `ufcStatsTool.js`, ya expone `getFighterStats`/`getFightHistoryRows` — evaluar si alcanzan o hace falta una query nueva orientada a busqueda por evento completo.
+     - Nuevas funciones de tool/lookup sugeridas: `search_historical_events`, `search_fighter_history`, `search_historical_fight` (nombres tentativos, definir en diseno formal).
+     - Reusar el mecanismo de `fight_id` + botones contextuales acordado en el diseno de unificacion de menus (`docs/superpowers/specs/2026-08-12-ledger-menu-unification-design.md`) para que, si el peleador buscado tiene pelea en el evento actual/proximo, tambien aparezca la accion "Registrar apuesta"/"Analizar quotes" desde el resultado historico.
+     - Coordinar con item 40 (archivo de eventos pasados dentro de `Evento`): decidir si "Historial" es una seccion nueva top-level o si absorbe/reemplaza la sub-rama de archivo de item 40 para no duplicar UI.
+   - **Criterios de aceptacion verificables:**
+     - Se puede buscar un evento pasado por nombre/fecha aproximada y ver su cartelera + resultados completos.
+     - Se puede buscar un peleador por nombre (con tolerancia a acentos/variantes) y ver su historial cronologico.
+     - Se puede consultar un cruce puntual (Fighter A vs Fighter B) y obtener resultado si existe en el dataset.
+     - Ninguna consulta historica muta el ledger ni dispara `record_user_bet`/`mutate_user_bets` por si sola.
+   - **Pruebas de regresion necesarias:**
+     - Busqueda por evento con nombre parcial/variantes de escritura.
+     - Busqueda por peleador con multiples resultados vs. peleador inexistente.
+     - Busqueda de cruce puntual existente vs. inexistente (mensaje claro de "no encontrado", no error crudo).
+     - Paginacion con peleador de historial muy largo (ej. veteranos con 20+ peleas en el dataset).
+   - **Riesgos y decisiones abiertas:**
+     - Decision abierta: "Historial" como entrada propia del menu principal, o sub-rama dentro de `Evento` (coordinar con item 40).
+     - Decision abierta: alcance de matching de nombres (exacto vs. fuzzy/tolerante a apodos).
+     - Nota: `method_detail` esta vacio en el 100% del dataset historico (2016-2026) — hallazgo de la sesion 2026-08-12, fix ya aplicado hacia adelante en `data_scrapper` (commit `68ee49b`), backfill historico pendiente de decision de costo/beneficio. La vista de "Historial" va a mostrar ese campo vacio para datos viejos hasta que se decida el backfill.
+   - **Prioridad:** media.
+   - **Estado:** pendiente. Este item se agrego a pedido explicito del usuario durante la sesion 2026-08-12 (brainstorming de unificacion de menus); desarrollo diferido a una iteracion futura.
