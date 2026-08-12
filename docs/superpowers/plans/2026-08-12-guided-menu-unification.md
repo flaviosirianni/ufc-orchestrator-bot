@@ -794,7 +794,31 @@ In `buildSystemPrompt` (the function containing `interactionRules`, read fully a
 
 This replaces the existing two ternary lines in that array (the `analyze_quotes` one is currently the *first* entry in the array per the code read earlier this session — keep it first, just extend its condition; don't reorder the array).
 
-Find wherever `buildSystemPrompt(...)` is invoked inside `handleMessage` (search `grep -n "buildSystemPrompt(" src/agents/bettingWizard.js`) and pass `fightContext` from `handleMessage`'s own params through to it (add `fightContext` to `handleMessage`'s destructured parameter list at its definition, and pass it into the `buildSystemPrompt({...})` call alongside the existing `interactionMode`/`guidedAction` arguments).
+**Verified ground truth (corrects an assumption in the original plan):** `handleMessage` is declared as `async function handleMessage(message, context = {})` (`src/agents/bettingWizard.js:5972`) — `context` is a single plain parameter, **not destructured** at the signature. Fields are pulled out of it individually inside the function body instead, e.g. (already present, a few lines into the function):
+
+```js
+const guidedActionRaw = String(
+  context.guidedAction || context?.metadata?.guidedAction || ''
+);
+```
+
+Add a matching line right after the existing `guidedAction`/`inputType` extraction lines near the top of `handleMessage`:
+
+```js
+const fightContext = context.fightContext || context?.metadata?.fightContext || null;
+```
+
+This checks both shapes for the same reason the existing `guidedAction` line does: `routerChain.js`'s call (Step 1 above) will set `fightContext` as an explicit top-level property, but `context.metadata` is also the raw router input object (`routerChain.js`'s `parseRouteInput` sets `metadata: input` verbatim), so the defensive fallback costs nothing and matches the file's existing convention.
+
+Then find wherever `buildSystemPrompt(...)` is invoked inside `handleMessage` (search `grep -n "buildSystemPrompt(loadKnowledgeSnippet" src/agents/bettingWizard.js` — it's at line 9081) and pass the new `fightContext` variable into it, alongside the existing `interactionMode`/`guidedAction` arguments:
+
+```js
+      const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet(), {
+        interactionMode,
+        guidedAction,
+        fightContext,
+      });
+```
 
 - [ ] **Step 5: Run test to verify it passes**
 
