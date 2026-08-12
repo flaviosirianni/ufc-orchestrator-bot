@@ -1534,3 +1534,28 @@ Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UF
      - Nota: `method_detail` esta vacio en el 100% del dataset historico (2016-2026) — hallazgo de la sesion 2026-08-12, fix ya aplicado hacia adelante en `data_scrapper` (commit `68ee49b`), backfill historico pendiente de decision de costo/beneficio. La vista de "Historial" va a mostrar ese campo vacio para datos viejos hasta que se decida el backfill.
    - **Prioridad:** media.
    - **Estado:** pendiente. Este item se agrego a pedido explicito del usuario durante la sesion 2026-08-12 (brainstorming de unificacion de menus); desarrollo diferido a una iteracion futura.
+
+44. **Bug (Ovidius/medical_reader): `GUIDED_INPUT_ACTIONS` nunca incluyo las acciones `med_*`, texto libre despues de un boton cae a un fallback generico inutil**
+   - **Objetivo de negocio/UX:** que un usuario de Ovidius (bot medico) que aprieta cualquier boton `med_*` y despues manda texto libre reciba una respuesta real, no un mensaje generico de "Selecciona una opcion del menu".
+   - **Problema observado (hallazgo de la sesion 2026-08-12, durante implementacion de la unificacion de menus del bot UFC):**
+     - `GUIDED_INPUT_ACTIONS` (`src/core/telegramBot.js`, ~linea 64) es la whitelist que valida toda accion guiada; nunca contuvo ninguna de las ~22 acciones `med_*` de Ovidius — confirmado con `git show 9ca8905:src/core/telegramBot.js`, un commit anterior a cualquier cambio de esta sesion, asi que es un bug preexistente, no introducido por la unificacion de menus.
+     - Efecto en cascada: al apretar un boton `med_*` (ej. `med_upload_document`), `setGuidedActionState` ya lo coacciona silenciosamente a `med_free_chat` (default de Ovidius) porque el nombre real no esta en la whitelist. Como `med_free_chat` **tampoco** esta en la whitelist, un segundo llamado a `normalizeGuidedAction` (dentro de `resolveGuidedMessageDecision`) lo vuelve a coaccionar, esta vez al default hardcodeado `'analyze_quotes'` (un nombre de accion especifico de UFC, sin sentido para Ovidius).
+     - El router de Ovidius (`src/bots/ovidius_medibot/runtime.js`) rutea por match exacto de string contra `guidedAction` (`if (guidedAction === 'med_upload_document' ...)`, `isChatAction = ['med_free_chat', ...].includes(guidedAction)`); `'analyze_quotes'` no matchea nada, entonces cae al fallback generico `'Selecciona una opcion del menu para comenzar.'`.
+     - Antes de la unificacion de menus, este bug estaba enmascarado por otro: el texto libre de Ovidius nunca pasaba el cascade de regexes de keywords UFC (`@2.10`, `moneyline`, `stake`, etc. — texto medico nunca matchea), asi que el mensaje quedaba bloqueado con un hint especifico de la accion ("Describime el sintoma...") en vez de llegar al router con el `guidedAction` mal coaccionado. Al sacar ese cascade de keywords (fix correcto para UFC), el texto de Ovidius ahora si llega al router, pero con un `guidedAction` incorrecto heredado del bug preexistente — el resultado neto es un fallback generico peor redactado que el hint anterior, no una mejora.
+     - Subida de documentos (`hasMedia: true`) ya estaba rota de forma identica antes de esta sesion (verificado contra el commit padre) — no es un cambio introducido ahora.
+   - **Comportamiento deseado para el usuario final:** texto libre despues de cualquier boton `med_*` produce una respuesta relevante del bot medico, no un fallback generico.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Opcion A: extender `GUIDED_INPUT_ACTIONS` para incluir las ~22 acciones `med_*` reales (relevar la lista completa en `src/bots/ovidius_medibot/runtime.js`/menus de Ovidius antes de tocar la whitelist compartida).
+     - Opcion B (mas aislada, mismo patron que Nutrition): darle a Ovidius su propio normalizador de accion guiada, en vez de compartir `normalizeGuidedAction`/`GUIDED_INPUT_ACTIONS` con UFC/Nutrition.
+     - Cualquiera de las dos requiere relevar primero el conjunto completo de acciones `med_*` y su UX esperada — no evaluado en profundidad durante esta sesion (el foco era exclusivamente el bot UFC).
+   - **Criterios de aceptacion verificables:**
+     - Apretar cada boton `med_*` y mandar texto libre produce una respuesta on-topic, nunca el fallback generico.
+     - `setGuidedActionState`/`resolveGuidedMessageDecision` no coaccionan silenciosamente ninguna accion `med_*` real a `analyze_quotes` ni a `med_free_chat` cuando la accion real es otra.
+   - **Pruebas de regresion necesarias:**
+     - Cobertura directa de `resolveGuidedMessageDecision({guidedMenuId: 'ovidius_v1', ...})` para al menos las acciones `med_*` mas usadas — hoy no existe ninguna (confirmado: cero tests con `guidedMenuId: 'ovidius_v1'` en `__tests__/telegramBot.test.js` a la fecha de este hallazgo).
+     - Caso de subida de documento (`hasMedia: true`) con accion `med_*` activa.
+   - **Riesgos y decisiones abiertas:**
+     - No tocar la whitelist compartida (`GUIDED_INPUT_ACTIONS`) sin relevar el impacto en UFC/Nutrition primero — es una constante compartida entre las tres personalidades de bot.
+     - Bug independiente del alcance de la unificacion de menus del bot UFC; no se corrigio en esa sesion a proposito, para no tocar un bot medico en produccion sin revision dedicada.
+   - **Prioridad:** media (afecta UX de un bot en produccion, pero no hay riesgo de datos/dinero — Ovidius no maneja ledger).
+   - **Estado:** pendiente. Hallado y documentado durante la sesion 2026-08-12 (implementacion de `docs/superpowers/plans/2026-08-12-guided-menu-unification.md`, Tasks 2-3); deliberadamente no corregido en esa sesion por estar fuera de alcance.
