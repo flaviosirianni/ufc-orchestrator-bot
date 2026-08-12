@@ -555,15 +555,12 @@ Expected: `All test suites passed.`
 
 **Files:**
 - Modify: `src/core/telegramBot.js`
+- Modify: `src/bots/ufc/index.js`
 - Test: `__tests__/telegramBot.test.js`
 
-This function needs read access to whatever store already resolves `mainCard`/fight snapshots by event. `telegramBot.js` is constructed with a `userStore`-like dependency injected from `src/bots/ufc/index.js` — confirm the exact injected object's shape and existing fight-lookup capability before writing this function:
+**Verified ground truth (checked directly against the code in this worktree, corrects an assumption in the original plan):** `telegramBot.js` has **no store access at all** today — it imports nothing from `sqliteStore.js` and receives no `userStore`-shaped option. Its exported entry point is `export function startTelegramBot(router, options = {})` (`src/core/telegramBot.js:1536`), **not** `createTelegramBot` — there is no function by that name anywhere in this file. All data access happens indirectly through `router.routeMessage(...)`.
 
-```bash
-grep -n "createTelegramBot(" src/bots/ufc/index.js
-```
-
-This will show the call site with all injected dependencies. Look specifically for whether `getEventFightMirror`, `getEventWatchState`, or a similar function is already passed in (both exist per the DB schema explored this session — `event_fight_mirror`, `event_watch_state` — and are very likely already injected, since other parts of `telegramBot.js`/`bettingWizard.js` use fight mirrors). Read `src/core/sqliteStore.js` for the exact exported function signature (`grep -n "export function getEventFightMirror" src/core/sqliteStore.js`).
+`src/bots/ufc/index.js` is the composition root. It already builds a `verifiedEventStoreView` (`createVerifiedEventStoreView`, defined at `src/bots/ufc/index.js:144-185`) that wraps raw `sqliteStore.getEventFightMirror`/`getEventWatchState` with the `EventTruthGate` fail-closed verification checks — `verifiedEventStoreView.getEventFightMirror(watchKey)` returns `[]` when the underlying event data isn't verified, and the same array-of-`{fightId, fighterA, fighterB, ...}` shape as the raw function otherwise. This exact object is already handed to `bettingWizard` as part of its `userStore` (`src/bots/ufc/index.js:311,316-317`: `getEventWatchState: verifiedEventStoreView.getEventWatchState`, `getEventFightMirror: verifiedEventStoreView.getEventFightMirror`). The correct fix threads the *same* verified functions into `startTelegramBot`'s `options` too, so the Telegram layer gets identical fail-closed semantics instead of a separate, unverified read path.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -641,31 +638,84 @@ export function getFightContextByIdForStore(store, fightId) {
 }
 ```
 
-Inside the `createTelegramBot` closure (near `getGuidedActionState` from Task 1, since it's used alongside it), add the thin wrapper Task 4 calls:
+Inside the `startTelegramBot(router, options = {})` closure, near the top where other `options.*` destructuring happens (alongside `guidedLedgerEnabled`, `guidedMenuId`, etc. around line 1545), read the two new options:
+
+```js
+  const getEventFightMirrorOption =
+    typeof options.getEventFightMirror === 'function' ? options.getEventFightMirror : null;
+  const getEventWatchStateOption =
+    typeof options.getEventWatchState === 'function' ? options.getEventWatchState : null;
+```
+
+Then, near `getGuidedActionState` (added in Task 1), add the thin wrapper Task 4 calls:
 
 ```js
   function getFightContextById(fightId) {
-    return getFightContextByIdForStore(userStore, fightId);
+    return getFightContextByIdForStore(
+      { getEventFightMirror: getEventFightMirrorOption, getEventWatchState: getEventWatchStateOption },
+      fightId
+    );
   }
 ```
 
-Confirm the closure's injected store parameter is actually named `userStore` (it almost certainly is, given every other `userStore.X` call already in this file — verify with `grep -n "userStore\." src/core/telegramBot.js | head -5`; if the actual injected variable has a different name in this file, use that name instead).
+`getFightContextByIdForStore` only calls `store.getEventFightMirror(watchKey)`/`store.getEventWatchState(watchKey)` (see its Step 3 implementation above) — it doesn't care whether `store` is a real database object or this small shim, so no changes are needed to that function.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Wire the verified event store into `startTelegramBot`'s options**
+
+In `src/bots/ufc/index.js`, the `startTelegramBot(router, {...})` call (around line 396, after Task 1-3's edits may have shifted nearby lines slightly — find it fresh with `grep -n "startTelegramBot(router" src/bots/ufc/index.js`) currently reads:
+
+```js
+  const telegram = telegramToken
+    ? startTelegramBot(router, {
+        interactionMode:
+          manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
+        token: telegramToken,
+      })
+    : createDisabledTelegramRuntime({
+        botId,
+        tokenEnvName,
+      });
+```
+
+Add the two verified-store functions (the same `verifiedEventStoreView` instance already built at line 226 and already used for `bettingWizard`'s `userStore`, so this reuses the existing fail-closed verification instead of adding a second, separately-behaved read path):
+
+```js
+  const telegram = telegramToken
+    ? startTelegramBot(router, {
+        interactionMode:
+          manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
+        token: telegramToken,
+        getEventFightMirror: verifiedEventStoreView.getEventFightMirror,
+        getEventWatchState: verifiedEventStoreView.getEventWatchState,
+      })
+    : createDisabledTelegramRuntime({
+        botId,
+        tokenEnvName,
+      });
+```
+
+`verifiedEventStoreView` must already be in scope at this point in the function (it's built earlier, at line 226, before this call site) — confirm with `grep -n "verifiedEventStoreView" src/bots/ufc/index.js` that its declaration comes before line ~396; if for some reason it doesn't (e.g. line numbers shifted), move nothing else — just confirm ordering, since `const` declarations must precede use.
+
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `node __tests__/telegramBot.test.js`
 Expected: PASS — both this task's tests and Task 4's test (now that `getFightContextById` exists).
 
-- [ ] **Step 5: Run full suite**
+- [ ] **Step 6: Run full suite**
 
 Run: `npm test`
 Expected: `All test suites passed.`
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/core/telegramBot.js __tests__/telegramBot.test.js
-git commit -m "feat(ufc): resolve fight_id to fighter/event context for contextual buttons"
+git add src/core/telegramBot.js src/bots/ufc/index.js __tests__/telegramBot.test.js
+git commit -m "feat(ufc): resolve fight_id to fighter/event context for contextual buttons
+
+Threads the same verifiedEventStoreView already used for bettingWizard's
+userStore into startTelegramBot's options, so the Telegram layer's
+fight_id -> fighter/event lookup gets identical EventTruthGate
+fail-closed semantics instead of a separate unverified read path."
 ```
 
 ---
@@ -773,8 +823,25 @@ This is additive: existing single-string replies are completely unaffected. Only
 
 **Files:**
 - Modify: `src/core/routerChain.js` (`unpackAgentResult`, `routeMessage`'s return)
-- Modify: `src/core/telegramBot.js` (`deliverToRouter`)
+- Modify: `src/core/telegramBot.js` (`deliverToRouter`, `routeSyntheticAction`)
+- Modify: `src/bots/ufc/index.js` (the `router` wrapper object)
 - Test: `__tests__/routerChain.test.js`, `__tests__/telegramBot.test.js`
+
+**Verified ground truth (corrects an assumption in the original plan):** `telegramBot.js` never calls `routerChain.js`'s `routeMessage` directly. `startTelegramBot(router, options)` receives whatever `router` object its caller passes in, and `src/bots/ufc/index.js:383-391` passes a **wrapper**, not the raw router:
+
+```js
+  const router = {
+    async routeMessage(input = '') {
+      const reply = await rawRouter.routeMessage(input);
+      return enforcePolicyPack({
+        text: reply,
+        policyPackId: manifest?.risk_policy || 'general_safe_advice',
+      });
+    },
+  };
+```
+
+`enforcePolicyPack({text, policyPackId})` (`src/platform/policy/policyGuard.js:9`) does `String(text || '').trim()` and returns a **plain string**. Two consequences if this wrapper is left untouched: (1) once `rawRouter.routeMessage` starts returning `{text, replies}` objects (Step 3 below), `text: reply` here would pass the whole object into `String(text || '')`, stringifying it to the literal text `"[object Object]"` and shipping that to real users; (2) even after fixing that, `deliverToRouter`'s new code (Step 4 below) reads `routed?.text` — if this wrapper still returned a bare string instead of an object, `routed?.text` would be `undefined` on **every** existing UFC reply (not just the new multi-message ones), and `deliverToRouter` would silently send "No tengo respuesta para eso aún 😅" instead of the real reply. Step 5 below fixes this wrapper as part of the same change — it is not optional cleanup, the feature does not work end-to-end without it despite `routerChain.test.js`/`telegramBot.test.js` passing (those tests never exercise this wrapper).
 
 - [ ] **Step 1: Write the failing test for `routerChain.js`**
 
@@ -877,26 +944,91 @@ Replace the reply-sending block at the end of `deliverToRouter` (lines ~2195-219
 
 (The `user`/`chat` object literals are unchanged from what's already there — shown abbreviated here only to keep this step focused on the reply-handling change; do not actually delete their contents.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+Also fix `routeSyntheticAction` (`src/core/telegramBot.js:2037-2048`, confirmed at this exact location in the worktree), which currently does:
+
+```js
+    return router.routeMessage({
+      chatId: String(chatId),
+      message: syntheticMessage,
+      interactionMode,
+      guidedAction: metadata.guidedAction || null,
+      inputType: metadata.inputType || null,
+      user: {
+```
+
+Change the `return router.routeMessage({` line to assign the result to a variable, and add an unwrap after the existing call's closing `);` (keep every argument inside the call exactly as-is — only the `return` becomes an assignment, and a new line is added after):
+
+```js
+    const routed = await router.routeMessage({
+      chatId: String(chatId),
+      message: syntheticMessage,
+      interactionMode,
+      guidedAction: metadata.guidedAction || null,
+      inputType: metadata.inputType || null,
+      user: {
+        /* ...unchanged, same as today... */
+      },
+      /* ...any other unchanged arguments already in this call... */
+    });
+    return routed?.text || null;
+```
+
+This preserves `routeSyntheticAction`'s existing string-or-null contract for its own callers (the `qa:list_pending`/`qa:list_history` callback handlers, which do `await sendBotMessage(chatId, routed || '...', ...)` expecting a plain string) — it never produces `replies[]` itself (synthetic actions like "list pending bets" aren't part of this feature), it just needs to unwrap the now-object-shaped result instead of returning it raw.
+
+- [ ] **Step 5: Fix the UFC bootstrap wrapper in `src/bots/ufc/index.js`**
+
+Replace the wrapper (`src/bots/ufc/index.js:383-391`, exact current code quoted above) with a version that passes `replies` through and — critically — always returns an object shape (`{text, replies}`), never a bare string, so `deliverToRouter`'s `routed?.text` (Step 4) and `routeSyntheticAction`'s `routed?.text` (this step, above) both keep working for the ordinary single-reply case too, not just the new multi-message one:
+
+```js
+  const router = {
+    async routeMessage(input = '') {
+      const raw = await rawRouter.routeMessage(input);
+      const rawResult = raw && typeof raw === 'object' ? raw : { text: raw, replies: null };
+      const policyPackId = manifest?.risk_policy || 'general_safe_advice';
+
+      if (Array.isArray(rawResult.replies) && rawResult.replies.length) {
+        return {
+          text: enforcePolicyPack({ text: rawResult.text, policyPackId }),
+          replies: rawResult.replies.map((entry) => ({
+            text: enforcePolicyPack({ text: entry?.text, policyPackId }),
+            replyMarkup: entry?.replyMarkup || null,
+          })),
+        };
+      }
+
+      return {
+        text: enforcePolicyPack({ text: rawResult.text, policyPackId }),
+        replies: null,
+      };
+    },
+  };
+```
+
+Every reply's text (both the single-reply case and each entry in `replies[]`) goes through `enforcePolicyPack` individually — this preserves today's guarantee that policy notices get appended to whatever text reaches the user, now applied per-message instead of once.
+
+- [ ] **Step 6: Run tests to verify they pass**
 
 Run: `node __tests__/routerChain.test.js && node __tests__/telegramBot.test.js`
 Expected: PASS on both.
 
-- [ ] **Step 6: Run full suite**
+- [ ] **Step 7: Run full suite**
 
 Run: `npm test`
-Expected: `All test suites passed.` — pay special attention to any test elsewhere that calls `router.routeMessage(...)` and asserts on its return value directly as a string; per Step 3's caller audit, fix any such test to read `.text` instead.
+Expected: `All test suites passed.` — pay special attention to any test elsewhere that calls `router.routeMessage(...)` and asserts on its return value directly as a string; per Step 3's caller audit, fix any such test to read `.text` instead. Also check for any existing test of `src/bots/ufc/index.js`'s bootstrap wrapper itself (`grep -n "routeMessage\|enforcePolicyPack" __tests__/*.js` for one that constructs this specific `router` object) and update its assertions from a bare-string return to the new `{text, replies}` shape.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/core/routerChain.js src/core/telegramBot.js __tests__/routerChain.test.js __tests__/telegramBot.test.js
+git add src/core/routerChain.js src/core/telegramBot.js src/bots/ufc/index.js __tests__/routerChain.test.js __tests__/telegramBot.test.js
 git commit -m "feat(ufc): support sending multiple Telegram messages from one wizard turn
 
 Additive: bettingWizard can now return {replies: [{text, replyMarkup}]}
 instead of a single {reply}. Every existing single-reply intent is
-unaffected -- routeMessage now returns {text, replies}, and callers
-that only ever read a plain string (routeSyntheticAction) unwrap .text
+unaffected -- routeMessage now returns {text, replies} end-to-end
+(routerChain.js's raw return AND the UFC bootstrap's enforcePolicyPack
+wrapper in src/bots/ufc/index.js, which previously collapsed
+everything to a bare string), and callers that only ever read a plain
+string (routeSyntheticAction) unwrap .text
 to keep their existing contract."
 ```
 
