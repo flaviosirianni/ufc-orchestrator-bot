@@ -2,11 +2,11 @@
 
 Actualizado: 2026-08-12
 
-Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102/103/105 desplegados, en observación 24h (hasta ~2026-08-13 02:10 UTC); UFC-STAB-104 rolled back. Etapa 2 (fuentes deportivas / Fase B) lista para arrancar.
+Estado general: Etapa 0 cerrada; UFC-STAB-100/101/102/103/105 desplegados, en observación 24h (hasta ~2026-08-13 02:10 UTC); UFC-STAB-104 rolled back. Etapa 2 en progreso: UFC-STAB-204 desplegado (next_event vía Odds API), en observación; UFC-STAB-205 parcial. Etapa 2 completa pendiente de Fase C (stats frescas).
 
-Branch: `stabilize/ufc-runtime-integrity` (mergeada a `main` por fast-forward)
+Branches: `stabilize/ufc-runtime-integrity` (Fase A, mergeada a `main` por fast-forward) + `feature/ufc-odds-event-discovery` (Fase B, mergeada a `main` por fast-forward)
 
-Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `5d504622cdb319aa17da3b6a31e48ec5a582add6`
+Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `40bc35772d248b3003b833a4058660c05d4cbe3c`
 
 ## Último checkpoint
 
@@ -34,20 +34,23 @@ Producción modificada durante esta ejecución: sí; `main`/OCI desplegados en `
 - **Deploy de contención ejecutado 2026-08-12 02:09:56 UTC** (commit `5d50462`, ff-only desde `1323308`): `ops/parity/ufc.required-keys.json` actualizado con las 3 env vars nuevas; agregadas a `/etc/bot-factory/ufc.env` del server (backup en `/etc/bot-factory/ufc.env.bak_20260812`); `npm test`/`quality:gate`/`qa:parity:ufc` en verde antes de mergear (nota: hubo que instalar `ripgrep` local, faltaba el binario y rompía `check-quality-pack.sh`, no relacionado al código). `git pull` + `systemctl restart bot-factory@ufc` en el server; `/health` respondió 200 a los 50s.
 - Verificación productiva post-deploy: `/health` → `current_event`/`next_event` con `confidence:"invalid"`, `consumer_allowed:false`. Ciclo inicial de `preFightAnalysis` post-restart insertó **0** filas nuevas en snapshots (vs. 4+12 antes del deploy). Ledger idéntico al baseline 2026-07-20 (`bets=49, bet_mutations=52, credit_transactions=27, mp_processed_payments=1, ledger_summary=2`). Snapshot pre/post (`ufcOperationalSnapshot.js`) con `protected_tables` idénticos y `missing_protected_tables=[]` en ambos. Sin excepciones nuevas en journal.
 - Hallazgo menor no bloqueante (abierto, sin dueño todavía): `/health.billing` reporta `status:"disabled"/reason:"billing_not_configured"` pese a que billing real funciona (confirmado con `GET /topup/config` → `enabled:true` en el mismo proceso, mismo `billingClient`). Bug cosmético aislado a `summarizeBilling()`/`getHealthStatus()` en `ufcHealthStatus.js`/`billingApiClient.js` — revisado en profundidad (env var confirmada en `/proc/<pid>/environ`, módulo aislado reproduce `enabled:true` con el mismo env), causa raíz no encontrada todavía. No afecta cobros/creditos reales. Anotado para investigar aparte, fuera del alcance de las Fases A/B/C.
+- **Fase B ejecutada 2026-08-12** en branch `feature/ufc-odds-event-discovery`, commit `40bc357` (ff-only desde `5d50462`, mergeada a `main` y pusheada). TDD real: cada función nueva tuvo test RED antes de implementar (`resolveNextEventFromOddsRows` en `__tests__/oddsEventResolver.test.js`; casos de integración en `__tests__/eventIntel.test.js` y dos tests nuevos en `__tests__/bettingWizard.test.js` para los sitios de escritura de `current_event`). `npm test`/`quality:gate`/`qa:parity:ufc` verdes antes de mergear (tracker +4 símbolos, Q-0111..Q-0114).
+- Deploy Fase B: snapshot pre/post con `protected_tables` idénticos y `missing_protected_tables=[]`; ledger sin drift (49/52/27/1/2, igual a Fase A); journal sin excepciones nuevas. `/health` confirma `next_event.event_name = "UFC: Islam Makhachev vs Ian Garry"`, `event_date_utc = "2026-08-15"` — el evento real (verificado contra fuentes externas antes de escribir código), reemplazando la UFC 329 fantasma. Queda en `degraded` (`compatible_source_count=1`) porque la corroboración de Google News no coincidió en este primer ciclo; el discovery reintenta cada 6h y debería subir a `verified` con más cobertura de noticias según se acerca la fecha (15-ago). Si en 1-2 días sigue en `degraded`, revisar `webCorroboratesOddsMainEvent()` en `eventIntel.js` (matching por apellido puede estar fallando contra el fraseo real de los titulares).
 
 ## Estado de datos protegido
 
-- Ledger productivo: sin cambios entre baseline 2026-07-20 y post-deploy 2026-08-12 (49 apuestas, 52 mutaciones, 27 movimientos locales, 2 resúmenes, 1 pago; conteos idénticos, `protected_tables` sin faltantes).
-- Billing productivo: servicio activo sin reiniciar en este deploy (sólo `bot-factory@ufc` se reinició); DB no migrada ni reconciliada en esta etapa.
-- `event_watch_state`, mirrors y snapshots productivos: las filas contaminadas (UFC 329, `current_event` viejo) se conservan sin purgar como evidencia histórica; el runtime dejó de escribir snapshots nuevos a partir de ellas.
-- `ufc_stats.db`: sigue vencida, mtime `2026-04-01T18:58:10.834Z` (`age_hours=3175` reportado por `/health` al momento del deploy) — pendiente de Fase C.
+- Ledger productivo: sin cambios entre baseline 2026-07-20 y los dos deploys de 2026-08-12 (49 apuestas, 52 mutaciones, 27 movimientos locales, 2 resúmenes, 1 pago; conteos idénticos, `protected_tables` sin faltantes en ambos).
+- Billing productivo: servicio activo, no reiniciado en ninguno de los dos deploys (sólo `bot-factory@ufc` se reinició); DB no migrada ni reconciliada en esta etapa.
+- `event_watch_state`, mirrors y snapshots productivos: las filas contaminadas (UFC 329, `current_event` viejo) se conservan sin purgar como evidencia histórica; el runtime dejó de escribir snapshots nuevos a partir de ellas y ahora reconcilia `next_event` con datos reales.
+- `ufc_stats.db`: sigue vencida, mtime `2026-04-01T18:58:10.834Z` (`age_hours` sube ~24h/día en `/health`) — pendiente de Fase C.
 
 ## Próximo paso exacto
 
 1. Cerrar la ventana de observación de 24h de UFC-STAB-100/101/102/103/105 (checkear `/health` + journal ~2026-08-13 02:10 UTC) y recién ahí pasarlos a `DONE`.
-2. Arrancar Fase B (Etapa 2, discovery real de `next_event` vía Odds API en `eventIntel.js`/`oddsApiTool.js`) — no depende de que termine la observación de la Fase A, puede empezar en paralelo dado que es código nuevo aislado.
-3. En algún momento, investigar el hallazgo menor de `billing` en `/health` (ver bullet arriba) — no urgente, no bloquea nada.
+2. Observar si UFC-STAB-204 sube a `confidence:"verified"` en los próximos ciclos de discovery (cada 6h); si no, revisar el matcher de corroboración (ver bullet arriba).
+3. Arrancar Fase C (`data_scrapper`: fixes bloqueantes en ese repo + timer diario en `ufc-oci`) — es el trabajo con más superficie nueva, corre por separado del resto.
+4. En algún momento, investigar el hallazgo menor de `billing` en `/health` (ver bullet arriba) — no urgente, no bloquea nada.
 
 ## Rollback actual
 
-Deploy 2026-08-12: revertir con `git revert 5d50462` (o `git checkout 1323308 -- .` en el working tree del server) + `systemctl restart bot-factory@ufc.service`. Los snapshots pre/post (`/home/ubuntu/pre-deploy-snapshot-20260812.json`, `/home/ubuntu/post-deploy-snapshot-20260812.json`) permiten verificar la reversión por digest. No usar `reset --hard` ni tocar las DB directamente. El worktree/branch deben conservarse hasta cerrar la estabilización.
+Deploy Fase B 2026-08-12: revertir con `git revert 40bc357` (o `git checkout 5d50462 -- .` en el working tree del server) + `systemctl restart bot-factory@ufc.service`. Snapshots pre/post: `/home/ubuntu/pre-deploy-snapshot-faseB-20260812.json`, `/home/ubuntu/post-deploy-snapshot-faseB-20260812.json`. Deploy Fase A (previo): revertir hasta `1323308` con los snapshots `/home/ubuntu/pre-deploy-snapshot-20260812.json`/`post-deploy-snapshot-20260812.json`. No usar `reset --hard` ni tocar las DB directamente. Branches/worktree deben conservarse hasta cerrar la estabilización.
