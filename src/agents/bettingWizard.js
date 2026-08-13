@@ -4694,7 +4694,11 @@ function formatSessionMemory(session = null) {
 
 function buildSystemPrompt(
   knowledgeSnippet = '',
-  { interactionMode = 'hybrid', guidedAction = GUIDED_DEFAULT_ACTION } = {}
+  {
+    interactionMode = 'hybrid',
+    guidedAction = GUIDED_DEFAULT_ACTION,
+    fightContext = null,
+  } = {}
 ) {
   const today = new Date().toISOString().slice(0, 10);
   const normalizedInteractionMode = normalizeInteractionMode(interactionMode);
@@ -4746,10 +4750,14 @@ function buildSystemPrompt(
           'Modo activo: guided_strict.',
           `GuidedAction del turno: ${normalizedGuidedAction}.`,
           normalizedGuidedAction === 'analyze_quotes'
-            ? 'Objetivo: analisis de cuotas (screenshot o texto estructurado). Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.'
+            ? fightContext
+              ? `Objetivo: analisis de cuotas para la pelea ${fightContext.fighterA} vs ${fightContext.fighterB} (evento: ${fightContext.eventName || 'N/D'}), YA resuelta. Pedile al usuario el screenshot completo de ESA pelea si falta.`
+              : 'Objetivo: analisis de cuotas (screenshot o texto estructurado). Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.'
             : '',
           normalizedGuidedAction === 'record_bet'
-            ? 'Objetivo: registrar una apuesta NUEVA al ledger. Pedi/usa screenshot del ticket o texto estructurado (evento, pelea, pick, cuota, stake). No cierres ni archives apuestas en este flujo.'
+            ? fightContext
+              ? `Objetivo: registrar una apuesta NUEVA al ledger para la pelea ${fightContext.fighterA} vs ${fightContext.fighterB} (evento: ${fightContext.eventName || 'N/D'}). Esa pelea YA está resuelta, no la vuelvas a preguntar: sólo pedí/usá pick, cuota y stake (texto o screenshot del ticket). No cierres ni archives apuestas en este flujo.`
+              : 'Objetivo: registrar una apuesta NUEVA al ledger. Pedi/usa screenshot del ticket o texto estructurado (evento, pelea, pick, cuota, stake). No cierres ni archives apuestas en este flujo.'
             : '',
           normalizedGuidedAction === 'settle_bet'
             ? 'Objetivo: cerrar apuestas existentes (WON/LOST/PUSH). Priorizá bet_id; si no hay bet_id, lista candidatas y pedi precision.'
@@ -5983,6 +5991,7 @@ export function createBettingWizard({
       .trim()
       .toLowerCase();
     const guidedAction = normalizeGuidedAction(guidedActionRaw);
+    const fightContext = context.fightContext || context?.metadata?.fightContext || null;
     const allowedFunctionToolNames = resolveAllowedFunctionToolNames(
       interactionMode,
       guidedAction
@@ -9081,6 +9090,7 @@ export function createBettingWizard({
       const systemPrompt = buildSystemPrompt(loadKnowledgeSnippet(), {
         interactionMode,
         guidedAction,
+        fightContext,
       });
       const mediaItems = Array.isArray(context.inputItems) ? context.inputItems : [];
       const hasMedia = mediaItems.length > 0;

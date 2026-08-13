@@ -161,6 +161,7 @@ export function createRouterChain({
             metadata,
             interactionMode: metadata?.interactionMode || null,
             guidedAction: metadata?.guidedAction || null,
+            fightContext: metadata?.fightContext || null,
             inputType: metadata?.inputType || metadata?.guidedInputType || null,
             inputItems: metadata?.inputItems,
             mediaStats: metadata?.mediaStats,

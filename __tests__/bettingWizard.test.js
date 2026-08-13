@@ -4469,6 +4469,87 @@ export async function runBettingWizardTests() {
     assert.equal(fakeClient.calls.length, 0);
   });
 
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+    let addBetCalls = 0;
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        addBetRecord() {
+          addBetCalls += 1;
+          return { id: 1 };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('$2000 a Ulberg ML @1.85', {
+      chatId: 'chat-fight-context-1',
+      originalMessage: '$2000 a Ulberg ML @1.85',
+      resolution: { resolvedMessage: '$2000 a Ulberg ML @1.85' },
+      interactionMode: 'guided_strict',
+      guidedAction: 'record_bet',
+      fightContext: {
+        fightId: 'fight_1',
+        fighterA: 'Jiri Prochazka',
+        fighterB: 'Carlos Ulberg',
+        eventId: 'evt_1',
+        eventName: 'UFC Fight Night: Prochazka vs. Ulberg',
+      },
+    });
+
+    assert.doesNotMatch(result.reply, /qu[eé] pelea|cu[aá]l pelea|para qu[eé] evento/i);
+    assert.equal(fakeClient.calls.length, 1);
+    const sentInstructions = fakeClient.calls[0].instructions;
+    assert.match(sentInstructions, /Jiri Prochazka/);
+    assert.match(sentInstructions, /Carlos Ulberg/);
+    assert.equal(addBetCalls, 0);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {},
+    });
+
+    const result = await wizard.handleMessage('aca esta el screenshot de cuotas', {
+      chatId: 'chat-fight-context-2',
+      originalMessage: 'aca esta el screenshot de cuotas',
+      resolution: { resolvedMessage: 'aca esta el screenshot de cuotas' },
+      interactionMode: 'guided_strict',
+      guidedAction: 'analyze_quotes',
+      fightContext: {
+        fightId: 'fight_2',
+        fighterA: 'Jiri Prochazka',
+        fighterB: 'Carlos Ulberg',
+        eventId: 'evt_1',
+        eventName: 'UFC Fight Night: Prochazka vs. Ulberg',
+      },
+    });
+
+    assert.doesNotMatch(result.reply, /qu[eé] pelea|cu[aá]l pelea|para qu[eé] evento/i);
+    assert.equal(fakeClient.calls.length, 1);
+    const sentInstructions = fakeClient.calls[0].instructions;
+    assert.match(sentInstructions, /Jiri Prochazka/);
+    assert.match(sentInstructions, /Carlos Ulberg/);
+  });
+
   for (const test of tests) {
     await test();
   }
