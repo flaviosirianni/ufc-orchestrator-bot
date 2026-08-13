@@ -944,7 +944,7 @@ export function resolveGuidedMessageDecision({
   }
 
   const guidedAction = normalizeGuidedAction(activeGuidedActionState.action, {
-    defaultAction: 'analyze_quotes',
+    defaultAction: getDefaultGuidedAction({ guidedMenuId: menuId }),
   });
   return {
     action: 'route',

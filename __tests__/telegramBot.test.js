@@ -1539,6 +1539,64 @@ export async function runTelegramBotTests() {
     assert.equal(decision.action, 'block');
   });
 
+  // Fast-follow (2026-08-12 review round 2): resolveGuidedMessageDecision's
+  // unrecognized-action fallback must resolve per-bot, via getDefaultGuidedAction,
+  // not the UFC-hardcoded 'analyze_quotes'. GUIDED_INPUT_ACTIONS never having
+  // included any Ovidius med_* action name is a separate, pre-existing bug
+  // (WISHLIST item 44, out of scope here) -- but before this fix, that gap made
+  // resolveGuidedMessageDecision re-coerce an already-mangled 'med_free_chat'
+  // state even further, to the UFC-specific 'analyze_quotes', which the Ovidius
+  // router's guidedAction checks never match, so free-text follow-ups always
+  // fell through to a generic fallback. Resolving the default per-menu (instead
+  // of hardcoding UFC's) restores 'med_free_chat', which the Ovidius router DOES
+  // recognize -- this is a partial mitigation, not a fix for the whitelist gap:
+  // any other real med_* action still collapses to med_free_chat too (see the
+  // second test below), since that specific name is already lost by the time
+  // it's stored in guidedActionByChat.
+  tests.push(() => {
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'me duele la cabeza',
+      hasMedia: false,
+      activeGuidedActionState: { action: 'med_free_chat', fightContext: null, setAt: Date.now() },
+      guidedMenuId: 'ovidius_v1',
+    });
+
+    assert.equal(decision.action, 'route');
+    assert.equal(decision.guidedAction, 'med_free_chat');
+  });
+
+  tests.push(() => {
+    // Confirms the fix is intentionally partial: a real, specific med_* action
+    // OTHER than med_free_chat still resolves to med_free_chat, not itself --
+    // that name is already gone by the time it reaches this function (mangled
+    // upstream at setGuidedActionState time, since it isn't in
+    // GUIDED_INPUT_ACTIONS either). Fixing this fully needs the whitelist audit
+    // tracked in WISHLIST item 44, deliberately not done here.
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: '',
+      hasMedia: true,
+      activeGuidedActionState: { action: 'med_upload_document', fightContext: null, setAt: Date.now() },
+      guidedMenuId: 'ovidius_v1',
+    });
+
+    assert.equal(decision.guidedAction, 'med_free_chat');
+  });
+
+  tests.push(() => {
+    // UFC's own default must stay analyze_quotes and must not regress to
+    // reading Ovidius's/Nutrition's default when the active action is missing
+    // or unrecognized (empty string exercises normalizeGuidedAction's fallback
+    // branch the same way an unrecognized action string would).
+    const decision = resolveGuidedMessageDecision({
+      cleanMessage: 'algo',
+      hasMedia: false,
+      activeGuidedActionState: { action: '', fightContext: null, setAt: Date.now() },
+      guidedMenuId: 'ufc_v1',
+    });
+
+    assert.equal(decision.guidedAction, 'analyze_quotes');
+  });
+
   // Task 1 — guided-action state carries a setAt timestamp for staleness checks
   tests.push(async () => {
     const runtime = startTelegramBot(createRouterSpy(), {
