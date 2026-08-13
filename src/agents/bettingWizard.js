@@ -6127,18 +6127,45 @@ export function createBettingWizard({
     // disponible y expone getFighterStats; si no, se pasa `undefined` para que
     // rowIsLikelyUfc falle abierto (mismo comportamiento que antes del fix) en
     // vez de tratar toda fila como no-UFC.
+    //
+    // Trade-off aceptado: getFighterStats cae a un LIKE '%name%' en
+    // ufcStatsTool._queryFights cuando no hay match exacto (tier 2, pensado
+    // para casos como "Pereira" -> "Alex Pereira"). Eso implica que un nombre
+    // corto o generico de una promocion no-UFC que resulte substring del
+    // nombre completo de algun peleador del roster podria resolver como
+    // "es de UFC" — una version mas acotada del mismo bug que este fix
+    // ataca. No lo restringimos a match exacto: eso arriesga falsos
+    // negativos para peleadores UFC reales con variantes de nombre
+    // legitimas, y no hay evidencia hoy de que el caso substring sea un
+    // problema real en la practica.
+    //
+    // Memoizado por nombre normalizado en un Map con vida de un solo
+    // handleMessage (no persiste entre requests): isUfcFighter puede
+    // llamarse hasta 2 veces por fila (home/away) sobre hasta ~300 filas
+    // (listUpcomingOddsEvents limit 120 + listRecentOddsEvents limit 180) y
+    // hasta ~5 pasadas por turno cuando dispara el retry de baja confianza;
+    // cada miss corre un exact-match mas un LIKE de tabla completa. Cachear
+    // evita repetir esa consulta para el mismo nombre dentro del mismo turno.
+    const isUfcFighterCache = new Map();
     const isUfcFighter =
       typeof ufcStats?.isAvailable === 'function' &&
       ufcStats.isAvailable() &&
       typeof ufcStats?.getFighterStats === 'function'
         ? (name) => {
             if (!name) return false;
+            const cacheKey = normalise(name);
+            if (isUfcFighterCache.has(cacheKey)) {
+              return isUfcFighterCache.get(cacheKey);
+            }
+            let result = false;
             try {
               const stats = ufcStats.getFighterStats({ fighterName: name, limit: 1 });
-              return stats?.ok !== false && Array.isArray(stats?.fights) && stats.fights.length > 0;
+              result = stats?.ok !== false && Array.isArray(stats?.fights) && stats.fights.length > 0;
             } catch {
-              return false;
+              result = false;
             }
+            isUfcFighterCache.set(cacheKey, result);
+            return result;
           }
         : undefined;
     let oddsSnapshot = null;

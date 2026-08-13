@@ -5213,6 +5213,116 @@ export async function runBettingWizardTests() {
     assert.equal(eventState.mainCard[0].fighterB, 'Ian Garry');
   });
 
+  tests.push(async () => {
+    // Code review follow-up #1: los 5 tests de arriba llaman a las tres funciones
+    // puras directamente con un isUfcFighter escrito a mano, sin pasar nunca por
+    // el binding site real dentro de handleMessage (el ternario que decide si
+    // ufcStats esta disponible + expone getFighterStats, el try/catch, y la
+    // interpretacion de stats.ok/stats.fights). Este test ejercita ese closure
+    // real de punta a punta: wizard.handleMessage -> isUfcFighter -> ufcStats.getFighterStats.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('fallback')]);
+    const nowMs = Date.now();
+    const commenceIso = new Date(nowMs - 20 * 60 * 1000).toISOString();
+    const syncIso = new Date(nowMs - 5 * 60 * 1000).toISOString();
+    const ufcRoster = ['Islam Makhachev', 'Ian Garry'];
+    const getFighterStatsCalls = [];
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      ufcStats: {
+        isAvailable() {
+          return true;
+        },
+        getFighterStats({ fighterName }) {
+          getFighterStatsCalls.push(fighterName);
+          if (ufcRoster.includes(fighterName)) {
+            return {
+              fighter: fighterName,
+              fights: [{ fight_id: 'e2e_1', fighter: fighterName, opponent: 'rival' }],
+              dataSource: 'ufc_stats_db',
+            };
+          }
+          return {
+            ok: false,
+            error: `No se encontraron peleas para "${fighterName}" en ufc_stats.db.`,
+          };
+        },
+      },
+      userStore: {
+        getEventWatchState() {
+          return null;
+        },
+        listUpcomingOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_e2e_999',
+              eventName: 'UFC 999',
+              commenceTime: commenceIso,
+              homeTeam: 'Islam Makhachev',
+              awayTeam: 'Ian Garry',
+              completed: false,
+              lastOddsSyncAt: syncIso,
+              updatedAt: syncIso,
+            },
+            {
+              eventId: 'ufc_e2e_999',
+              eventName: 'UFC 999',
+              commenceTime: commenceIso,
+              homeTeam: 'Matt Adams',
+              awayTeam: 'Anthony Wint',
+              completed: false,
+              lastOddsSyncAt: syncIso,
+              updatedAt: syncIso,
+            },
+          ];
+        },
+        listRecentOddsEvents() {
+          return [
+            {
+              eventId: 'ufc_e2e_999',
+              eventName: 'UFC 999',
+              commenceTime: commenceIso,
+              homeTeam: 'Islam Makhachev',
+              awayTeam: 'Ian Garry',
+              completed: false,
+              scores: [{ name: 'Islam Makhachev', score: '0' }],
+              lastScoresSyncAt: syncIso,
+              updatedAt: syncIso,
+            },
+          ];
+        },
+        async refreshLiveScores() {
+          return { ok: true, upsertedCount: 0 };
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('hay evento de ufc ahora en vivo?', {
+      chatId: 'chat-live-status-ufc-filter-e2e-1',
+      originalMessage: 'hay evento de ufc ahora en vivo?',
+      resolution: {
+        resolvedMessage: 'hay evento de ufc ahora en vivo?',
+      },
+    });
+
+    assert.match(result.reply, /Estado UFC en vivo/i);
+    assert.match(result.reply, /Islam Makhachev vs Ian Garry/);
+    assert.doesNotMatch(result.reply, /Matt Adams/);
+    assert.doesNotMatch(result.reply, /Anthony Wint/);
+    assert.ok(
+      getFighterStatsCalls.length > 0,
+      'el closure real de isUfcFighter debe haber llamado a ufcStats.getFighterStats'
+    );
+    assert.equal(fakeClient.calls.length, 0);
+  });
+
   for (const test of tests) {
     await test();
   }
