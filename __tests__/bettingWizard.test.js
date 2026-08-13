@@ -3655,14 +3655,15 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.match(result.reply, /Proyecciones para el evento/i);
-    assert.match(result.reply, /Alpha One vs Bravo Two/);
-    assert.match(result.reply, /ventaja para Bravo Two/i);
-    assert.match(result.reply, /Confianza:\s*\d+%/i);
-    assert.match(result.reply, /Consenso bookies/i);
-    assert.match(result.reply, /Recomendacion backend:/i);
-    assert.match(result.reply, /Moneyline/i);
-    assert.match(result.reply, /Oportunidades precomputadas/i);
+    assert.ok(Array.isArray(result.replies), 'debe devolver replies[], no un unico reply combinado');
+    assert.ok(result.replies.some((r) => /Proyecciones para el evento/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Alpha One vs Bravo Two/.test(r.text)));
+    assert.ok(result.replies.some((r) => /ventaja para Bravo Two/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Confianza:\s*\d+%/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Consenso bookies/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Recomendacion backend:/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Moneyline/i.test(r.text)));
+    assert.ok(result.replies.some((r) => /Oportunidades precomputadas/i.test(r.text)));
     assert.equal(fakeClient.calls.length, 0);
   });
 
@@ -3825,8 +3826,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.match(result.reply, /Evento:\s*UFC \d+/i);
-    assert.ok(result.reply.length > 0);
+    assert.ok(Array.isArray(result.replies) && result.replies.length > 0);
+    assert.ok(result.replies.some((r) => /UFC \d+/i.test(r.text)));
     assert.equal(fakeClient.calls.length, 0);
   });
 
@@ -3916,8 +3917,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.match(result.reply, /Evento:\s*UFC \d+/i);
-    assert.ok(result.reply.length > 0);
+    assert.ok(Array.isArray(result.replies) && result.replies.length > 0);
+    assert.ok(result.replies.some((r) => /UFC \d+/i.test(r.text)));
     assert.equal(fakeClient.calls.length, 0);
   });
 
@@ -4015,8 +4016,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.match(result.reply, /Evento:\s*UFC \d+/i);
-    assert.ok(result.reply.length > 0);
+    assert.ok(Array.isArray(result.replies) && result.replies.length > 0);
+    assert.ok(result.replies.some((r) => /UFC \d+/i.test(r.text)));
     assert.equal(fakeClient.calls.length, 0);
   });
 
@@ -4116,8 +4117,9 @@ export async function runBettingWizardTests() {
         },
       });
 
-      assert.match(result.reply, /Evento:\s*UFC 999/i);
-      assert.doesNotMatch(result.reply, /Evento:\s*UFC 324/i);
+      assert.ok(Array.isArray(result.replies) && result.replies.length > 0);
+      assert.ok(result.replies.some((r) => /UFC 999/i.test(r.text)));
+      assert.ok(result.replies.every((r) => !/UFC 324/i.test(r.text)));
       assert.equal(fakeClient.calls.length, 0);
     } finally {
       Date.now = realDateNow;
@@ -4208,7 +4210,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.ok(result.reply.length > 0);
+    assert.ok(Array.isArray(result.replies) && result.replies.length > 0);
+    assert.ok(result.replies[0].text.length > 0);
     assert.equal(writes.length, 1);
     assert.equal(writes[0].watchKey, 'current_event');
     assert.equal(writes[0].snapshot.eventName, 'UFC 330');
@@ -4216,6 +4219,110 @@ export async function runBettingWizardTests() {
     assert.equal(writes[0].snapshot.verification?.compatibleSourceCount, 1);
     assert.equal(writes[0].snapshot.verification?.confidence, 'degraded');
     assert.equal(writes[0].snapshot.verification?.consumerAllowed, false);
+  });
+
+  tests.push(async () => {
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        getEventWatchState(watchKey) {
+          if (watchKey !== 'next_event') return null;
+          return {
+            eventId: 'evt_proj_1',
+            eventName: 'UFC Fight Night: Prochazka vs. Ulberg',
+            eventDateUtc: '2026-08-15',
+            mainCard: [
+              { fightId: 'fight_1', fighterA: 'Jiri Prochazka', fighterB: 'Carlos Ulberg', isCompleted: false },
+              { fightId: 'fight_2', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson', isCompleted: false },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        getEventFightMirror(watchKey) {
+          if (watchKey !== 'next_event') return [];
+          return [
+            { fightId: 'mirror_prochazka_ulberg', fighterA: 'Jiri Prochazka', fighterB: 'Carlos Ulberg' },
+            { fightId: 'mirror_dern_robertson', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson' },
+          ];
+        },
+        listUpcomingOddsEvents() { return []; },
+        listRecentOddsEvents() { return []; },
+        async refreshLiveScores() { return { ok: true, upsertedCount: 0 }; },
+        listLatestRelevantNews() { return []; },
+        listLatestProjectionSnapshotsForEvent() { return []; },
+        listLatestBetScoringForEvent() { return []; },
+        listLatestOddsMarketsForFight() { return []; },
+      },
+    });
+
+    const result = await wizard.handleMessage('proyecciones para el evento', {
+      chatId: 'chat-per-fight-projections-1',
+      userId: 'u-per-fight-projections-1',
+      originalMessage: 'proyecciones para el evento',
+      resolution: { resolvedMessage: 'proyecciones para el evento' },
+    });
+
+    assert.ok(Array.isArray(result.replies), 'debe devolver replies[], no un unico reply combinado');
+    assert.equal(result.replies.length, 2);
+    assert.match(result.replies[0].text, /Jiri Prochazka.*Carlos Ulberg|Prochazka.*Ulberg/s);
+    assert.match(result.replies[1].text, /Dern.*Robertson/s);
+
+    const buttons0 = result.replies[0].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons0.some((b) => b.callback_data === 'qa:record_bet_for:mirror_prochazka_ulberg'));
+    assert.ok(buttons0.some((b) => b.callback_data === 'qa:analyze_quotes_for:mirror_prochazka_ulberg'));
+    const buttons1 = result.replies[1].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons1.some((b) => b.callback_data === 'qa:record_bet_for:mirror_dern_robertson'));
+  });
+
+  tests.push(async () => {
+    // Graceful degradation: mirror not built yet / no name match for this fight -> the
+    // projection text still ships, just without action buttons on that specific message.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        getEventWatchState(watchKey) {
+          if (watchKey !== 'next_event') return null;
+          return {
+            eventId: 'evt_proj_2',
+            eventName: 'UFC Fight Night: Prochazka vs. Ulberg',
+            eventDateUtc: '2026-08-15',
+            mainCard: [
+              { fightId: 'fight_1', fighterA: 'Jiri Prochazka', fighterB: 'Carlos Ulberg', isCompleted: false },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        getEventFightMirror() { return []; },
+        listUpcomingOddsEvents() { return []; },
+        listRecentOddsEvents() { return []; },
+        async refreshLiveScores() { return { ok: true, upsertedCount: 0 }; },
+        listLatestRelevantNews() { return []; },
+        listLatestProjectionSnapshotsForEvent() { return []; },
+        listLatestBetScoringForEvent() { return []; },
+        listLatestOddsMarketsForFight() { return []; },
+      },
+    });
+
+    const result = await wizard.handleMessage('proyecciones para el evento', {
+      chatId: 'chat-per-fight-projections-nomirror-1',
+      userId: 'u-per-fight-projections-nomirror-1',
+      originalMessage: 'proyecciones para el evento',
+      resolution: { resolvedMessage: 'proyecciones para el evento' },
+    });
+
+    assert.equal(result.replies.length, 1);
+    assert.match(result.replies[0].text, /Prochazka.*Ulberg/s);
+    assert.equal(result.replies[0].replyMarkup, null);
   });
 
   tests.push(async () => {

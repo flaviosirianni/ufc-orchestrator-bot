@@ -6909,7 +6909,10 @@ export function createBettingWizard({
       const hasStoredProjections = Array.isArray(storedProjections) && storedProjections.length > 0;
       const hasStoredBetScoring = Array.isArray(storedBetScoring) && storedBetScoring.length > 0;
 
-      const lines = [
+      // Shared header (event title/base line/reconciliation/live status) rides on the
+      // FIRST per-fight message only -- it's card-level context, not fight-specific, and
+      // repeating it on every message in the split would be noisy.
+      const headerLines = [
         '📊 Proyecciones para el evento',
         `Evento: ${eventLabel}`,
         hasStoredProjections && hasStoredBetScoring
@@ -6917,25 +6920,33 @@ export function createBettingWizard({
           : hasStoredProjections
           ? 'Base: proyecciones precomputadas (noticias + consenso de cuotas) en backend.'
           : 'Base: señales de noticias + monitoreo de disponibilidad (sin cuotas live).',
-        '',
       ];
       if (reconciliationNotes.length) {
-        lines.push(...reconciliationNotes);
+        headerLines.push('', ...reconciliationNotes);
       }
       if (completedCount > 0 && pendingFights.length) {
-        lines.push(
-          `Estado live: ${completedCount}/${allFights.length} peleas cerradas; mostrando solo las restantes.`,
-          ''
+        headerLines.push(
+          '',
+          `Estado live: ${completedCount}/${allFights.length} peleas cerradas; mostrando solo las restantes.`
         );
       } else if (completedCount > 0 && completedCount === allFights.length) {
-        lines.push(
-          `Estado live: cartelera cerrada (${completedCount}/${allFights.length} peleas finalizadas).`,
-          ''
+        headerLines.push(
+          '',
+          `Estado live: cartelera cerrada (${completedCount}/${allFights.length} peleas finalizadas).`
         );
       } else if (liveSignalsDetected) {
-        lines.push('Estado live: cartelera en curso.', '');
+        headerLines.push('', 'Estado live: cartelera en curso.');
       }
 
+      // Same cross-fight summary the combined message used to close with -- not
+      // fight-specific either, so it rides on the LAST per-fight message.
+      const topOpportunities = listTopEventBetOpportunities({
+        rows: storedBetScoring,
+        fights,
+        limit: 5,
+      });
+
+      const perFightReplies = [];
       for (const [index, fight] of fights.entries()) {
         const storedProjection = storedProjections.find((row) =>
           projectionSnapshotMatchesFight(row, fight)
@@ -6978,33 +6989,38 @@ export function createBettingWizard({
           .slice(1, 2);
         const fightLabel = `${fight.fighterA} vs ${fight.fighterB}`;
 
-        lines.push(`${index + 1}. ${fightLabel}`);
-        lines.push(
+        const fightLines = [];
+        if (index === 0) {
+          fightLines.push(...headerLines, '');
+        }
+
+        fightLines.push(`${index + 1}. ${fightLabel}`);
+        fightLines.push(
           `   Proyeccion: ${
             projection.projectedWinner
               ? `ventaja para ${projection.projectedWinner}`
               : 'pelea cerrada, sin edge claro'
           }.`
         );
-        lines.push(`   Confianza: ${projection.confidence}%`);
-        lines.push(`   Escenario: ${projection.scenario}`);
+        fightLines.push(`   Confianza: ${projection.confidence}%`);
+        fightLines.push(`   Escenario: ${projection.scenario}`);
         if (projection.changeSummary) {
-          lines.push(`   Cambio reciente: ${projection.changeSummary}`);
+          fightLines.push(`   Cambio reciente: ${projection.changeSummary}`);
         }
         if (primaryBetScoring) {
-          lines.push(`   Recomendacion backend: ${renderBetScoringLine(primaryBetScoring)}`);
+          fightLines.push(`   Recomendacion backend: ${renderBetScoringLine(primaryBetScoring)}`);
           if (alternativeBetScoring.length) {
-            lines.push(`   Alternativa: ${renderBetScoringLine(alternativeBetScoring[0])}`);
+            fightLines.push(`   Alternativa: ${renderBetScoringLine(alternativeBetScoring[0])}`);
           }
         }
         if (oddsConsensus) {
-          lines.push(
+          fightLines.push(
             `   Consenso bookies (${oddsConsensus.bookmakersCount}): ${fight.fighterA} @${oddsConsensus.avgPriceA.toFixed(
               2
             )} vs ${fight.fighterB} @${oddsConsensus.avgPriceB.toFixed(2)}`
           );
           if (oddsConsensus.impliedA && oddsConsensus.impliedB) {
-            lines.push(
+            fightLines.push(
               `   Prob. implícita mercado: ${fight.fighterA} ${oddsConsensus.impliedA.toFixed(
                 1
               )}% | ${fight.fighterB} ${oddsConsensus.impliedB.toFixed(1)}%`
@@ -7026,11 +7042,11 @@ export function createBettingWizard({
           projection.keyFactors.length
         ) {
           for (const factor of projection.keyFactors) {
-            lines.push(`   Señal relevante: ${truncateText(String(factor || ''), 140)}`);
+            fightLines.push(`   Señal relevante: ${truncateText(String(factor || ''), 140)}`);
           }
         } else if (shouldShowSignals) {
           for (const item of projection.evidence) {
-            lines.push(
+            fightLines.push(
               `   Señal relevante: ${formatImpactBadge(item.impactLevel)} ${truncateText(
                 item.title || '',
                 140
@@ -7038,29 +7054,39 @@ export function createBettingWizard({
             );
           }
         }
-        lines.push('');
-      }
 
-      const topOpportunities = listTopEventBetOpportunities({
-        rows: storedBetScoring,
-        fights,
-        limit: 5,
-      });
-      if (topOpportunities.length) {
-        lines.push('🔥 Oportunidades precomputadas (top del evento)');
-        for (const [index, item] of topOpportunities.entries()) {
-          lines.push(`${index + 1}. ${item.fightLabel}`);
-          lines.push(`   ${renderBetScoringLine(item)}`);
+        if (index === fights.length - 1) {
+          if (topOpportunities.length) {
+            fightLines.push('', '🔥 Oportunidades precomputadas (top del evento)');
+            for (const [oppIndex, item] of topOpportunities.entries()) {
+              fightLines.push(`${oppIndex + 1}. ${item.fightLabel}`);
+              fightLines.push(`   ${renderBetScoringLine(item)}`);
+            }
+          }
+          fightLines.push(
+            '',
+            'Este bloque se va actualizando automaticamente durante la semana y puede cambiar si aparece info nueva.'
+          );
         }
-        lines.push('');
-      }
 
-      lines.push(
-        'Este bloque se va actualizando automaticamente durante la semana y puede cambiar si aparece info nueva.'
-      );
+        const stableFightId = resolveStableFightIdByNames(userStore, fight.fighterA, fight.fighterB);
+        perFightReplies.push({
+          text: fightLines.join('\n').trim(),
+          replyMarkup: stableFightId
+            ? {
+                inline_keyboard: [
+                  [
+                    { text: '📝 Registrar apuesta', callback_data: `qa:record_bet_for:${stableFightId}` },
+                    { text: '🔍 Analizar mis quotes', callback_data: `qa:analyze_quotes_for:${stableFightId}` },
+                  ],
+                ],
+              }
+            : null,
+        });
+      }
 
       return {
-        reply: lines.join('\n').trim(),
+        replies: perFightReplies,
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
           eventCard: runtimeState.eventCard,
