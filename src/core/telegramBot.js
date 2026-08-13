@@ -2208,7 +2208,7 @@ export function startTelegramBot(router, options = {}) {
         },
       });
 
-      if (reply?.replies?.length) {
+      if (Array.isArray(reply?.replies) && reply.replies.length) {
         // Additive multi-message path (guided-menu-unification Task 7): a
         // router can now return {text, replies:[{text, replyMarkup}, ...]}
         // to send one message per entry (e.g. one per fight) instead of
@@ -2218,10 +2218,26 @@ export function startTelegramBot(router, options = {}) {
         // startTelegramBot (UFC, Ovidius, Nutrition, scaffolded templates),
         // and several of those routers return a bare string rather than
         // {text} today, so both branches below must keep handling that.
+        //
+        // Each send is isolated in its own try/catch: sendBotMessage
+        // re-throws on anything other than a parse_mode failure (network
+        // blip, Telegram 429 flood-control), and this loop has no
+        // surrounding try/catch at the bot.on('message', ...) call site --
+        // one failed send must not abort the rest of a multi-message card
+        // (Task 9 will make this loop live with real payloads, up to ~13
+        // entries for a full fight card) or become an unhandled promise
+        // rejection.
         for (const entry of reply.replies) {
-          await sendBotMessage(chatId, entry?.text || '', {
-            replyMarkupOverride: entry?.replyMarkup || null,
-          });
+          try {
+            await sendBotMessage(chatId, entry?.text || '', {
+              replyMarkupOverride: entry?.replyMarkup || null,
+            });
+          } catch (error) {
+            console.error(
+              '⚠️ Failed to send one entry of a multi-message reply, continuing with the rest of the card:',
+              error
+            );
+          }
         }
       } else if (reply && typeof reply === 'object') {
         // Note: this branch is entered for ANY object-shaped reply, even

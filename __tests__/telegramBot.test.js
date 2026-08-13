@@ -2052,6 +2052,30 @@ export async function runTelegramBotTests() {
   });
 
   tests.push(async () => {
+    // createUfcPolicyRouter defensive guard, null/undefined variant: a
+    // bare null or undefined return from rawRouter.routeMessage() (not a
+    // string, not an object) must still normalize to a safe {text, replies}
+    // object instead of throwing when reading rawResult.replies/.text off
+    // of it downstream.
+    for (const bareValue of [null, undefined]) {
+      const rawRouter = {
+        async routeMessage() {
+          return bareValue;
+        },
+      };
+      const router = createUfcPolicyRouter({
+        rawRouter,
+        manifest: { risk_policy: 'general_safe_advice' },
+      });
+
+      const result = await router.routeMessage('hola');
+      assert.equal(typeof result, 'object', `expected object result for rawRouter returning ${bareValue}`);
+      assert.equal(result.text, '');
+      assert.equal(result.replies, null);
+    }
+  });
+
+  tests.push(async () => {
     // End-to-end: a router returning {text, replies:[...]} (the shape
     // createUfcPolicyRouter now produces) must make deliverToRouter send
     // ONE Telegram message per entry, in order, each with its own
@@ -2112,6 +2136,66 @@ export async function runTelegramBotTests() {
   });
 
   tests.push(async () => {
+    // Code review follow-up (Important finding on commit a9baaa0): one
+    // entry failing to send in the replies[] loop must not abort the rest
+    // of the card, and must not become an unhandled promise rejection.
+    // sendBotMessage re-throws on anything other than a parse_mode failure
+    // (network blip, Telegram 429 flood-control) -- simulate that by
+    // making the underlying bot.sendMessage throw for one specific entry's
+    // text (on both the primary HTML attempt and sendBotMessage's own
+    // plain-text fallback retry, since both carry the same marker) and
+    // confirm the remaining entries still go out.
+    class FlakyTelegramBot extends FakeTelegramBot {
+      async sendMessage(chatId, text, options = {}) {
+        if (String(text || '').includes('WILL_FAIL')) {
+          throw new Error('simulated Telegram 429 flood-control');
+        }
+        return super.sendMessage(chatId, text, options);
+      }
+    }
+
+    const fakeBot = new FlakyTelegramBot();
+    const router = {
+      async routeMessage() {
+        return {
+          text: 'card',
+          replies: [
+            { text: 'Pelea 1 WILL_FAIL', replyMarkup: null },
+            { text: 'Pelea 2 ok', replyMarkup: null },
+            { text: 'Pelea 3 ok', replyMarkup: null },
+          ],
+        };
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:analyze_quotes' }));
+    const messagesBeforeRouting = fakeBot.sentMessages.length;
+
+    // Must resolve without throwing even though entry 1 fails both of
+    // sendBotMessage's internal attempts.
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({ messageId: 5010, text: 'proyecciones para el evento' })
+    );
+
+    const sent = fakeBot.sentMessages.slice(messagesBeforeRouting);
+    assert.equal(sent.length, 2, `expected 2 surviving reply messages, got ${sent.length}`);
+    assert.match(sent[0].text, /Pelea 2 ok/);
+    assert.match(sent[1].text, /Pelea 3 ok/);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
     // Regression: an object-shaped reply with an empty/falsy .text and no
     // populated .replies (e.g. {text: '', replies: null} or {text: '',
     // replies: []}) must fall back to the "no tengo respuesta" message --
@@ -2140,6 +2224,44 @@ export async function runTelegramBotTests() {
     await fakeBot.emit(
       'message',
       createBaseMessage({ messageId: 5002, text: 'proyecciones para el evento' })
+    );
+
+    const sent = fakeBot.sentMessages.slice(messagesBeforeRouting);
+    assert.equal(sent.length, 1);
+    assert.doesNotMatch(sent[0].text, /object Object/i);
+    assert.match(sent[0].text, /No tengo respuesta/i);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // Same regression, but with an explicit empty array (replies: []) as
+    // opposed to replies: null -- a distinct value that exercises the
+    // Array.isArray(reply?.replies) && reply.replies.length check
+    // separately (an empty array is truthy, so a naive `reply?.replies`
+    // truthiness check alone would not catch this case).
+    const fakeBot = new FakeTelegramBot();
+    const router = {
+      async routeMessage() {
+        return { text: '', replies: [] };
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:analyze_quotes' }));
+    const messagesBeforeRouting = fakeBot.sentMessages.length;
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({ messageId: 5003, text: 'proyecciones para el evento' })
     );
 
     const sent = fakeBot.sentMessages.slice(messagesBeforeRouting);
