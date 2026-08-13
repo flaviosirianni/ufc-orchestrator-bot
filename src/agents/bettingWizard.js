@@ -8140,6 +8140,7 @@ export function createBettingWizard({
       historyLatestFightDate: null,
       usedWebSearch: false,
       citationsCount: 0,
+      lastStoredOddsFight: null,
     };
 
     const runMutateUserBets = async (rawArgs = {}, { fromLegacyRecordTool = false } = {}) => {
@@ -9103,6 +9104,11 @@ export function createBettingWizard({
               : args;
 
           const stored = userStore.addOddsSnapshot(userId, payload);
+          const fighterRed = String(payload?.fight?.fighter_red || '').trim();
+          const fighterBlue = String(payload?.fight?.fighter_blue || '').trim();
+          if (fighterRed && fighterBlue) {
+            turnToolEffects.lastStoredOddsFight = { fighterA: fighterRed, fighterB: fighterBlue };
+          }
           return {
             ok: true,
             stored,
@@ -9678,13 +9684,38 @@ export function createBettingWizard({
         temporalContext,
         turnContext: turnToolEffects,
       });
+      const finalReplyText = `${finalReply}${citationFooter}`;
+      const finalMetadata = {
+        resolvedFight: runtimeState.resolvedFight,
+        eventCard: runtimeState.eventCard,
+      };
+
+      if (guidedAction === 'analyze_quotes' && turnToolEffects.lastStoredOddsFight) {
+        const stableFightId = resolveStableFightIdByNames(
+          userStore,
+          turnToolEffects.lastStoredOddsFight.fighterA,
+          turnToolEffects.lastStoredOddsFight.fighterB
+        );
+        if (stableFightId) {
+          return {
+            replies: [
+              {
+                text: finalReplyText,
+                replyMarkup: {
+                  inline_keyboard: [[
+                    { text: '📝 Registrar apuesta', callback_data: `qa:record_bet_for:${stableFightId}` },
+                  ]],
+                },
+              },
+            ],
+            metadata: finalMetadata,
+          };
+        }
+      }
 
       return {
-        reply: `${finalReply}${citationFooter}`,
-        metadata: {
-          resolvedFight: runtimeState.resolvedFight,
-          eventCard: runtimeState.eventCard,
-        },
+        reply: finalReplyText,
+        metadata: finalMetadata,
       };
     } catch (error) {
       console.error('💥 Error en Betting Wizard:', error);

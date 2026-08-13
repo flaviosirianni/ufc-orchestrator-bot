@@ -4409,6 +4409,85 @@ export async function runBettingWizardTests() {
   });
 
   tests.push(async () => {
+    // Task 10 (guided-menu-unification): symmetric counterpart to Task 9's per-fight
+    // Evento buttons, but for the Analisis entry point -- the user comes in generically
+    // (no fight_id yet) with a quotes screenshot, the LLM calls store_user_odds for the
+    // fight it recognizes, and once that fight also matches an event_fight_mirror row,
+    // the single-message reply carries a [Registrar apuesta] button for that fight_id.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('store_user_odds', {
+        fight: { fighter_red: 'Islam Makhachev', fighter_blue: 'Ian Garry' },
+        event: { name: 'UFC 330' },
+      }),
+      responseWithText('Listo, ya tengo tus cuotas cargadas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        addOddsSnapshot() { return { ok: true, stored: true, oddsHash: 'hash-1' }; },
+        getEventFightMirror(watchKey) {
+          if (watchKey !== 'next_event') return [];
+          return [{ fightId: 'mirror_makhachev_garry', fighterA: 'Islam Makhachev', fighterB: 'Ian Garry' }];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('', {
+      chatId: 'chat-analysis-button-1',
+      userId: 'u-analysis-button-1',
+      originalMessage: '[screenshot de cuotas]',
+      resolution: { resolvedMessage: '[screenshot de cuotas]' },
+      guidedAction: 'analyze_quotes',
+    });
+
+    assert.ok(Array.isArray(result.replies), 'debe adjuntar boton via replies[]');
+    assert.equal(result.replies.length, 1);
+    assert.match(result.replies[0].text, /Listo, ya tengo tus cuotas cargadas/);
+    const buttons = result.replies[0].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons.some((b) => b.callback_data === 'qa:record_bet_for:mirror_makhachev_garry'));
+  });
+
+  tests.push(async () => {
+    // Negative-path counterpart: store_user_odds resolves a fight with no matching
+    // event_fight_mirror row (mirror not built yet, or fight not on the tracked card).
+    // The reply must keep shipping as plain text, exactly today's shape -- no
+    // replies[]/replyMarkup introduced just because store_user_odds ran.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('store_user_odds', {
+        fight: { fighter_red: 'Islam Makhachev', fighter_blue: 'Ian Garry' },
+        event: { name: 'UFC 330' },
+      }),
+      responseWithText('Listo, ya tengo tus cuotas cargadas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        addOddsSnapshot() { return { ok: true, stored: true, oddsHash: 'hash-2' }; },
+        getEventFightMirror() { return []; },
+      },
+    });
+
+    const result = await wizard.handleMessage('', {
+      chatId: 'chat-analysis-button-nomatch-1',
+      userId: 'u-analysis-button-nomatch-1',
+      originalMessage: '[screenshot de cuotas]',
+      resolution: { resolvedMessage: '[screenshot de cuotas]' },
+      guidedAction: 'analyze_quotes',
+    });
+
+    assert.equal(result.replies, undefined, 'sin match no debe introducir replies[]');
+    assert.match(result.reply, /Listo, ya tengo tus cuotas cargadas/);
+  });
+
+  tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
     const updatePayloads = [];
