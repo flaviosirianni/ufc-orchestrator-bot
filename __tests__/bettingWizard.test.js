@@ -4282,6 +4282,11 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     // Graceful degradation: mirror not built yet / no name match for this fight -> the
     // projection text still ships, just without action buttons on that specific message.
+    // Also the boundary-invariant regression guard: on a single-fight card, index 0 IS
+    // fights.length - 1, so the one message produced here must carry BOTH the shared
+    // header (normally only on the first message) AND the footer/closing line (normally
+    // only on the last message) -- see the "independent ifs, not if/else" comment at the
+    // fightLines construction in src/agents/bettingWizard.js.
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
 
@@ -4323,6 +4328,84 @@ export async function runBettingWizardTests() {
     assert.equal(result.replies.length, 1);
     assert.match(result.replies[0].text, /Prochazka.*Ulberg/s);
     assert.equal(result.replies[0].replyMarkup, null);
+    // Header (only pushed when index === 0) and footer (only pushed when
+    // index === fights.length - 1) must BOTH land in this single message.
+    assert.match(result.replies[0].text, /Proyecciones para el evento/i);
+    assert.match(result.replies[0].text, /Este bloque se va actualizando/i);
+  });
+
+  tests.push(async () => {
+    // Mixed resolution within the SAME card/turn: fight 1 and fight 3 have a matching
+    // event_fight_mirror row, fight 2 (in between) does not. Each message's buttons
+    // must be decided from its OWN fight's resolution only -- no cross-contamination
+    // from a neighboring fight's resolved/unresolved id, and no leakage introduced by
+    // hoisting the mirror fetch out of the loop (fix for the N+1 store-query review
+    // finding: mirrorFightsForLookup is now fetched once and shared across fights).
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        getEventWatchState(watchKey) {
+          if (watchKey !== 'next_event') return null;
+          return {
+            eventId: 'evt_proj_mixed_1',
+            eventName: 'UFC Fight Night: Mixed Resolution Card',
+            eventDateUtc: '2026-08-15',
+            mainCard: [
+              { fightId: 'fight_1', fighterA: 'Jiri Prochazka', fighterB: 'Carlos Ulberg', isCompleted: false },
+              { fightId: 'fight_2', fighterA: 'No Mirror Fighter', fighterB: 'Also No Mirror', isCompleted: false },
+              { fightId: 'fight_3', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson', isCompleted: false },
+            ],
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        getEventFightMirror(watchKey) {
+          if (watchKey !== 'next_event') return [];
+          // Deliberately omits a row for "No Mirror Fighter vs Also No Mirror" --
+          // that fight must resolve to no buttons while its neighbors still do.
+          return [
+            { fightId: 'mirror_prochazka_ulberg', fighterA: 'Jiri Prochazka', fighterB: 'Carlos Ulberg' },
+            { fightId: 'mirror_dern_robertson', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson' },
+          ];
+        },
+        listUpcomingOddsEvents() { return []; },
+        listRecentOddsEvents() { return []; },
+        async refreshLiveScores() { return { ok: true, upsertedCount: 0 }; },
+        listLatestRelevantNews() { return []; },
+        listLatestProjectionSnapshotsForEvent() { return []; },
+        listLatestBetScoringForEvent() { return []; },
+        listLatestOddsMarketsForFight() { return []; },
+      },
+    });
+
+    const result = await wizard.handleMessage('proyecciones para el evento', {
+      chatId: 'chat-per-fight-projections-mixed-1',
+      userId: 'u-per-fight-projections-mixed-1',
+      originalMessage: 'proyecciones para el evento',
+      resolution: { resolvedMessage: 'proyecciones para el evento' },
+    });
+
+    assert.equal(result.replies.length, 3);
+
+    assert.match(result.replies[0].text, /Prochazka.*Ulberg/s);
+    const buttons0 = result.replies[0].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons0.some((b) => b.callback_data === 'qa:record_bet_for:mirror_prochazka_ulberg'));
+    assert.ok(buttons0.some((b) => b.callback_data === 'qa:analyze_quotes_for:mirror_prochazka_ulberg'));
+
+    assert.match(result.replies[1].text, /No Mirror Fighter.*Also No Mirror/s);
+    assert.equal(result.replies[1].replyMarkup, null);
+
+    assert.match(result.replies[2].text, /Dern.*Robertson/s);
+    const buttons2 = result.replies[2].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons2.some((b) => b.callback_data === 'qa:record_bet_for:mirror_dern_robertson'));
+    assert.ok(buttons2.some((b) => b.callback_data === 'qa:analyze_quotes_for:mirror_dern_robertson'));
+    // No cross-contamination: fight 3's buttons must not carry fight 1's id or vice versa.
+    assert.ok(!buttons2.some((b) => String(b.callback_data).includes('mirror_prochazka_ulberg')));
+    assert.ok(!buttons0.some((b) => String(b.callback_data).includes('mirror_dern_robertson')));
   });
 
   tests.push(async () => {

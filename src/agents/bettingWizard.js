@@ -1506,6 +1506,27 @@ function projectionSnapshotMatchesFight(snapshot = {}, fight = {}) {
   return (snapA === fightA && snapB === fightB) || (snapA === fightB && snapB === fightA);
 }
 
+// Pure, store-free half of Task 8's name match: given an already-fetched
+// event_fight_mirror rows array, find the row whose fighterA/fighterB match
+// (order-independent) and return its stable fight_id. Extracted out of
+// resolveStableFightIdByNames so callers that need to resolve MANY fights in
+// one turn (Task 9's per-fight projections loop) can fetch each watch key's
+// rows once and reuse this matcher per fight, instead of re-querying the
+// store per fight -- without duplicating the comparison logic in two places.
+function matchFightIdInMirrorRows(mirrorFights, fighterA, fighterB) {
+  const targetA = normalise(fighterA || '');
+  const targetB = normalise(fighterB || '');
+  if (!targetA || !targetB) return null;
+  const rows = Array.isArray(mirrorFights) ? mirrorFights : [];
+  const match = rows.find((row) => {
+    const rowA = normalise(row?.fighterA || '');
+    const rowB = normalise(row?.fighterB || '');
+    if (!rowA || !rowB) return false;
+    return (rowA === targetA && rowB === targetB) || (rowA === targetB && rowB === targetA);
+  });
+  return match?.fightId ? String(match.fightId) : null;
+}
+
 // Task 8 (guided-menu-unification): bridge mainCard's synthetic, per-call
 // positional fightId (fight_1, fight_2...) to the stable, DB-persisted
 // event_fight_mirror.fight_id that getFightContextByIdForStore resolves
@@ -1513,21 +1534,24 @@ function projectionSnapshotMatchesFight(snapshot = {}, fight = {}) {
 // technique as projectionSnapshotMatchesFight above, and the same
 // ['next_event', 'current_event'] watch-key fallback order as
 // getFightContextByIdForStore (src/core/telegramBot.js) uses.
+//
+// Single-fight convenience wrapper: queries the store fresh for each watch
+// key. For call sites that resolve many fights in the same turn (an event
+// card loop), prefer fetching userStore.getEventFightMirror('next_event')/
+// ('current_event') once and calling matchFightIdInMirrorRows directly per
+// fight -- see the wantsEventProjections block, which does exactly that to
+// avoid one store query per fight.
 export function resolveStableFightIdByNames(userStore, fighterA, fighterB) {
   if (!userStore?.getEventFightMirror) return null;
-  const targetA = normalise(fighterA || '');
-  const targetB = normalise(fighterB || '');
-  if (!targetA || !targetB) return null;
+  // Cheap fast-path guard (string normalise only, no store access) so an
+  // invalid/empty name pair still short-circuits before ever querying the
+  // store, same as before this function delegated to matchFightIdInMirrorRows.
+  if (!normalise(fighterA || '') || !normalise(fighterB || '')) return null;
 
   for (const watchKey of ['next_event', 'current_event']) {
     const mirrorFights = userStore.getEventFightMirror(watchKey) || [];
-    const match = mirrorFights.find((row) => {
-      const rowA = normalise(row?.fighterA || '');
-      const rowB = normalise(row?.fighterB || '');
-      if (!rowA || !rowB) return false;
-      return (rowA === targetA && rowB === targetB) || (rowA === targetB && rowB === targetA);
-    });
-    if (match?.fightId) return String(match.fightId);
+    const resolved = matchFightIdInMirrorRows(mirrorFights, fighterA, fighterB);
+    if (resolved) return resolved;
   }
   return null;
 }
@@ -6946,6 +6970,20 @@ export function createBettingWizard({
         limit: 5,
       });
 
+      // Fetch event_fight_mirror ONCE per watch key for the whole card, not once
+      // per fight -- getEventFightMirror is a real synchronous store query (SQLite
+      // read), and a ~13-fight card would otherwise fire up to 26 redundant queries
+      // (next_event + current_event, per fight) all returning identical rows.
+      // next_event rows are listed first so a single find() below reproduces
+      // resolveStableFightIdByNames' "try next_event, fall back to current_event"
+      // priority order without duplicating that fallback logic per fight.
+      const mirrorFightsForLookup = userStore?.getEventFightMirror
+        ? [
+            ...(userStore.getEventFightMirror('next_event') || []),
+            ...(userStore.getEventFightMirror('current_event') || []),
+          ]
+        : [];
+
       const perFightReplies = [];
       for (const [index, fight] of fights.entries()) {
         const storedProjection = storedProjections.find((row) =>
@@ -6989,6 +7027,13 @@ export function createBettingWizard({
           .slice(1, 2);
         const fightLabel = `${fight.fighterA} vs ${fight.fighterB}`;
 
+        // These two boundary checks are intentionally two INDEPENDENT ifs, not an
+        // if/else -- on a single-fight card index 0 is also fights.length - 1, and
+        // that one message must get BOTH the header (below) and the footer/top-
+        // opportunities block (further down, after the per-fight content). Collapsing
+        // this into if/else-if would silently drop the footer on every single-fight
+        // card. See the "single fight gets both header and footer" test in
+        // __tests__/bettingWizard.test.js for the regression guard.
         const fightLines = [];
         if (index === 0) {
           fightLines.push(...headerLines, '');
@@ -7055,6 +7100,8 @@ export function createBettingWizard({
           }
         }
 
+        // Independent from the `index === 0` header check above (see the comment
+        // there) -- on a single-fight card both fire on the same iteration.
         if (index === fights.length - 1) {
           if (topOpportunities.length) {
             fightLines.push('', '🔥 Oportunidades precomputadas (top del evento)');
@@ -7069,7 +7116,7 @@ export function createBettingWizard({
           );
         }
 
-        const stableFightId = resolveStableFightIdByNames(userStore, fight.fighterA, fight.fighterB);
+        const stableFightId = matchFightIdInMirrorRows(mirrorFightsForLookup, fight.fighterA, fight.fighterB);
         perFightReplies.push({
           text: fightLines.join('\n').trim(),
           replyMarkup: stableFightId
