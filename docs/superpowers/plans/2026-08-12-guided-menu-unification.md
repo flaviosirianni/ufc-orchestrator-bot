@@ -616,7 +616,7 @@ Expected: FAIL — `getFightContextByIdForStore is not defined`.
 
 - [ ] **Step 3: Implement**
 
-Add near the other pure helpers at module level (outside the `createTelegramBot` closure, so it's independently testable and exportable):
+Add near the other pure helpers at module level (outside `startTelegramBot`'s closure, so it's independently testable and exportable):
 
 ```js
 export function getFightContextByIdForStore(store, fightId) {
