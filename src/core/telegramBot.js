@@ -902,8 +902,16 @@ export function isGuidedCallbackAllowed(
   if (/^qa:nutrition_tutorial:[a-z0-9_]+$/.test(value)) return true;
   if (/^qa:med_select_patient:\d+$/.test(value)) return true;
   if (/^qa:med_set_status:[a-z_]+:\d+$/.test(value)) return true;
-  if (/^qa:record_bet_for:[a-zA-Z0-9_]{1,64}$/.test(value)) return true;
-  if (/^qa:analyze_quotes_for:[a-zA-Z0-9_]{1,64}$/.test(value)) return true;
+  // Review fix (guided-menu-unification, Task 4+5 commit 8282fe4): Telegram's
+  // inline-button callback_data has a hard 64-BYTE limit on the WHOLE string,
+  // prefix included -- not 64 chars on the fight_id alone. 'qa:record_bet_for:'
+  // is 18 bytes and 'qa:analyze_quotes_for:' is 22 bytes (both ASCII, so
+  // bytes === chars), so the fight_id itself is capped at 64-18=46 and
+  // 64-22=42 respectively to keep the combined string within what Telegram
+  // will actually accept (otherwise a 400 BUTTON_DATA_INVALID once button
+  // generation for these callbacks lands in a later task).
+  if (/^qa:record_bet_for:[a-zA-Z0-9_]{1,46}$/.test(value)) return true;
+  if (/^qa:analyze_quotes_for:[a-zA-Z0-9_]{1,42}$/.test(value)) return true;
   return /^qa:topup_pack:\d+$/i.test(value);
 }
 

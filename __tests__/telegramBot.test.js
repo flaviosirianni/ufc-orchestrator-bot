@@ -1708,6 +1708,41 @@ export async function runTelegramBotTests() {
     );
   });
 
+  // Review fix (guided-menu-unification, Task 4+5 commit 8282fe4): Telegram's
+  // inline-button callback_data has a hard 64-BYTE limit on the WHOLE string,
+  // prefix included -- not 64 chars on the fight_id alone. 'qa:record_bet_for:'
+  // is 18 bytes, 'qa:analyze_quotes_for:' is 22 bytes (both ASCII, so
+  // bytes === chars), so the safe fight_id ceiling is 64-18=46 and 64-22=42
+  // respectively. These pin that boundary so a future edit can't silently
+  // widen it back past what Telegram will actually accept.
+  tests.push(() => {
+    const maxRecordBetFightId = 'x'.repeat(46);
+    const overRecordBetFightId = 'x'.repeat(47);
+    assert.equal(
+      isGuidedCallbackAllowed(`qa:record_bet_for:${maxRecordBetFightId}`, { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      true,
+      'fight_id de 46 chars (18 + 46 = 64 bytes) es el limite real de callback_data y debe pasar'
+    );
+    assert.equal(
+      isGuidedCallbackAllowed(`qa:record_bet_for:${overRecordBetFightId}`, { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      false,
+      'fight_id de 47 chars excede los 64 bytes de callback_data y debe rechazarse'
+    );
+
+    const maxAnalyzeQuotesFightId = 'x'.repeat(42);
+    const overAnalyzeQuotesFightId = 'x'.repeat(43);
+    assert.equal(
+      isGuidedCallbackAllowed(`qa:analyze_quotes_for:${maxAnalyzeQuotesFightId}`, { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      true,
+      'fight_id de 42 chars (22 + 42 = 64 bytes) es el limite real de callback_data y debe pasar'
+    );
+    assert.equal(
+      isGuidedCallbackAllowed(`qa:analyze_quotes_for:${overAnalyzeQuotesFightId}`, { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      false,
+      'fight_id de 43 chars excede los 64 bytes de callback_data y debe rechazarse'
+    );
+  });
+
   // Task 5 (guided-menu-unification): resolve a fight_id to fighter/event
   // context via the store-parameterized helper (testable without the whole
   // startTelegramBot closure).
@@ -1748,6 +1783,185 @@ export async function runTelegramBotTests() {
     };
 
     assert.equal(getFightContextByIdForStore(fakeStore, 'fight_1'), null);
+  });
+
+  // Review fix (guided-menu-unification, Task 4+5 commit 8282fe4): the tests
+  // above only exercise getFightContextByIdForStore and isGuidedCallbackAllowed
+  // in isolation -- neither fires an actual callback_query through
+  // startTelegramBot, so the dispatch handlers themselves (the DI wiring,
+  // the fightContext attach, the null-fightContext fallback, the
+  // ledger-disabled guard) had zero coverage. These four follow the
+  // established fakeBot.emit('callback_query', ...) pattern used throughout
+  // this file (see the qa:record_bet callback tests above) to close that gap.
+
+  tests.push(async () => {
+    // Resolvable fight_id through the full DI wiring: options.getEventFightMirror
+    // / getEventWatchState -> getFightContextById -> the sent hint names the
+    // real fighters -> guided-action state carries the resolved fightContext.
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+    const fakeStore = {
+      getEventWatchState(watchKey) {
+        if (watchKey === 'next_event') {
+          return { eventId: 'evt_dispatch_1', eventName: 'UFC Fight Night: Dispatch Test' };
+        }
+        return null;
+      },
+      getEventFightMirror(watchKey) {
+        if (watchKey === 'next_event') {
+          return [{ fightId: 'fight_dispatch_1', fighterA: 'Dispatch Fighter A', fighterB: 'Dispatch Fighter B' }];
+        }
+        return [];
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      getEventFightMirror: fakeStore.getEventFightMirror,
+      getEventWatchState: fakeStore.getEventWatchState,
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:record_bet_for:fight_dispatch_1',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /Dispatch Fighter A vs Dispatch Fighter B/);
+
+    const state = runtime.getGuidedActionState(100);
+    assert.equal(state.action, 'record_bet');
+    assert.deepEqual(state.fightContext, {
+      fightId: 'fight_dispatch_1',
+      fighterA: 'Dispatch Fighter A',
+      fighterB: 'Dispatch Fighter B',
+      eventId: 'evt_dispatch_1',
+      eventName: 'UFC Fight Night: Dispatch Test',
+    });
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // Unresolvable fight_id through the real dispatch path: the store is
+    // wired, but the id in callback_data matches nothing in it. Must fall
+    // back to the generic hint (never "undefined vs undefined"), and store
+    // guided-action state with fightContext: null rather than a half-filled
+    // object.
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+    const fakeStore = {
+      getEventWatchState(watchKey) {
+        if (watchKey === 'next_event') {
+          return { eventId: 'evt_dispatch_2', eventName: 'UFC Fight Night: Dispatch Test 2' };
+        }
+        return null;
+      },
+      getEventFightMirror(watchKey) {
+        if (watchKey === 'next_event') {
+          return [{ fightId: 'fight_dispatch_1', fighterA: 'Dispatch Fighter A', fighterB: 'Dispatch Fighter B' }];
+        }
+        return [];
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      getEventFightMirror: fakeStore.getEventFightMirror,
+      getEventWatchState: fakeStore.getEventWatchState,
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:analyze_quotes_for:fight_does_not_exist',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.doesNotMatch(out.text, /undefined/i);
+    assert.doesNotMatch(out.text, /Analizando cuotas para/);
+
+    const state = runtime.getGuidedActionState(100);
+    assert.equal(state.action, 'analyze_quotes');
+    assert.equal(state.fightContext, null);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // startTelegramBot with getEventFightMirror/getEventWatchState not wired
+    // at all -- simulates Nutrition/Ovidius (or any other composition root)
+    // reusing this file without the UFC-specific verifiedEventStoreView
+    // plumbing. Must degrade to the generic hint, never throw.
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:record_bet_for:fight_dispatch_1',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.doesNotMatch(out.text, /undefined/i);
+    assert.doesNotMatch(out.text, /Registrando apuesta para/);
+
+    const state = runtime.getGuidedActionState(100);
+    assert.equal(state.action, 'record_bet');
+    assert.equal(state.fightContext, null);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // guidedLedgerEnabled: false + qa:record_bet_for:<id> press -> the
+    // ledger-disabled refusal message, and no guided-action state mutation
+    // (the guard must return before ever calling getFightContextById).
+    const fakeBot = new FakeTelegramBot();
+    const router = createRouterSpy();
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedLedgerEnabled: false,
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+    });
+
+    await fakeBot.emit(
+      'callback_query',
+      createBaseCallback({
+        data: 'qa:record_bet_for:fight_dispatch_1',
+      })
+    );
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /ledger habilitado/i);
+
+    assert.equal(runtime.getGuidedActionState(100), null);
+
+    runtime.close();
   });
 
   for (const test of tests) {
