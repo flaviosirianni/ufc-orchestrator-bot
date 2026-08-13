@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { createBettingWizard, resolveStableFightIdByNames } from '../src/agents/bettingWizard.js';
+import {
+  createBettingWizard,
+  resolveStableFightIdByNames,
+  buildLiveOddsFightHints,
+  buildLiveOddsEventContext,
+  buildEventStateFromOddsRows,
+} from '../src/agents/bettingWizard.js';
 import { createConversationStore } from '../src/core/conversationStore.js';
 
 function createSequentialFakeClient(responses = []) {
@@ -5052,6 +5058,159 @@ export async function runBettingWizardTests() {
     );
     assert.equal(resolveStableFightIdByNames(fakeStore, 'Nobody Real', 'Also Nobody'), null);
     assert.equal(resolveStableFightIdByNames({}, 'Islam Makhachev', 'Ian Garry'), null);
+  });
+
+  // --- Task 11: filter non-UFC fights out of live-event detection ----------
+  // Bug de produccion: current_event ("¿hay evento UFC en vivo?") se calculaba
+  // agrupando filas de odds_events_index solo por cercania temporal a "ahora",
+  // sin validar que la pelea fuera realmente UFC (vs. otra promocion que
+  // comparte el mismo sport key mma_mixed_martial_arts en la fuente de odds).
+  // En produccion, current_event llego a quedar seteado en "Matt Adams vs
+  // Anthony Wint" — pelea real, pero no de UFC.
+
+  tests.push(() => {
+    const nowMs = Date.parse('2026-08-12T16:00:00.000Z');
+    const rows = [
+      // Fila real de produccion en odds_events_index: cartelera MMA no-UFC ocurriendo ahora.
+      {
+        eventId: 'b23487230c72d1a9c46a58cf02db58cc',
+        eventName: 'Matt Adams vs Anthony Wint',
+        commenceTime: '2026-08-12T01:15:00Z',
+        homeTeam: 'Matt Adams',
+        awayTeam: 'Anthony Wint',
+        completed: false,
+      },
+    ];
+    const isUfcFighterFake = (name) => ['Islam Makhachev', 'Ian Garry'].includes(name);
+
+    const context = buildLiveOddsEventContext(
+      rows,
+      nowMs,
+      { referenceDateIso: '2026-08-12', timezone: 'UTC' },
+      isUfcFighterFake
+    );
+
+    assert.equal(context, null, 'una pelea que no es UFC no debe poder convertirse en current_event');
+  });
+
+  tests.push(() => {
+    const nowMs = Date.parse('2026-08-15T03:00:00.000Z');
+    const rows = [
+      {
+        eventId: 'e1ae0688f10d4fcdab848fbb0aa4db28',
+        eventName: 'Islam Makhachev vs Ian Garry',
+        commenceTime: '2026-08-15T03:30:00Z',
+        homeTeam: 'Islam Makhachev',
+        awayTeam: 'Ian Garry',
+        completed: false,
+      },
+    ];
+    const isUfcFighterFake = (name) => ['Islam Makhachev', 'Ian Garry'].includes(name);
+
+    const context = buildLiveOddsEventContext(
+      rows,
+      nowMs,
+      { referenceDateIso: '2026-08-15', timezone: 'UTC' },
+      isUfcFighterFake
+    );
+
+    assert.ok(context, 'una pelea real de UFC debe seguir pudiendo ser current_event');
+    assert.equal(context.eventName, 'Islam Makhachev vs Ian Garry');
+  });
+
+  tests.push(() => {
+    // Contrato fail-open: handleMessage solo construye isUfcFighter como funcion real
+    // cuando ufcStats esta disponible; si no, pasa `undefined`. Sin isUfcFighter wireado
+    // buildLiveOddsEventContext debe preservar el comportamiento previo (sin filtrar) en
+    // vez de tratar cada fila como no-UFC — de lo contrario cualquier caller que hoy no
+    // provee ufcStats (13 tests existentes de handleMessage, y potencialmente produccion
+    // si ufc_stats.db no cargo) dejaria de detectar CUALQUIER evento en vivo.
+    const nowMs = Date.parse('2026-08-12T16:00:00.000Z');
+    const rows = [
+      {
+        eventId: 'b23487230c72d1a9c46a58cf02db58cc',
+        eventName: 'Matt Adams vs Anthony Wint',
+        commenceTime: '2026-08-12T01:15:00Z',
+        homeTeam: 'Matt Adams',
+        awayTeam: 'Anthony Wint',
+        completed: false,
+      },
+    ];
+
+    const context = buildLiveOddsEventContext(rows, nowMs, {
+      referenceDateIso: '2026-08-12',
+      timezone: 'UTC',
+    });
+
+    assert.ok(
+      context,
+      'sin isUfcFighter wireado, el filtro debe fail-open y no romper el comportamiento previo'
+    );
+  });
+
+  tests.push(() => {
+    const nowMs = Date.parse('2026-08-15T03:00:00.000Z');
+    const isUfcFighterFake = (name) => ['Islam Makhachev', 'Ian Garry'].includes(name);
+    const rows = [
+      {
+        eventId: 'b23487230c72d1a9c46a58cf02db58cc',
+        eventName: 'Matt Adams vs Anthony Wint',
+        commenceTime: '2026-08-15T03:10:00Z',
+        homeTeam: 'Matt Adams',
+        awayTeam: 'Anthony Wint',
+        completed: false,
+      },
+      {
+        eventId: 'e1ae0688f10d4fcdab848fbb0aa4db28',
+        eventName: 'UFC 326',
+        commenceTime: '2026-08-15T03:30:00Z',
+        homeTeam: 'Islam Makhachev',
+        awayTeam: 'Ian Garry',
+        completed: false,
+      },
+    ];
+
+    const hints = buildLiveOddsFightHints(rows, nowMs, isUfcFighterFake);
+
+    assert.deepEqual(hints, ['Islam Makhachev vs Ian Garry']);
+  });
+
+  tests.push(() => {
+    const isUfcFighterFake = (name) => ['Islam Makhachev', 'Ian Garry'].includes(name);
+    const eventContext = {
+      eventId: 'ufc_326_2026-08-15',
+      eventName: 'UFC 326',
+      eventDate: '2026-08-15',
+    };
+    const oddsRows = [
+      {
+        eventId: 'ufc_326_2026-08-15',
+        eventName: 'UFC 326',
+        commenceTime: '2026-08-15T03:30:00Z',
+        homeTeam: 'Islam Makhachev',
+        awayTeam: 'Ian Garry',
+        completed: false,
+      },
+      {
+        eventId: 'ufc_326_2026-08-15',
+        eventName: 'UFC 326',
+        commenceTime: '2026-08-15T02:00:00Z',
+        homeTeam: 'Matt Adams',
+        awayTeam: 'Anthony Wint',
+        completed: false,
+      },
+    ];
+
+    const eventState = buildEventStateFromOddsRows({
+      oddsRows,
+      eventContext,
+      isUfcFighter: isUfcFighterFake,
+    });
+
+    assert.ok(eventState);
+    assert.equal(eventState.mainCard.length, 1);
+    assert.equal(eventState.mainCard[0].fighterA, 'Islam Makhachev');
+    assert.equal(eventState.mainCard[0].fighterB, 'Ian Garry');
   });
 
   for (const test of tests) {

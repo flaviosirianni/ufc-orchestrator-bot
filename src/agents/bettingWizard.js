@@ -840,10 +840,37 @@ function collectMonitoredFightersFromMainCard(mainCard = []) {
   return out;
 }
 
-function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now()) {
+/**
+ * rowIsLikelyUfc(row, isUfcFighter)
+ *
+ * Por que existe: las filas de odds_events_index comparten el sport key
+ * mma_mixed_martial_arts con promociones no-UFC. Sin este filtro, cualquier
+ * pelea MMA cercana a "ahora" puede convertirse en current_event aunque no
+ * sea UFC (incidente confirmado en produccion: "Matt Adams vs Anthony
+ * Wint"). Exige que al menos un peleador de la fila resuelva contra el
+ * roster local de ufc_stats.db antes de que la fila entre al agrupamiento
+ * por proximidad temporal.
+ *
+ * @param {object} row - Fila cruda de odds_events_index (homeTeam/awayTeam/...).
+ * @param {(name: string) => boolean} [isUfcFighter] - Predicado de roster UFC.
+ * @returns {boolean} true si la fila debe considerarse candidata a evento UFC.
+ * Efectos secundarios: ninguno (funcion pura).
+ * Errores esperados: ninguno. Sin isUfcFighter (no wireado), falla abierto
+ * y no filtra nada — preserva el comportamiento previo a este fix.
+ */
+function rowIsLikelyUfc(row, isUfcFighter) {
+  if (typeof isUfcFighter !== 'function') return true; // fail-open only if no roster check is wired at all
+  const home = String(row?.homeTeam || '').trim();
+  const away = String(row?.awayTeam || '').trim();
+  return isUfcFighter(home) || isUfcFighter(away);
+}
+
+export function buildLiveOddsFightHints(oddsEvents = [], nowMs = Date.now(), isUfcFighter) {
   const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
   if (!rows.length) return [];
-  const near = rows
+  const ufcRows = rows.filter((row) => rowIsLikelyUfc(row, isUfcFighter));
+  if (!ufcRows.length) return [];
+  const near = ufcRows
     .filter((row) => {
       const commenceMs = Date.parse(String(row?.commenceTime || ''));
       if (!Number.isFinite(commenceMs)) return false;
@@ -917,18 +944,21 @@ function mergeOddsEventRows(...lists) {
   return Array.from(merged.values());
 }
 
-function buildEventStateFromOddsRows({
+export function buildEventStateFromOddsRows({
   oddsRows = [],
   eventContext = null,
+  isUfcFighter,
 } = {}) {
   const rows = Array.isArray(oddsRows) ? oddsRows : [];
   if (!rows.length || !eventContext?.eventName) return null;
+  const ufcRows = rows.filter((row) => rowIsLikelyUfc(row, isUfcFighter));
+  if (!ufcRows.length) return null;
 
   const contextEventId = String(eventContext?.eventId || '').trim();
   const contextEventName = normalise(eventContext?.eventName || '');
   const contextEventDate = toIsoDateSafe(eventContext?.eventDate || '');
 
-  const related = rows.filter((row) => {
+  const related = ufcRows.filter((row) => {
     const rowEventId = String(row?.eventId || '').trim();
     if (contextEventId && rowEventId && rowEventId === contextEventId) {
       return true;
@@ -1228,17 +1258,20 @@ function shouldPreferWebEventForIntel({
   return false;
 }
 
-function buildLiveOddsEventContext(
+export function buildLiveOddsEventContext(
   oddsEvents = [],
   nowMs = Date.now(),
-  { referenceDateIso = null, timezone = DEFAULT_USER_TIMEZONE } = {}
+  { referenceDateIso = null, timezone = DEFAULT_USER_TIMEZONE } = {},
+  isUfcFighter
 ) {
   const rows = Array.isArray(oddsEvents) ? oddsEvents : [];
   if (!rows.length) return null;
+  const ufcRows = rows.filter((row) => rowIsLikelyUfc(row, isUfcFighter));
+  if (!ufcRows.length) return null;
   const todayIso = resolveReferenceDateIso({ referenceDateIso, nowMs, timezone });
 
   const grouped = new Map();
-  for (const row of rows) {
+  for (const row of ufcRows) {
     const commenceMs = Date.parse(String(row?.commenceTime || ''));
     if (!Number.isFinite(commenceMs)) continue;
     const deltaHours = Math.abs(commenceMs - nowMs) / 3600000;
@@ -6090,6 +6123,24 @@ export function createBettingWizard({
     const wantsLiveEventStatus = hasLiveEventStatusSignals(originalMessage);
     const wantsFightResultLookup = hasFightResultLookupSignals(originalMessage);
     const newsAlertsIntent = parseNewsAlertsIntent(originalMessage);
+    // Roster check para Task 11: solo se construye si ufcStats esta realmente
+    // disponible y expone getFighterStats; si no, se pasa `undefined` para que
+    // rowIsLikelyUfc falle abierto (mismo comportamiento que antes del fix) en
+    // vez de tratar toda fila como no-UFC.
+    const isUfcFighter =
+      typeof ufcStats?.isAvailable === 'function' &&
+      ufcStats.isAvailable() &&
+      typeof ufcStats?.getFighterStats === 'function'
+        ? (name) => {
+            if (!name) return false;
+            try {
+              const stats = ufcStats.getFighterStats({ fighterName: name, limit: 1 });
+              return stats?.ok !== false && Array.isArray(stats?.fights) && stats.fights.length > 0;
+            } catch {
+              return false;
+            }
+          }
+        : undefined;
     let oddsSnapshot = null;
     let ledgerSummary = null;
     let userProfile = null;
@@ -6364,11 +6415,13 @@ export function createBettingWizard({
       };
 
       let oddsWindowEvents = loadOddsLiveRows();
-      let liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
-      let liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs, {
-        referenceDateIso: localNow.dateIso,
-        timezone: userTimezone,
-      });
+      let liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs, isUfcFighter);
+      let liveOddsContext = buildLiveOddsEventContext(
+        oddsWindowEvents,
+        nowMs,
+        { referenceDateIso: localNow.dateIso, timezone: userTimezone },
+        isUfcFighter
+      );
       if (
         (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
         typeof userStore?.refreshLiveScores === 'function'
@@ -6376,11 +6429,13 @@ export function createBettingWizard({
         try {
           await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
           oddsWindowEvents = loadOddsLiveRows();
-          liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs);
-          liveOddsContext = buildLiveOddsEventContext(oddsWindowEvents, nowMs, {
-            referenceDateIso: localNow.dateIso,
-            timezone: userTimezone,
-          });
+          liveOddsHints = buildLiveOddsFightHints(oddsWindowEvents, nowMs, isUfcFighter);
+          liveOddsContext = buildLiveOddsEventContext(
+            oddsWindowEvents,
+            nowMs,
+            { referenceDateIso: localNow.dateIso, timezone: userTimezone },
+            isUfcFighter
+          );
         } catch (error) {
           console.error('⚠️ live event score refresh failed:', error);
         }
@@ -6388,6 +6443,7 @@ export function createBettingWizard({
       const liveEventStateFromOdds = buildEventStateFromOddsRows({
         oddsRows: oddsWindowEvents,
         eventContext: liveOddsContext,
+        isUfcFighter,
       });
 
       let liveWebContext = null;
@@ -6646,10 +6702,12 @@ export function createBettingWizard({
         ? Math.abs(dateDiffInDays(fallbackEventDate, todayIso))
         : Number.POSITIVE_INFINITY;
       let oddsLiveRows = loadOddsLiveRows();
-      let liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs, {
-        referenceDateIso,
-        timezone: referenceTimezone,
-      });
+      let liveOddsContext = buildLiveOddsEventContext(
+        oddsLiveRows,
+        nowMs,
+        { referenceDateIso, timezone: referenceTimezone },
+        isUfcFighter
+      );
       if (
         (!liveOddsContext || Number(liveOddsContext?.confidenceScore || 0) < 45) &&
         typeof userStore?.refreshLiveScores === 'function'
@@ -6657,10 +6715,12 @@ export function createBettingWizard({
         try {
           await userStore.refreshLiveScores({ force: true, daysFrom: 3 });
           oddsLiveRows = loadOddsLiveRows();
-          liveOddsContext = buildLiveOddsEventContext(oddsLiveRows, nowMs, {
-            referenceDateIso,
-            timezone: referenceTimezone,
-          });
+          liveOddsContext = buildLiveOddsEventContext(
+            oddsLiveRows,
+            nowMs,
+            { referenceDateIso, timezone: referenceTimezone },
+            isUfcFighter
+          );
         } catch (error) {
           console.error('⚠️ intel event refreshLiveScores failed:', error);
         }
@@ -6668,6 +6728,7 @@ export function createBettingWizard({
       const liveEventState = buildEventStateFromOddsRows({
         oddsRows: oddsLiveRows,
         eventContext: liveOddsContext,
+        isUfcFighter,
       });
       let reconciledWithLive = false;
       let reconciledWithWeb = false;
