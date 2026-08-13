@@ -1571,3 +1571,26 @@ Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UF
      - Bug independiente del alcance de la unificacion de menus del bot UFC; no se corrigio de fondo en esa sesion a proposito, para no tocar un bot medico en produccion sin revision dedicada.
    - **Prioridad:** media-alta (afecta la mayor parte de la superficie conversacional de un bot en produccion; sigue sin haber riesgo de datos/dinero — Ovidius no maneja ledger).
    - **Estado:** parcialmente mitigado. Hallado y documentado durante la sesion 2026-08-12 (implementacion de `docs/superpowers/plans/2026-08-12-guided-menu-unification.md`, Tasks 2-3); el turno de seguimiento de chat libre se restauro el mismo dia via `getDefaultGuidedAction` (fast-follow de re-revision de codigo). Interpretacion de documento/foto y el resto de los flujos especializados, y el gap de fondo en `GUIDED_INPUT_ACTIONS`, siguen pendientes — requieren su propia revision dedicada con contexto real de Ovidius.
+
+45. **Sin proteccion de rate-limit al enviar multiples mensajes de Telegram en una sola respuesta (`replies[]`)**
+   - **Objetivo de negocio/UX:** que una respuesta que dispara varios mensajes seguidos (ej. una cartelera completa, una pelea por mensaje) no pierda mensajes silenciosamente si Telegram aplica flood control.
+   - **Problema observado (hallazgo de la sesion 2026-08-12, durante implementacion de la unificacion de menus del bot UFC, Task 9):**
+     - `deliverToRouter` (`src/core/telegramBot.js`, agregado en Task 7 de `docs/superpowers/plans/2026-08-12-guided-menu-unification.md`, ~linea 2211-2241) itera sobre `reply.replies[]` y hace `await sendBotMessage(...)` secuencial por cada entrada, con manejo de errores por entrada (try/catch agregado en el mismo Task 7 tras revision de codigo) pero **sin ningun retraso entre envios ni manejo de `retry_after`** si Telegram devuelve un 429.
+     - Con la Task 9 (proyecciones de evento, un mensaje por pelea), esta es la primera funcionalidad real que puede mandar rafagas de hasta ~13 mensajes seguidos (cartelera completa) en respuesta a una sola accion del usuario — antes del Task 9 el loop nunca recibia mas de los 2 entries de fixtures de test.
+     - Si Telegram devuelve 429 en un mensaje del medio de la rafaga, ese mensaje puntual se pierde silenciosamente (se loguea el error y se sigue con el resto) — el usuario ve una cartelera con un hueco, sin ningun aviso en el chat de que algo no se envio.
+   - **Comportamiento deseado para el usuario final:** una cartelera completa de peleas llega entera, sin huecos silenciosos, incluso si Telegram aplica flood control en algun punto de la rafaga.
+   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
+     - Manejar el codigo 429 / `retry_after` de la respuesta de Telegram explicitamente en el catch del loop de `deliverToRouter`, reintentando esa entrada puntual despues del backoff indicado en vez de descartarla.
+     - Evaluar un pequeño delay entre envios secuenciales para cartelera grandes (proporcional a la cantidad de `replies`), para reducir la probabilidad de pegarle al limite en primer lugar.
+     - Si despues de reintentar sigue fallando, considerar un aviso agregado al final de la rafaga ("no pude mandarte N peleas, escribime 'proyecciones' de nuevo") en vez de silencio total.
+   - **Criterios de aceptacion verificables:**
+     - Una rafaga de ~13 mensajes simulando un 429 en un punto intermedio termina entregando los 13 mensajes (via reintento), no 12.
+     - Sin 429 simulado, el comportamiento actual (secuencial, sin delay perceptible para carteleras chicas) no se degrada.
+   - **Pruebas de regresion necesarias:**
+     - Simular un `FakeTelegramBot`/doble que devuelva un 429 con `retry_after` en una posicion intermedia de una rafaga larga y verificar que el mensaje termina llegando.
+     - Verificar que una rafaga sin errores no cambia su comportamiento/tiempos de forma perceptible.
+   - **Riesgos y decisiones abiertas:**
+     - Cambia codigo de Task 7 (`deliverToRouter`), no de Task 9 — Task 9 solo es lo que empieza a ejercitar el loop con payloads reales grandes; el fix pertenece al archivo/tarea anterior, no se atendio en la misma revision para no expandir el alcance de Task 9 mas alla de lo que el plan aprobado cubria.
+     - Los limites reales de Telegram (~30 msj/seg global, ~1 msj/seg por chat) hacen que el riesgo sea bajo para uso normal (una sola cartelera por turno, no abuso en rafaga), pero no nulo.
+   - **Prioridad:** media (afecta confiabilidad de la funcionalidad central del plan de unificacion de menus, pero es un caso de borde no confirmado en produccion aun).
+   - **Estado:** pendiente. Hallado durante revision de codigo de Task 9 (`docs/superpowers/plans/2026-08-12-guided-menu-unification.md`); deliberadamente no corregido en esa tarea por pertenecer al archivo/alcance de Task 7.
