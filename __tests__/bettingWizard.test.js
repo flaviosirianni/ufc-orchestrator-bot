@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createBettingWizard } from '../src/agents/bettingWizard.js';
+import { createBettingWizard, resolveStableFightIdByNames } from '../src/agents/bettingWizard.js';
 import { createConversationStore } from '../src/core/conversationStore.js';
 
 function createSequentialFakeClient(responses = []) {
@@ -4637,6 +4637,26 @@ export async function runBettingWizardTests() {
       sentInstructions,
       /Objetivo: analisis de cuotas \(screenshot o texto estructurado\)/
     );
+  });
+
+  tests.push(() => {
+    const fakeStore = {
+      getEventFightMirror(watchKey) {
+        if (watchKey !== 'next_event') return [];
+        return [
+          { fightId: 'b23487230c72d1a9c46a58cf02db58cc', fighterA: 'Islam Makhachev', fighterB: 'Ian Garry' },
+          { fightId: 'e1ae0688f10d4fcdab848fbb0aa4db28', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson' },
+        ];
+      },
+    };
+
+    // Order-independent: mainCard/tool-call order isn't guaranteed to match the mirror's stored order.
+    assert.equal(
+      resolveStableFightIdByNames(fakeStore, 'Gillian Robertson', 'Mackenzie Dern'),
+      'e1ae0688f10d4fcdab848fbb0aa4db28'
+    );
+    assert.equal(resolveStableFightIdByNames(fakeStore, 'Nobody Real', 'Also Nobody'), null);
+    assert.equal(resolveStableFightIdByNames({}, 'Islam Makhachev', 'Ian Garry'), null);
   });
 
   for (const test of tests) {

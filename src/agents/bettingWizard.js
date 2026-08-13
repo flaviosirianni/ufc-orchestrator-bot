@@ -1506,6 +1506,32 @@ function projectionSnapshotMatchesFight(snapshot = {}, fight = {}) {
   return (snapA === fightA && snapB === fightB) || (snapA === fightB && snapB === fightA);
 }
 
+// Task 8 (guided-menu-unification): bridge mainCard's synthetic, per-call
+// positional fightId (fight_1, fight_2...) to the stable, DB-persisted
+// event_fight_mirror.fight_id that getFightContextByIdForStore resolves
+// callback buttons against. Same order-independent fighter-name match
+// technique as projectionSnapshotMatchesFight above, and the same
+// ['next_event', 'current_event'] watch-key fallback order as
+// getFightContextByIdForStore (src/core/telegramBot.js) uses.
+export function resolveStableFightIdByNames(userStore, fighterA, fighterB) {
+  if (!userStore?.getEventFightMirror) return null;
+  const targetA = normalise(fighterA || '');
+  const targetB = normalise(fighterB || '');
+  if (!targetA || !targetB) return null;
+
+  for (const watchKey of ['next_event', 'current_event']) {
+    const mirrorFights = userStore.getEventFightMirror(watchKey) || [];
+    const match = mirrorFights.find((row) => {
+      const rowA = normalise(row?.fighterA || '');
+      const rowB = normalise(row?.fighterB || '');
+      if (!rowA || !rowB) return false;
+      return (rowA === targetA && rowB === targetB) || (rowA === targetB && rowB === targetA);
+    });
+    if (match?.fightId) return String(match.fightId);
+  }
+  return null;
+}
+
 function describeProjectedMethod(method = '') {
   const key = String(method || '').trim().toLowerCase();
   if (key === 'inside_distance_or_clear_decision') {
