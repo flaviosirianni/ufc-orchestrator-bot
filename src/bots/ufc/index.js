@@ -397,6 +397,8 @@ export async function bootstrapBot({ manifest } = {}) {
         interactionMode:
           manifest?.interaction_mode || process.env.TELEGRAM_INTERACTION_MODE || 'guided_strict',
         token: telegramToken,
+        getEventFightMirror: verifiedEventStoreView.getEventFightMirror,
+        getEventWatchState: verifiedEventStoreView.getEventWatchState,
       })
     : createDisabledTelegramRuntime({
         botId,

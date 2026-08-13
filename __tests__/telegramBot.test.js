@@ -3,6 +3,8 @@ import {
   normalizeGuidedMenuId,
   resolveGuidedMessageDecision,
   startTelegramBot,
+  isGuidedCallbackAllowed,
+  getFightContextByIdForStore,
 } from '../src/core/telegramBot.js';
 
 class FakeTelegramBot {
@@ -1682,6 +1684,70 @@ export async function runTelegramBotTests() {
     runtime.setGuidedAction(chatId, 'record_bet');
     assert.equal(runtime.getGuidedAction(chatId), 'record_bet');
     runtime.close();
+  });
+
+  // Task 4 (guided-menu-unification): fight-scoped callback allowlist regex.
+  tests.push(() => {
+    assert.equal(
+      isGuidedCallbackAllowed('qa:record_bet_for:b23487230c72d1a9c46a58cf02db58cc', { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      true
+    );
+    assert.equal(
+      isGuidedCallbackAllowed('qa:analyze_quotes_for:fight_1', { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      true
+    );
+    assert.equal(
+      isGuidedCallbackAllowed('qa:record_bet_for:', { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      false,
+      'un fight_id vacio no debe pasar el allowlist'
+    );
+    assert.equal(
+      isGuidedCallbackAllowed('qa:record_bet_for:drop table bets', { ledgerEnabled: true, guidedMenuId: 'ufc_v1' }),
+      false,
+      'el fight_id debe ser alfanumerico, nada de texto libre en el callback_data'
+    );
+  });
+
+  // Task 5 (guided-menu-unification): resolve a fight_id to fighter/event
+  // context via the store-parameterized helper (testable without the whole
+  // startTelegramBot closure).
+  tests.push(() => {
+    const fakeStore = {
+      getEventWatchState(watchKey) {
+        if (watchKey === 'next_event') {
+          return { eventId: 'ufc_islam_makhachev_vs_ian_garry_2026-08-15', eventName: 'UFC: Islam Makhachev vs Ian Garry' };
+        }
+        return null;
+      },
+      getEventFightMirror(watchKey) {
+        if (watchKey === 'next_event') {
+          return [
+            { fightId: 'fight_1', fighterA: 'Islam Makhachev', fighterB: 'Ian Garry' },
+            { fightId: 'fight_2', fighterA: 'Mackenzie Dern', fighterB: 'Gillian Robertson' },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const context = getFightContextByIdForStore(fakeStore, 'fight_2');
+
+    assert.deepEqual(context, {
+      fightId: 'fight_2',
+      fighterA: 'Mackenzie Dern',
+      fighterB: 'Gillian Robertson',
+      eventId: 'ufc_islam_makhachev_vs_ian_garry_2026-08-15',
+      eventName: 'UFC: Islam Makhachev vs Ian Garry',
+    });
+  });
+
+  tests.push(() => {
+    const fakeStore = {
+      getEventWatchState() { return null; },
+      getEventFightMirror() { return []; },
+    };
+
+    assert.equal(getFightContextByIdForStore(fakeStore, 'fight_1'), null);
   });
 
   for (const test of tests) {

@@ -902,7 +902,39 @@ export function isGuidedCallbackAllowed(
   if (/^qa:nutrition_tutorial:[a-z0-9_]+$/.test(value)) return true;
   if (/^qa:med_select_patient:\d+$/.test(value)) return true;
   if (/^qa:med_set_status:[a-z_]+:\d+$/.test(value)) return true;
+  if (/^qa:record_bet_for:[a-zA-Z0-9_]{1,64}$/.test(value)) return true;
+  if (/^qa:analyze_quotes_for:[a-zA-Z0-9_]{1,64}$/.test(value)) return true;
   return /^qa:topup_pack:\d+$/i.test(value);
+}
+
+// Task 5 (guided-menu-unification): resolve a fight_id (as carried on
+// qa:record_bet_for:<fightId>/qa:analyze_quotes_for:<fightId> callback_data)
+// to fighter names + event context. Store-parameterized and module-level
+// (rather than reading guidedActionByChat-style closure state) so it's
+// testable with a plain fake store and reusable regardless of which watch
+// key ("next_event" vs "current_event") the caller's runtime happens to be
+// tracking. `store` is expected to be the same fail-closed
+// (EventTruthGate-verified) getEventFightMirror/getEventWatchState pair
+// already used for bettingWizard's userStore -- this function itself has no
+// opinion on that, it just calls whatever store it's given.
+export function getFightContextByIdForStore(store, fightId) {
+  const targetId = String(fightId || '').trim();
+  if (!targetId || !store?.getEventFightMirror) return null;
+
+  for (const watchKey of ['next_event', 'current_event']) {
+    const fights = store.getEventFightMirror(watchKey) || [];
+    const match = fights.find((fight) => String(fight?.fightId || '').trim() === targetId);
+    if (!match) continue;
+    const eventState = store.getEventWatchState ? store.getEventWatchState(watchKey) : null;
+    return {
+      fightId: targetId,
+      fighterA: match.fighterA,
+      fighterB: match.fighterB,
+      eventId: eventState?.eventId || null,
+      eventName: eventState?.eventName || null,
+    };
+  }
+  return null;
 }
 
 // Task 2 (guided-menu-unification): pure freshness check for a caller-owned
@@ -1470,6 +1502,17 @@ export function startTelegramBot(router, options = {}) {
     options.guidedMenuId || options.domainGuidedMenu || 'ufc_v1'
   );
   const guidedLedgerEnabled = options.guidedLedgerEnabled !== false;
+  // Task 5 (guided-menu-unification): same fail-closed (EventTruthGate-verified)
+  // event store reader pair already wired into bettingWizard's userStore in
+  // src/bots/ufc/index.js, threaded here too so fight_id -> fighter/event
+  // lookups for contextual callback buttons get identical semantics instead
+  // of a second, separately-behaved read path. Optional: falls back to null
+  // (getFightContextById returns null) when the composition root doesn't
+  // provide them, e.g. in tests that construct startTelegramBot directly.
+  const getEventFightMirrorOption =
+    typeof options.getEventFightMirror === 'function' ? options.getEventFightMirror : null;
+  const getEventWatchStateOption =
+    typeof options.getEventWatchState === 'function' ? options.getEventWatchState : null;
   const callbackDedupWindowMs = toPositiveInt(
     options.callbackDedupWindowMs ??
       process.env.TELEGRAM_CALLBACK_DEDUP_WINDOW_MS ??
@@ -1706,6 +1749,17 @@ export function startTelegramBot(router, options = {}) {
 
   function setGuidedAction(chatId, action = defaultGuidedAction) {
     return setGuidedActionState(chatId, action).action;
+  }
+
+  // Task 5 (guided-menu-unification): thin wrapper binding the pure
+  // getFightContextByIdForStore helper to this runtime's injected
+  // (fail-closed, EventTruthGate-verified) store functions. Called from the
+  // qa:record_bet_for:/qa:analyze_quotes_for: callback handlers.
+  function getFightContextById(fightId) {
+    return getFightContextByIdForStore(
+      { getEventFightMirror: getEventFightMirrorOption, getEventWatchState: getEventWatchStateOption },
+      fightId
+    );
   }
 
   function buildCallbackDedupKey({ data = '', messageId = '', userId = '' } = {}) {
@@ -2910,6 +2964,37 @@ export function startTelegramBot(router, options = {}) {
       if (data === 'qa:analyze_quotes') {
         setGuidedAction(chatId, 'analyze_quotes');
         await sendBotMessage(chatId, QUICK_ACTION_HINTS.analyze_quotes, { menuScope: 'ufc_analysis' });
+        return;
+      }
+
+      // Task 4 (guided-menu-unification): fight-scoped variants of the two
+      // buttons above. Same guard/hint behavior, but also resolve the
+      // fight_id embedded in callback_data and attach it to guided-action
+      // state so the next free-text/photo message doesn't need to restate
+      // which fight it's about.
+      if (data.startsWith('qa:record_bet_for:')) {
+        if (!guidedLedgerEnabled) {
+          await sendBotMessage(chatId, 'Este bot no tiene ledger habilitado en modo guiado.', { menuScope: 'main' });
+          return;
+        }
+        const fightId = data.slice('qa:record_bet_for:'.length);
+        const fightContext = getFightContextById(fightId);
+        setGuidedActionState(chatId, 'record_bet', fightContext);
+        const hint = fightContext
+          ? `📝 Registrando apuesta para ${fightContext.fighterA} vs ${fightContext.fighterB}.\nContame tu pick, cuota y stake (texto o el screenshot de tu ticket).`
+          : QUICK_ACTION_HINTS.record_bet;
+        await sendBotMessage(chatId, hint, { menuScope: 'ledger' });
+        return;
+      }
+
+      if (data.startsWith('qa:analyze_quotes_for:')) {
+        const fightId = data.slice('qa:analyze_quotes_for:'.length);
+        const fightContext = getFightContextById(fightId);
+        setGuidedActionState(chatId, 'analyze_quotes', fightContext);
+        const hint = fightContext
+          ? `📸 Analizando cuotas para ${fightContext.fighterA} vs ${fightContext.fighterB}.\nMandame el screenshot completo de esa pelea.`
+          : QUICK_ACTION_HINTS.analyze_quotes;
+        await sendBotMessage(chatId, hint, { menuScope: 'ufc_analysis' });
         return;
       }
 
