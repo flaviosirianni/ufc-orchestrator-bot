@@ -1652,7 +1652,7 @@ can become a live-event candidate."
 This project's established deploy pattern (used throughout the 2026-08-12 session for Fases A/B/C): gates → merge to `main` → snapshot pre-deploy on `ufc-oci` → `git pull` + `systemctl restart bot-factory@ufc` → poll `/health` → verify ledger digest unchanged → smoke test. Follow that exact sequence:
 
 - [ ] Run `npm test && npm run quality:gate && npm run qa:parity:ufc` locally, all green.
-- [ ] Add tracker rows to `docs/CODE_QUALITY_TRACKER.tsv` for every new exported function from this plan (`getFightContextByIdForStore`, `isGuidedActionFresh`, `setGuidedActionState`, `resolveStableFightIdByNames`, and any function newly `export`ed in Task 11) — follow the existing row format (see any `Q-011x` row for the exact columns).
+- [ ] Add tracker rows to `docs/CODE_QUALITY_TRACKER.tsv` for every new exported function from this plan (`getFightContextByIdForStore`, `isGuidedActionFresh`, `setGuidedActionState`, `resolveStableFightIdByNames`, `createUfcPolicyRouter` (`src/bots/ufc/index.js`, added during Task 7 to make the UFC bootstrap's policy wrapper independently testable), and any function newly `export`ed in Task 11) — follow the existing row format (see any `Q-011x` row for the exact columns).
 - [ ] Merge to `main`, push.
 - [ ] SSH `ufc-oci`, capture a pre-deploy snapshot with `node src/scripts/ufcOperationalSnapshot.js --db ... --stats-db ... --out ~/pre-deploy-snapshot-<date>.json` (exact command used repeatedly this session).
 - [ ] `git pull` on the server, `sudo systemctl restart bot-factory@ufc.service`, poll `/health` until 200.
