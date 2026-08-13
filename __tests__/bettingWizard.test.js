@@ -4488,6 +4488,132 @@ export async function runBettingWizardTests() {
   });
 
   tests.push(async () => {
+    // Reviewer follow-up (code review of commit c8001dd): lock in that a partial
+    // store_user_odds payload -- one fighter name present, the other missing/empty --
+    // never crashes and never attaches a button, and still falls through to today's
+    // plain-text reply, even with a mirror row present for the fighter that WAS given.
+    // Note: verified by mutation (temporarily flipping the case's `if (fighterRed &&
+    // fighterBlue)` to `||`) that this invariant is actually enforced twice -- once
+    // here, and independently by resolveStableFightIdByNames's own empty-name guard
+    // (src/agents/bettingWizard.js ~line 1549) -- so this test alone can't tell the two
+    // layers apart. It still correctly locks in the combined, user-visible behavior.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('store_user_odds', {
+        fight: { fighter_red: 'Islam Makhachev', fighter_blue: '' },
+        event: { name: 'UFC 330' },
+      }),
+      responseWithText('Listo, ya tengo tus cuotas cargadas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        addOddsSnapshot() { return { ok: true, stored: true, oddsHash: 'hash-partial-1' }; },
+        getEventFightMirror(watchKey) {
+          if (watchKey !== 'next_event') return [];
+          return [{ fightId: 'mirror_makhachev_garry', fighterA: 'Islam Makhachev', fighterB: 'Ian Garry' }];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('', {
+      chatId: 'chat-analysis-button-partial-1',
+      userId: 'u-analysis-button-partial-1',
+      originalMessage: '[screenshot de cuotas]',
+      resolution: { resolvedMessage: '[screenshot de cuotas]' },
+      guidedAction: 'analyze_quotes',
+    });
+
+    assert.equal(result.replies, undefined, 'payload parcial (fighter_blue vacio) no debe introducir replies[]');
+    assert.match(result.reply, /Listo, ya tengo tus cuotas cargadas/);
+  });
+
+  tests.push(async () => {
+    // Reviewer follow-up: same lock-in, but for a store_user_odds call whose args omit
+    // the `fight` key entirely -- payload?.fight?.fighter_red/_blue resolve through
+    // optional chaining to undefined -> '' via String(undefined || '').trim(). Must not
+    // throw, must not attach a button, falls through to the plain-text reply.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('store_user_odds', {
+        event: { name: 'UFC 330' },
+      }),
+      responseWithText('Listo, ya tengo tus cuotas cargadas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        addOddsSnapshot() { return { ok: true, stored: true, oddsHash: 'hash-partial-2' }; },
+        getEventFightMirror() { return []; },
+      },
+    });
+
+    const result = await wizard.handleMessage('', {
+      chatId: 'chat-analysis-button-partial-2',
+      userId: 'u-analysis-button-partial-2',
+      originalMessage: '[screenshot de cuotas]',
+      resolution: { resolvedMessage: '[screenshot de cuotas]' },
+      guidedAction: 'analyze_quotes',
+    });
+
+    assert.equal(result.replies, undefined, 'payload sin fight no debe introducir replies[]');
+    assert.match(result.reply, /Listo, ya tengo tus cuotas cargadas/);
+  });
+
+  tests.push(async () => {
+    // Reviewer follow-up: store_user_odds is in GUIDED_STRICT_TOOL_ALLOWLIST_BY_ACTION
+    // .analyze_quotes, so interactionMode 'guided_strict' + inputType 'image' (the real
+    // production path when a user taps "📸 Analisis" and sends a screenshot) is
+    // reachable traffic, not just the permissive default hybrid mode exercised above.
+    // Same happy path as the first Task 10 test, asserting the button attaches
+    // identically under guided_strict (the attach condition never inspects
+    // interactionMode, only guidedAction + lastStoredOddsFight).
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithFunctionCall('store_user_odds', {
+        fight: { fighter_red: 'Islam Makhachev', fighter_blue: 'Ian Garry' },
+        event: { name: 'UFC 330' },
+      }),
+      responseWithText('Listo, ya tengo tus cuotas cargadas.'),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: { async getFighterHistory() { return { fighters: [], rows: [] }; } },
+      userStore: {
+        addOddsSnapshot() { return { ok: true, stored: true, oddsHash: 'hash-guided-strict-1' }; },
+        getEventFightMirror(watchKey) {
+          if (watchKey !== 'next_event') return [];
+          return [{ fightId: 'mirror_makhachev_garry', fighterA: 'Islam Makhachev', fighterB: 'Ian Garry' }];
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('', {
+      chatId: 'chat-analysis-button-guided-strict-1',
+      userId: 'u-analysis-button-guided-strict-1',
+      originalMessage: '[screenshot de cuotas]',
+      resolution: { resolvedMessage: '[screenshot de cuotas]' },
+      guidedAction: 'analyze_quotes',
+      interactionMode: 'guided_strict',
+      inputType: 'image',
+    });
+
+    assert.ok(Array.isArray(result.replies), 'debe adjuntar boton via replies[] tambien en guided_strict');
+    assert.equal(result.replies.length, 1);
+    assert.match(result.replies[0].text, /Listo, ya tengo tus cuotas cargadas/);
+    const buttons = result.replies[0].replyMarkup?.inline_keyboard?.flat() || [];
+    assert.ok(buttons.some((b) => b.callback_data === 'qa:record_bet_for:mirror_makhachev_garry'));
+  });
+
+  tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
     const updatePayloads = [];

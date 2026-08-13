@@ -9690,6 +9690,10 @@ export function createBettingWizard({
         eventCard: runtimeState.eventCard,
       };
 
+      // guidedAction defaults to 'analyze_quotes' when unset, so this also covers
+      // ordinary hybrid-mode chat, not just the explicit "📸 Análisis" button — the
+      // real gate is lastStoredOddsFight resolving against event_fight_mirror below.
+      // Same content-heuristic pattern as Task 9's per-fight buttons.
       if (guidedAction === 'analyze_quotes' && turnToolEffects.lastStoredOddsFight) {
         const stableFightId = resolveStableFightIdByNames(
           userStore,
