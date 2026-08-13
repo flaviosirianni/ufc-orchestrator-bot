@@ -4750,12 +4750,12 @@ function buildSystemPrompt(
           'Modo activo: guided_strict.',
           `GuidedAction del turno: ${normalizedGuidedAction}.`,
           normalizedGuidedAction === 'analyze_quotes'
-            ? fightContext
+            ? fightContext?.fighterA && fightContext?.fighterB
               ? `Objetivo: analisis de cuotas para la pelea ${fightContext.fighterA} vs ${fightContext.fighterB} (evento: ${fightContext.eventName || 'N/D'}), YA resuelta. Pedile al usuario el screenshot completo de ESA pelea si falta.`
               : 'Objetivo: analisis de cuotas (screenshot o texto estructurado). Si faltan datos criticos de cuotas/mercado, pedi screenshot completo de la pelea/evento.'
             : '',
           normalizedGuidedAction === 'record_bet'
-            ? fightContext
+            ? fightContext?.fighterA && fightContext?.fighterB
               ? `Objetivo: registrar una apuesta NUEVA al ledger para la pelea ${fightContext.fighterA} vs ${fightContext.fighterB} (evento: ${fightContext.eventName || 'N/D'}). Esa pelea YA está resuelta, no la vuelvas a preguntar: sólo pedí/usá pick, cuota y stake (texto o screenshot del ticket). No cierres ni archives apuestas en este flujo.`
               : 'Objetivo: registrar una apuesta NUEVA al ledger. Pedi/usa screenshot del ticket o texto estructurado (evento, pelea, pick, cuota, stake). No cierres ni archives apuestas en este flujo.'
             : '',
