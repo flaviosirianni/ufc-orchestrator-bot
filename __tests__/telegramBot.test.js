@@ -6,6 +6,7 @@ import {
   isGuidedCallbackAllowed,
   getFightContextByIdForStore,
 } from '../src/core/telegramBot.js';
+import { createUfcPolicyRouter } from '../src/bots/ufc/index.js';
 
 class FakeTelegramBot {
   constructor() {
@@ -1962,6 +1963,255 @@ export async function runTelegramBotTests() {
     assert.equal(runtime.getGuidedActionState(100), null);
 
     runtime.close();
+  });
+
+  // --- guided-menu-unification Task 7: multi-message replies[] plumbing ---
+
+  tests.push(async () => {
+    // createUfcPolicyRouter (src/bots/ufc/index.js) single-reply case: must
+    // still return an OBJECT shape {text, replies:null} -- never a bare
+    // string -- because deliverToRouter/routeSyntheticAction read .text off
+    // whatever this wrapper returns. Using medical_guidance_companion
+    // (alwaysAppendNotice: true) proves enforcePolicyPack actually ran.
+    const rawRouter = {
+      async routeMessage() {
+        return { text: 'Respuesta simple', replies: null };
+      },
+    };
+    const router = createUfcPolicyRouter({
+      rawRouter,
+      manifest: { risk_policy: 'medical_guidance_companion' },
+    });
+
+    const result = await router.routeMessage('hola');
+    assert.equal(typeof result, 'object');
+    assert.equal(result.replies, null);
+    assert.match(result.text, /Respuesta simple/);
+    assert.match(result.text, /no reemplaza la consulta médica profesional/i);
+  });
+
+  tests.push(async () => {
+    // createUfcPolicyRouter replies[] case: each entry's text is
+    // policy-enforced INDIVIDUALLY (not just the joined top-level text),
+    // and each entry's replyMarkup passes through untouched.
+    const rawRouter = {
+      async routeMessage() {
+        return {
+          text: 'Pelea 1: A vs B\n\nPelea 2: C vs D',
+          replies: [
+            {
+              text: 'Pelea 1: A vs B',
+              replyMarkup: {
+                inline_keyboard: [[{ text: 'Registrar', callback_data: 'qa:record_bet_for:f1' }]],
+              },
+            },
+            { text: 'Pelea 2: C vs D', replyMarkup: null },
+          ],
+        };
+      },
+    };
+    const router = createUfcPolicyRouter({
+      rawRouter,
+      manifest: { risk_policy: 'medical_guidance_companion' },
+    });
+
+    const result = await router.routeMessage('proyecciones');
+    assert.ok(Array.isArray(result.replies));
+    assert.equal(result.replies.length, 2);
+    assert.match(result.replies[0].text, /Pelea 1: A vs B/);
+    assert.match(result.replies[0].text, /no reemplaza la consulta médica profesional/i);
+    assert.match(result.replies[1].text, /Pelea 2: C vs D/);
+    assert.match(result.replies[1].text, /no reemplaza la consulta médica profesional/i);
+    assert.deepEqual(result.replies[0].replyMarkup, {
+      inline_keyboard: [[{ text: 'Registrar', callback_data: 'qa:record_bet_for:f1' }]],
+    });
+    assert.equal(result.replies[1].replyMarkup, null);
+    assert.match(result.text, /no reemplaza la consulta médica profesional/i);
+  });
+
+  tests.push(async () => {
+    // createUfcPolicyRouter defensive guard: even if rawRouter ever
+    // returned a bare string (not the case for the real routerChain.js
+    // post Task 7, but this wrapper must not assume it), the wrapper still
+    // normalizes to an object shape instead of leaking the string raw or
+    // stringifying it into "[object Object]".
+    const rawRouter = {
+      async routeMessage() {
+        return 'respuesta en texto plano';
+      },
+    };
+    const router = createUfcPolicyRouter({
+      rawRouter,
+      manifest: { risk_policy: 'general_safe_advice' },
+    });
+
+    const result = await router.routeMessage('hola');
+    assert.equal(typeof result, 'object');
+    assert.equal(result.text, 'respuesta en texto plano');
+    assert.equal(result.replies, null);
+  });
+
+  tests.push(async () => {
+    // End-to-end: a router returning {text, replies:[...]} (the shape
+    // createUfcPolicyRouter now produces) must make deliverToRouter send
+    // ONE Telegram message per entry, in order, each with its own
+    // replyMarkup -- this is the actual feature this task adds.
+    const fakeBot = new FakeTelegramBot();
+    const router = {
+      async routeMessage() {
+        return {
+          text: 'Pelea 1 Prochazka vs Ulberg\n\nPelea 2 Dern vs Robertson',
+          replies: [
+            {
+              text: 'Pelea 1 Prochazka vs Ulberg',
+              replyMarkup: {
+                inline_keyboard: [[{ text: 'Registrar', callback_data: 'qa:record_bet_for:fight_1' }]],
+              },
+            },
+            {
+              text: 'Pelea 2 Dern vs Robertson',
+              replyMarkup: {
+                inline_keyboard: [[{ text: 'Registrar', callback_data: 'qa:record_bet_for:fight_2' }]],
+              },
+            },
+          ],
+        };
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    // First set guided-action state via a callback press (a free-text
+    // message with no prior guided action is blocked by
+    // resolveGuidedMessageDecision in guided_strict mode). That callback
+    // press itself sends one hint message, so the two replies[] messages
+    // are the ones sent AFTER it, once the free-text message routes.
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:analyze_quotes' }));
+    const messagesBeforeRouting = fakeBot.sentMessages.length;
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({ messageId: 5001, text: 'proyecciones para el evento' })
+    );
+
+    const sent = fakeBot.sentMessages.slice(messagesBeforeRouting);
+    assert.equal(sent.length, 2, `expected 2 reply messages, got ${sent.length}`);
+    assert.match(sent[0].text, /Pelea 1 Prochazka vs Ulberg/);
+    assert.match(sent[1].text, /Pelea 2 Dern vs Robertson/);
+    assert.deepEqual(extractCallbackDataList(sent[0]), ['qa:record_bet_for:fight_1']);
+    assert.deepEqual(extractCallbackDataList(sent[1]), ['qa:record_bet_for:fight_2']);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // Regression: an object-shaped reply with an empty/falsy .text and no
+    // populated .replies (e.g. {text: '', replies: null} or {text: '',
+    // replies: []}) must fall back to the "no tengo respuesta" message --
+    // NOT get treated as a non-object and passed to sendBotMessage as-is,
+    // which would stringify the object to the literal text
+    // "[object Object]" and ship that to the user.
+    const fakeBot = new FakeTelegramBot();
+    const router = {
+      async routeMessage() {
+        return { text: '', replies: null };
+      },
+    };
+
+    const runtime = startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      pollingIdleWatchdogMs: 0,
+      pollingWatchdogIntervalMs: 0,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:analyze_quotes' }));
+    const messagesBeforeRouting = fakeBot.sentMessages.length;
+
+    await fakeBot.emit(
+      'message',
+      createBaseMessage({ messageId: 5002, text: 'proyecciones para el evento' })
+    );
+
+    const sent = fakeBot.sentMessages.slice(messagesBeforeRouting);
+    assert.equal(sent.length, 1);
+    assert.doesNotMatch(sent[0].text, /object Object/i);
+    assert.match(sent[0].text, /No tengo respuesta/i);
+
+    runtime.close();
+  });
+
+  tests.push(async () => {
+    // routeSyntheticAction must unwrap an object-shaped {text, replies}
+    // router result (the shape createUfcPolicyRouter always returns as of
+    // this task) back down to a plain string for its callback callers
+    // (qa:view_credits here), which still expect a bare string/null and
+    // pass it straight into sendBotMessage. Before this task's Step 5 fix,
+    // this would have shipped "[object Object]" or silently fallen back to
+    // "No pude completar esa accion ahora mismo." to every such caller,
+    // across every bot sharing this code (not just UFC).
+    const fakeBot = new FakeTelegramBot();
+    const router = {
+      calls: [],
+      async routeMessage(payload) {
+        this.calls.push(payload);
+        return { text: 'CREDITOS_OK_OBJECT_SHAPE', replies: null };
+      },
+    };
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:view_credits' }));
+
+    assert.equal(router.calls.length, 1);
+    assert.equal(router.calls[0].inputType, 'synthetic');
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /CREDITOS_OK_OBJECT_SHAPE/);
+    assert.doesNotMatch(out.text, /object Object/i);
+    assert.doesNotMatch(out.text, /No pude completar/i);
+  });
+
+  tests.push(async () => {
+    // Same routeSyntheticAction unwrap, but confirming the plain-string
+    // contract used by Ovidius/Nutrition/scaffolded-template routers (none
+    // of which touch routerChain.js, and several of which return bare
+    // strings straight from routeMessage) still works unchanged -- the
+    // unwrap must not assume every router became object-shaped.
+    const fakeBot = new FakeTelegramBot();
+    const router = {
+      calls: [],
+      async routeMessage(payload) {
+        this.calls.push(payload);
+        return 'CREDITOS_OK_STRING_SHAPE';
+      },
+    };
+
+    startTelegramBot(router, {
+      botInstance: fakeBot,
+      interactionMode: 'guided_strict',
+      guidedQuotesTextFallback: true,
+      downloadFileImpl: async () => ({ buffer: Buffer.from('x'), filePath: 'x.jpg' }),
+    });
+
+    await fakeBot.emit('callback_query', createBaseCallback({ data: 'qa:view_credits' }));
+
+    const out = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(out.text, /CREDITOS_OK_STRING_SHAPE/);
   });
 
   for (const test of tests) {

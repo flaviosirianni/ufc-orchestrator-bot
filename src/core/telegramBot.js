@@ -2033,7 +2033,7 @@ export function startTelegramBot(router, options = {}) {
       return null;
     }
 
-    return router.routeMessage({
+    const routed = await router.routeMessage({
       chatId: String(chatId),
       message: syntheticMessage,
       interactionMode,
@@ -2052,6 +2052,19 @@ export function startTelegramBot(router, options = {}) {
       },
       originalAction: query?.data || null,
     });
+
+    // routeSyntheticAction keeps a string-or-null contract for its ~30
+    // callers below (qa:list_pending, qa:list_history, Ovidius' guided menu
+    // callbacks, etc.) -- it never produces replies[] itself. router here
+    // may now be an object-returning router ({text, replies}, e.g. UFC's
+    // bootstrap wrapper post guided-menu-unification Task 7) or one of the
+    // other bots' routers that still return a bare string (Ovidius,
+    // Nutrition, scaffolded templates never touch routerChain.js at all),
+    // so unwrap defensively instead of assuming either shape.
+    if (routed && typeof routed === 'object') {
+      return routed.text || null;
+    }
+    return routed || null;
   }
 
   async function sendMenu(chatId, scope = 'main') {
@@ -2195,8 +2208,34 @@ export function startTelegramBot(router, options = {}) {
         },
       });
 
-      if (reply && typeof reply === 'object' && reply.text) {
-        await sendBotMessage(chatId, reply.text, { replyMarkupOverride: reply.replyMarkup || null });
+      if (reply?.replies?.length) {
+        // Additive multi-message path (guided-menu-unification Task 7): a
+        // router can now return {text, replies:[{text, replyMarkup}, ...]}
+        // to send one message per entry (e.g. one per fight) instead of
+        // collapsing everything into a single reply. Checked before the
+        // pre-existing single-reply branches below, which stay untouched --
+        // deliverToRouter is shared by every bot wired through
+        // startTelegramBot (UFC, Ovidius, Nutrition, scaffolded templates),
+        // and several of those routers return a bare string rather than
+        // {text} today, so both branches below must keep handling that.
+        for (const entry of reply.replies) {
+          await sendBotMessage(chatId, entry?.text || '', {
+            replyMarkupOverride: entry?.replyMarkup || null,
+          });
+        }
+      } else if (reply && typeof reply === 'object') {
+        // Note: this branch is entered for ANY object-shaped reply, even
+        // one with an empty/falsy .text (e.g. {text: '', replies: null} or
+        // {text: '', replies: []} -- reachable if a future replies[]
+        // producer ever emits an empty array). The fallback lives INSIDE
+        // this branch rather than the bare `reply || fallback` below,
+        // because `reply` here is always a truthy object -- falling
+        // through to `reply || fallback` would pick the object itself
+        // (never falsy) and sendBotMessage would stringify it to the
+        // literal text "[object Object]" for the user.
+        await sendBotMessage(chatId, reply.text || 'No tengo respuesta para eso aún 😅', {
+          replyMarkupOverride: reply.replyMarkup || null,
+        });
       } else {
         await sendBotMessage(chatId, reply || 'No tengo respuesta para eso aún 😅');
       }

@@ -56,13 +56,22 @@ function classifyIntent(message = '') {
 
 function unpackAgentResult(result) {
   if (typeof result === 'string') {
-    return { text: result, metadata: {} };
+    return { text: result, replies: null, metadata: {} };
   }
 
   if (result && typeof result === 'object') {
+    if (Array.isArray(result.replies)) {
+      return {
+        text: result.replies.map((entry) => entry?.text || '').join('\n\n'),
+        replies: result.replies,
+        metadata: result.metadata || {},
+      };
+    }
+
     if (typeof result.reply === 'string') {
       return {
         text: result.reply,
+        replies: null,
         metadata: result.metadata || {},
       };
     }
@@ -70,6 +79,7 @@ function unpackAgentResult(result) {
     if (typeof result.text === 'string') {
       return {
         text: result.text,
+        replies: null,
         metadata: result.metadata || {},
       };
     }
@@ -177,7 +187,7 @@ export function createRouterChain({
       rawResult = 'El agente seleccionado falló al procesar tu solicitud.';
     }
 
-    const { text, metadata: agentMetadata } = unpackAgentResult(rawResult);
+    const { text, replies, metadata: agentMetadata } = unpackAgentResult(rawResult);
 
     if (conversationStore?.appendTurn) {
       conversationStore.appendTurn(sessionId, 'user', originalMessage);
@@ -211,7 +221,7 @@ export function createRouterChain({
       });
     }
 
-    return text;
+    return { text, replies: replies || null };
   }
 
   return { routeMessage };

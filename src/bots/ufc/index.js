@@ -185,6 +185,56 @@ export function createVerifiedEventStoreView({
 }
 
 /**
+ * Envuelve el router crudo (createRouterChain) para aplicar enforcePolicyPack
+ * a cada texto de salida antes de que llegue a Telegram, incluido cada
+ * entrada de `replies[]` cuando el turno produce mas de un mensaje
+ * (guided-menu-unification Task 7). Siempre devuelve forma objeto
+ * `{text, replies}` -- nunca un string plano -- porque deliverToRouter y
+ * routeSyntheticAction en telegramBot.js dependen de leer `.text`/`.replies`
+ * de lo que este router retorna.
+ *
+ * @returns {{routeMessage:Function}} Router con forma {text, replies} garantizada.
+ * @sideEffects Ninguno propio; delega en rawRouter.routeMessage.
+ */
+export function createUfcPolicyRouter({ rawRouter, manifest } = {}) {
+  return {
+    async routeMessage(input = '') {
+      const raw = await rawRouter.routeMessage(input);
+      // rawRouter is createRouterChain(...)'s own instance, which as of
+      // guided-menu-unification Task 7 always returns {text, replies} --
+      // never a bare string. The typeof guard below is defensive (keeps
+      // this wrapper safe to unit-test against a bare-string mock) rather
+      // than a case expected from the real rawRouter.
+      const rawResult = raw && typeof raw === 'object' ? raw : { text: raw, replies: null };
+      const policyPackId = manifest?.risk_policy || 'general_safe_advice';
+
+      // Every reply's text -- the single-reply case AND each entry in
+      // replies[] -- goes through enforcePolicyPack individually, so the
+      // existing guarantee (policy notices get appended to whatever text
+      // reaches the user) still holds now that a turn can ship more than
+      // one message. Returning a bare string here (the old behavior) is no
+      // longer safe: deliverToRouter's routed?.text and
+      // routeSyntheticAction's routed?.text both depend on this wrapper
+      // always returning an object shape.
+      if (Array.isArray(rawResult.replies) && rawResult.replies.length) {
+        return {
+          text: enforcePolicyPack({ text: rawResult.text, policyPackId }),
+          replies: rawResult.replies.map((entry) => ({
+            text: enforcePolicyPack({ text: entry?.text, policyPackId }),
+            replyMarkup: entry?.replyMarkup || null,
+          })),
+        };
+      }
+
+      return {
+        text: enforcePolicyPack({ text: rawResult.text, policyPackId }),
+        replies: null,
+      };
+    },
+  };
+}
+
+/**
  * Ensambla e inicia el runtime UFC y sus monitores.
  *
  * @returns {Promise<{ok:boolean,botId:string}>} Resultado de bootstrap.
@@ -380,15 +430,7 @@ export async function bootstrapBot({ manifest } = {}) {
     sessionLogger,
   });
 
-  const router = {
-    async routeMessage(input = '') {
-      const reply = await rawRouter.routeMessage(input);
-      return enforcePolicyPack({
-        text: reply,
-        policyPackId: manifest?.risk_policy || 'general_safe_advice',
-      });
-    },
-  };
+  const router = createUfcPolicyRouter({ rawRouter, manifest });
 
   const { token: telegramToken, tokenEnvName } = resolveManifestTelegramToken(manifest);
   const botId = manifest?.bot_id || 'ufc';

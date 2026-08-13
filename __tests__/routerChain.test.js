@@ -22,7 +22,8 @@ export async function runRouterChainTests() {
     });
 
     const response = await router.routeMessage('Need fight insights');
-    assert.equal(response, 'BW:Need fight insights');
+    assert.equal(response.text, 'BW:Need fight insights');
+    assert.equal(response.replies, null);
   });
 
   tests.push(async () => {
@@ -37,7 +38,7 @@ export async function runRouterChainTests() {
     });
 
     const response = await router.routeMessage('read Fight History!A:E');
-    assert.equal(response, 'SO:read Fight History!A:E');
+    assert.equal(response.text, 'SO:read Fight History!A:E');
   });
 
   tests.push(async () => {
@@ -52,7 +53,7 @@ export async function runRouterChainTests() {
     });
 
     const response = await router.routeMessage('mostrame historial de Bautista');
-    assert.equal(response, 'FS:mostrame historial de Bautista');
+    assert.equal(response.text, 'FS:mostrame historial de Bautista');
   });
 
   tests.push(async () => {
@@ -84,7 +85,7 @@ export async function runRouterChainTests() {
       message: 'que opinas de la pelea numero 1?',
     });
 
-    assert.equal(response, 'ok');
+    assert.equal(response.text, 'ok');
     assert.match(receivedMessage, /Mario Bautista vs Vinicius Oliveira/);
   });
 
@@ -128,7 +129,60 @@ export async function runRouterChainTests() {
       message: 'mostrame mi historial de apuestas del ledger',
       guidedAction: 'ledger_list_history',
     });
-    assert.equal(response, 'BW:mostrame mi historial de apuestas del ledger');
+    assert.equal(response.text, 'BW:mostrame mi historial de apuestas del ledger');
+  });
+
+  tests.push(async () => {
+    const bettingWizard = {
+      async handleMessage() {
+        return {
+          replies: [
+            {
+              text: 'Pelea 1: Prochazka vs Ulberg',
+              replyMarkup: {
+                inline_keyboard: [[{ text: '📝 Registrar', callback_data: 'qa:record_bet_for:fight_1' }]],
+              },
+            },
+            {
+              text: 'Pelea 2: Dern vs Robertson',
+              replyMarkup: {
+                inline_keyboard: [[{ text: '📝 Registrar', callback_data: 'qa:record_bet_for:fight_2' }]],
+              },
+            },
+          ],
+          metadata: {},
+        };
+      },
+    };
+    const router = createRouterChain({
+      bettingWizard,
+      conversationStore: createConversationStore(),
+    });
+
+    // Note: routerChain's parseRouteInput sets `metadata: input` (the whole
+    // object), so guidedAction/user/chat must be top-level fields on the
+    // input object -- not nested under a `metadata:` sub-key -- to match
+    // how metadata.guidedAction/metadata.user/metadata.chat are actually
+    // read inside routeMessage.
+    const result = await router.routeMessage({
+      chatId: 'chat-multi-1',
+      message: 'proyecciones para el evento',
+      guidedAction: 'ledger_list_pending',
+      user: { id: '1' },
+      chat: { id: 'chat-multi-1' },
+    });
+
+    assert.ok(Array.isArray(result.replies));
+    assert.equal(result.replies.length, 2);
+    assert.equal(result.replies[0].text, 'Pelea 1: Prochazka vs Ulberg');
+    assert.equal(
+      result.replies[0].replyMarkup.inline_keyboard[0][0].callback_data,
+      'qa:record_bet_for:fight_1'
+    );
+    // The joined single-string `text` fallback should still be populated
+    // for any caller that only reads `.text` (e.g. routeSyntheticAction).
+    assert.ok(result.text.includes('Pelea 1: Prochazka vs Ulberg'));
+    assert.ok(result.text.includes('Pelea 2: Dern vs Robertson'));
   });
 
   for (const test of tests) {
