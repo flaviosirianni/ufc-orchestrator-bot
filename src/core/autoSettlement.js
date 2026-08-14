@@ -1,4 +1,4 @@
-import { evaluateEventConsumption } from './eventTruthGate.js';
+import { evaluateEventConsumption, evaluateEventTruth } from './eventTruthGate.js';
 
 function normalizeText(value = '') {
   return String(value || '')
@@ -200,6 +200,71 @@ export function resolveAutoSettlementCandidate(bet = {}, historyRows = []) {
   };
 }
 
+/**
+ * Verifica si el evento trackeado ya termino de verdad, cruzando su cartelera
+ * contra resultados reales de ufc_stats.db (mismo matcher de nombre de
+ * peleador que usa resolveAutoSettlementCandidate).
+ *
+ * @returns {{isComplete:boolean,matchedCount:number,totalCount:number,reason:string|null}} Veredicto de completitud.
+ * @sideEffects Ninguno.
+ */
+export function verifyEventCompletionFromStats({
+  eventState = null,
+  historyRows = [],
+  now = new Date(),
+} = {}) {
+  const mainCard = Array.isArray(eventState?.mainCard) ? eventState.mainCard : [];
+  if (!mainCard.length) {
+    return { isComplete: false, matchedCount: 0, totalCount: 0, reason: 'main_card_missing' };
+  }
+
+  const eventDateIso = String(eventState?.eventDateUtc || '').trim();
+  const eventDateMs = eventDateIso ? Date.parse(`${eventDateIso}T00:00:00Z`) : NaN;
+  if (!Number.isFinite(eventDateMs)) {
+    return {
+      isComplete: false,
+      matchedCount: 0,
+      totalCount: mainCard.length,
+      reason: 'event_date_missing',
+    };
+  }
+
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now));
+  const todayMs = Date.parse(`${new Date(nowMs).toISOString().slice(0, 10)}T00:00:00Z`);
+  if (!(eventDateMs < todayMs)) {
+    return {
+      isComplete: false,
+      matchedCount: 0,
+      totalCount: mainCard.length,
+      reason: 'event_not_past',
+    };
+  }
+
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  let matchedCount = 0;
+  for (const fight of mainCard) {
+    const fighterA = String(fight?.fighterA || '').trim();
+    const fighterB = String(fight?.fighterB || '').trim();
+    if (!fighterA || !fighterB) continue;
+    const hasResolvedRow = rows.some(
+      (row) =>
+        fightRowMatches(row, { fighterA, fighterB }) &&
+        String(row[5] || '').trim() &&
+        String(row[6] || '').trim()
+    );
+    if (hasResolvedRow) matchedCount += 1;
+  }
+
+  const totalCount = mainCard.length;
+  const isComplete = matchedCount >= Math.ceil(totalCount / 2);
+  return {
+    isComplete,
+    matchedCount,
+    totalCount,
+    reason: isComplete ? null : 'insufficient_resolved_fights',
+  };
+}
+
 function buildNotificationText({ bet, settlement }) {
   const resultLabel = settlement.result === 'win' ? 'GANADA ✅' : 'PERDIDA ❌';
   const lines = [
@@ -222,14 +287,88 @@ function buildNotificationText({ bet, settlement }) {
   return lines.join('\n');
 }
 
+function buildUnresolvedNotificationText(bets = []) {
+  const lines = [
+    'No pude verificar automáticamente estas apuestas del evento que ya cerró:',
+  ];
+  for (const bet of bets) {
+    lines.push(`- bet_id ${bet.id}: ${bet.fight || 'Pelea N/D'} | ${bet.pick || 'Pick N/D'}`);
+  }
+  lines.push(
+    '',
+    'Revisalas vos: mandame "bet_id <id> WON/LOST" o tocá "✅ Cerrar apuesta".'
+  );
+  return lines.join('\n');
+}
+
 /**
- * Ejecuta un ciclo de auto-settlement sólo con evento completado y stats verificadas.
+ * Verifica si el evento trackeado ya termino y, de ser asi, lo marca
+ * completado + verificado en el watch-state antes de evaluar consumo — sin
+ * esto, ledgerMutationAllowed queda permanentemente en false porque nada mas
+ * produce esa verificacion.
+ *
+ * @returns {{eventState:object|null,newlyCompleted:boolean}} Estado vigente y si recien se marco.
+ * @sideEffects Puede escribir un nuevo snapshot de current_event.
+ */
+function markEventCompletedIfVerified({
+  eventState,
+  rows,
+  getEventWatchState,
+  upsertEventWatchState,
+  now,
+}) {
+  if (typeof upsertEventWatchState !== 'function' || !eventState?.eventId) {
+    return { eventState, newlyCompleted: false };
+  }
+  if (eventState.eventStatus === 'completed' && eventState.ledgerMutationAllowed === true) {
+    return { eventState, newlyCompleted: false };
+  }
+
+  const completion = verifyEventCompletionFromStats({ eventState, historyRows: rows, now });
+  if (!completion.isComplete) {
+    return { eventState, newlyCompleted: false };
+  }
+
+  const candidate = {
+    watchKey: 'current_event',
+    eventId: eventState.eventId,
+    eventName: eventState.eventName,
+    eventDateUtc: eventState.eventDateUtc,
+    eventStatus: 'completed',
+    sourcePrimary: 'ufc_stats_db',
+    mainCard: eventState.mainCard,
+    monitoredFighters: eventState.monitoredFighters,
+  };
+  const verifiedAtIso = (now instanceof Date ? now : new Date(now)).toISOString();
+  const verification = evaluateEventTruth({
+    watchKey: 'current_event',
+    candidate,
+    verification: {
+      compatibleSourceCount: 1,
+      structuredCardSource: true,
+      completionVerified: true,
+      statsVerified: true,
+      verifiedAt: verifiedAtIso,
+    },
+    now,
+  });
+  upsertEventWatchState({ ...candidate, verification }, 'current_event');
+  const refreshed =
+    typeof getEventWatchState === 'function' ? getEventWatchState('current_event') : null;
+  return { eventState: refreshed || eventState, newlyCompleted: true };
+}
+
+/**
+ * Ejecuta un ciclo de auto-settlement. Antes de exigir evento completado y
+ * stats verificadas, intenta producir esa verificacion cruzando la cartelera
+ * trackeada contra resultados reales de ufc_stats.db.
  *
  * @returns {Promise<object>} Cantidad cerrada o bloqueo fail-closed con razones.
- * @sideEffects Puede aplicar mutaciones de ledger y enviar notificaciones mediante dependencias.
+ * @sideEffects Puede marcar el evento completado, aplicar mutaciones de ledger y enviar notificaciones mediante dependencias.
  */
 export async function runAutoSettlementCycle({
   getEventWatchState,
+  upsertEventWatchState,
   getStatsFreshness,
   getFightHistoryRows,
   getFightHistoryCacheSnapshot,
@@ -254,7 +393,38 @@ export async function runAutoSettlementCycle({
     return { ok: false, error: 'missing_history_source' };
   }
 
-  const eventState = getEventWatchState('current_event');
+  const fetchRows = () => {
+    if (typeof getFightHistoryRows === 'function') {
+      return getFightHistoryRows() || [];
+    }
+    const cache = getFightHistoryCacheSnapshot('default');
+    return Array.isArray(cache?.rows) ? cache.rows : [];
+  };
+
+  let eventState = getEventWatchState('current_event');
+  let rows = null;
+  let newlyCompleted = false;
+
+  // Sólo tocamos ufc_stats.db acá si hace falta para intentar verificar
+  // completitud — si el evento ya está completed+verified, o no hay forma de
+  // escribir el resultado, nos comportamos como antes: ni leemos historia
+  // hasta que el chequeo de stats frescas más abajo lo permita (fail-closed
+  // no debe depender de datos que todavía no confirmamos que son confiables).
+  const alreadyVerified =
+    eventState?.eventStatus === 'completed' && eventState?.ledgerMutationAllowed === true;
+  if (!alreadyVerified && typeof upsertEventWatchState === 'function' && eventState?.eventId) {
+    rows = fetchRows();
+    const marked = markEventCompletedIfVerified({
+      eventState,
+      rows,
+      getEventWatchState,
+      upsertEventWatchState,
+      now,
+    });
+    eventState = marked.eventState;
+    newlyCompleted = marked.newlyCompleted;
+  }
+
   const statsFreshness =
     typeof getStatsFreshness === 'function' ? getStatsFreshness() : null;
   const consumption = evaluateEventConsumption({
@@ -274,12 +444,8 @@ export async function runAutoSettlementCycle({
     };
   }
 
-  let rows = [];
-  if (typeof getFightHistoryRows === 'function') {
-    rows = getFightHistoryRows() || [];
-  } else {
-    const cache = getFightHistoryCacheSnapshot('default');
-    rows = Array.isArray(cache?.rows) ? cache.rows : [];
+  if (rows === null) {
+    rows = fetchRows();
   }
   if (!rows.length) {
     return { ok: true, settledCount: 0, reason: 'history_empty' };
@@ -290,11 +456,28 @@ export async function runAutoSettlementCycle({
     return { ok: true, settledCount: 0, reason: 'no_pending_bets' };
   }
 
+  const completedEventFighters = new Set(
+    (eventState?.monitoredFighters || []).map((name) => normalizeText(name))
+  );
+  const unresolvedForCompletedEvent = [];
+
   let settledCount = 0;
   for (const bet of pendingBets) {
     if (!bet?.telegramUserId || !bet?.id) continue;
     const settlement = resolveAutoSettlementCandidate(bet, rows);
-    if (!settlement || settlement.confidence !== 'high') continue;
+    if (!settlement || settlement.confidence !== 'high') {
+      if (newlyCompleted && completedEventFighters.size) {
+        const fight = splitFightLabel(bet.fight || '');
+        const mentionsCompletedEvent =
+          fight &&
+          (completedEventFighters.has(normalizeText(fight.fighterA)) ||
+            completedEventFighters.has(normalizeText(fight.fighterB)));
+        if (mentionsCompletedEvent) {
+          unresolvedForCompletedEvent.push(bet);
+        }
+      }
+      continue;
+    }
 
     const applied = applyBetMutation(bet.telegramUserId, {
       operation: 'settle',
@@ -326,12 +509,34 @@ export async function runAutoSettlementCycle({
     }
   }
 
-  return { ok: true, settledCount };
+  if (unresolvedForCompletedEvent.length && typeof notify === 'function') {
+    const byUser = new Map();
+    for (const bet of unresolvedForCompletedEvent) {
+      const list = byUser.get(bet.telegramUserId) || [];
+      list.push(bet);
+      byUser.set(bet.telegramUserId, list);
+    }
+    for (const [telegramUserId, bets] of byUser.entries()) {
+      const chatId =
+        typeof getLatestChatIdForUser === 'function'
+          ? getLatestChatIdForUser(telegramUserId)
+          : null;
+      if (!chatId) continue;
+      try {
+        await notify({ chatId, text: buildUnresolvedNotificationText(bets), bets });
+      } catch (notifyError) {
+        console.error('⚠️ Auto-settlement unresolved-review notification failed:', notifyError);
+      }
+    }
+  }
+
+  return { ok: true, settledCount, unresolvedCount: unresolvedForCompletedEvent.length };
 }
 
 export function startAutoSettlementMonitor({
   intervalMs = Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
   getEventWatchState,
+  upsertEventWatchState,
   getStatsFreshness,
   getFightHistoryRows,
   getFightHistoryCacheSnapshot,
@@ -363,6 +568,7 @@ export function startAutoSettlementMonitor({
     try {
       const result = await runAutoSettlementCycle({
         getEventWatchState,
+        upsertEventWatchState,
         getStatsFreshness,
         getFightHistoryRows,
         getFightHistoryCacheSnapshot,

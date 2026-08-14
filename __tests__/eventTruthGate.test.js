@@ -229,6 +229,38 @@ export async function runEventTruthGateTests() {
   }
 
   {
+    // Fase de auto-settlement (2026-08-14): ufc_stats_db tambien es una
+    // fuente estructurada confiable (ya validada por getStatsFreshness en
+    // otro lado) — un evento marcado completed con completionVerified +
+    // statsVerified desde esta fuente debe llegar a ledgerMutationAllowed
+    // sin necesitar una segunda fuente corroborando.
+    const result = evaluateEventTruth({
+      watchKey: 'current_event',
+      candidate: {
+        eventId: 'ufc_completed_fixture_2026_08_10',
+        eventName: 'UFC Completed Fixture',
+        eventDateUtc: '2026-08-10',
+        eventStatus: EVENT_STATUS.COMPLETED,
+        mainCard: [validFight()],
+        sourcePrimary: 'ufc_stats_db',
+      },
+      verification: {
+        compatibleSourceCount: 1,
+        structuredCardSource: true,
+        completionVerified: true,
+        statsVerified: true,
+        verifiedAt: '2026-08-12T00:00:00.000Z',
+      },
+      now: '2026-08-12T00:05:00.000Z',
+    });
+
+    assert.equal(result.confidence, EVENT_CONFIDENCE.VERIFIED);
+    assert.equal(result.consumerAllowed, true);
+    assert.equal(result.ledgerMutationAllowed, true);
+    assert.ok(!result.reasons.includes('source_quorum_failed'));
+  }
+
+  {
     // El bypass NO debe aplicar solo por structuredCardSource:true si la fuente
     // no esta en el allowlist de fuentes confiables — evita que cualquier path
     // futuro que marque structuredCardSource=true sin ser realmente Odds API

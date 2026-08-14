@@ -456,6 +456,7 @@ export async function bootstrapBot({ manifest } = {}) {
   startAutoSettlementMonitor({
     intervalMs: Number(process.env.AUTO_SETTLEMENT_INTERVAL_MS ?? '180000'),
     getEventWatchState,
+    upsertEventWatchState,
     getStatsFreshness: ufcStats.getFreshnessMeta,
     getFightHistoryRows: ufcStats.getFightHistoryRows,
     getFightHistoryCacheSnapshot,
