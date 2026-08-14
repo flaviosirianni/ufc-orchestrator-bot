@@ -3110,6 +3110,20 @@ function hasOperationalLedgerToolUsage(turnContext = null) {
   );
 }
 
+function hasLedgerReceiptEvidence(turnContext = null) {
+  if (!turnContext || typeof turnContext !== 'object') return false;
+  return Boolean(turnContext.hasLedgerMutationReceipt || turnContext.hasLedgerCreateReceipt);
+}
+
+function hasLedgerMutationSuccessClaim(text = '') {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  return (
+    /\bya\s+(la|lo|los|las)?\s*(archiv|elimin|borr|cerr|liquid|marqu|settl)\w*\b/.test(normalized) ||
+    /\bqued(o|aron)\s+(la|lo|los|las)?\s*(archivad|eliminad|borrad|cerrad|liquidad)\w*\b/.test(normalized)
+  );
+}
+
 function pruneExposureClaims(text = '') {
   const lines = String(text || '').split('\n');
   if (!lines.length) return String(text || '').trim();
@@ -4535,6 +4549,19 @@ function enforceContradictionHandler(
     'No voy a sostener el claim sin verificacion adicional.',
     formatTemporalAnchorLine(temporalContext),
     'Si queres, hago un chequeo puntual ahora y te paso la version corregida.',
+  ].join('\n');
+}
+
+function enforceLedgerMutationClaimGuard(reply = '', originalMessage = '', turnContext = null) {
+  const text = String(reply || '').trim();
+  if (!text) return text;
+  if (!isLedgerOperationMessage(originalMessage)) return text;
+  if (!hasLedgerMutationSuccessClaim(text)) return text;
+  if (hasLedgerReceiptEvidence(turnContext)) return text;
+
+  return [
+    '⚠️ No pude confirmar esa operación: no se ejecutó ninguna mutación real sobre tus apuestas en este turno.',
+    'No archivé, elimine ni cerré nada todavía a pesar de lo que dije arriba. Pasame de nuevo el bet_id o la seleccion exacta y lo hago con la herramienta correspondiente.',
   ].join('\n');
 }
 
@@ -8569,7 +8596,8 @@ export function createBettingWizard({
           let pending = null;
           if (confirmationToken) {
             pending = consumePendingMutation(mutationScope, confirmationToken);
-          } else {
+          }
+          if (!pending) {
             const pendingByScope = getPendingMutationsForScope(mutationScope);
             const matching = pendingByScope.filter((entry) => {
               const entrySteps = Array.isArray(entry.payload?.steps) ? entry.payload.steps : [];
@@ -8678,7 +8706,8 @@ export function createBettingWizard({
         let pending = null;
         if (confirmationToken) {
           pending = consumePendingMutation(mutationScope, confirmationToken);
-        } else {
+        }
+        if (!pending) {
           const pendingByScope = getPendingMutationsForScope(mutationScope);
           const matching = pendingByScope.filter((entry) => {
             const sameOperation =
@@ -9612,7 +9641,7 @@ export function createBettingWizard({
         };
       }
 
-      let workingReply = reply;
+      let workingReply = enforceLedgerMutationClaimGuard(reply, originalMessage, turnToolEffects);
       let committeeBlocked = false;
       let citations = Array.isArray(result.citations) ? result.citations : [];
 

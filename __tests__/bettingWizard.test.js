@@ -471,6 +471,179 @@ export async function runBettingWizardTests() {
   });
 
   tests.push(async () => {
+    // Regresión hallazgo QA en vivo 2026-08-14: el bot respondió
+    // "Perfecto, ya archivé la apuesta #50..." sin haber llamado ninguna tool
+    // (verificado por ausencia de linea "tool call" en journalctl). El guard
+    // debe interceptar cualquier claim de exito sobre una mutacion de ledger
+    // cuando no hubo un receipt real de mutacion en el turno.
+    const conversationStore = createConversationStore();
+    const fakeClient = createSequentialFakeClient([
+      responseWithText(
+        'Perfecto, ya archivé la apuesta #50 como “QA / inválida” para mantener la trazabilidad. ✅📂'
+      ),
+    ]);
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation() {
+          throw new Error('no debería llamarse: el modelo no invocó ninguna tool en este turno');
+        },
+        applyBetMutation() {
+          throw new Error('no debería llamarse: el modelo no invocó ninguna tool en este turno');
+        },
+      },
+    });
+
+    const result = await wizard.handleMessage('Archivar #50', {
+      chatId: 'chat-false-success',
+      userId: 'u-false-success',
+      originalMessage: 'Archivar #50',
+      resolution: {
+        resolvedMessage: 'Archivar #50',
+      },
+    });
+
+    assert.doesNotMatch(result.reply, /ya archiv/i);
+    assert.match(result.reply, /no se ejecutó ninguna mutación real/i);
+  });
+
+  tests.push(async () => {
+    // Regresión hallazgo QA en vivo 2026-08-14: la confirmacion por token
+    // fallo 3 veces con invalid_or_expired_confirmation_token via chat real,
+    // a los ~69s de haber sido emitido (bien dentro del TTL de 10 min). Si el
+    // modelo manda un confirmationToken mal recordado/alucinado pero hay una
+    // unica mutacion pendiente sin ambiguedad para ese scope, debe aplicarse
+    // igual via el fallback por contexto en lugar de fallar en seco.
+    const conversationStore = createConversationStore();
+    const calls = [];
+    let callIndex = 0;
+    let capturedToken = '';
+    let confirmToolOutput = null;
+    let applyCalls = 0;
+
+    const fakeClient = {
+      calls,
+      responses: {
+        async create(payload) {
+          calls.push(JSON.parse(JSON.stringify(payload)));
+          callIndex += 1;
+
+          if (callIndex === 1) {
+            return responseWithFunctionCall(
+              'mutate_user_bets',
+              { operation: 'archive', fight: 'Anthony Hernandez vs Sean Strickland' },
+              'call_mut_preview'
+            );
+          }
+
+          if (callIndex === 2) {
+            const output = payload.input?.[0]?.output;
+            capturedToken = JSON.parse(output || '{}').confirmationToken || '';
+            return responseWithText('Necesito confirmacion antes de archivar esa apuesta.');
+          }
+
+          if (callIndex === 3) {
+            return responseWithFunctionCall(
+              'mutate_user_bets',
+              {
+                operation: 'archive',
+                fight: 'Anthony Hernandez vs Sean Strickland',
+                confirm: true,
+                confirmationToken: 'mut_hallucinatedwrong',
+              },
+              'call_mut_apply'
+            );
+          }
+
+          if (callIndex === 4) {
+            const output = payload.input?.[0]?.output;
+            confirmToolOutput = JSON.parse(output || '{}');
+            return responseWithText('Listo, ya quedo archivada.');
+          }
+
+          return responseWithText('Listo.');
+        },
+      },
+    };
+
+    const wizard = createBettingWizard({
+      conversationStore,
+      client: fakeClient,
+      fightsScalper: {
+        async getFighterHistory() {
+          return { fighters: [], rows: [] };
+        },
+      },
+      userStore: {
+        previewBetMutation() {
+          return {
+            ok: true,
+            operation: 'archive',
+            requiresConfirmation: true,
+            candidates: [
+              {
+                id: 301,
+                eventName: 'UFC FN',
+                fight: 'Anthony Hernandez vs Sean Strickland',
+                pick: 'Under 4.5',
+                result: 'pending',
+              },
+            ],
+          };
+        },
+        applyBetMutation() {
+          applyCalls += 1;
+          return {
+            ok: true,
+            operation: 'archive',
+            affectedCount: 1,
+            receipts: [{ action: 'archive', betId: 301 }],
+          };
+        },
+      },
+    });
+
+    await wizard.handleMessage('archiva esa apuesta', {
+      chatId: 'chat-wrong-token',
+      userId: 'u-wrong-token',
+      originalMessage: 'archiva esa apuesta',
+      resolution: { resolvedMessage: 'archiva esa apuesta' },
+    });
+
+    // Evita a proposito la palabra "confirm" para no disparar el atajo
+    // deterministico pre-LLM (parseConfirmationIntent) y forzar que el
+    // segundo turno pase por el modelo + la tool mutate_user_bets, que es
+    // la ruta real que se ejecuto en produccion (linea "tool call:
+    // mutate_user_bets" en journalctl para ambos turnos, no solo el primero).
+    await wizard.handleMessage('dale, procede con eso', {
+      chatId: 'chat-wrong-token',
+      userId: 'u-wrong-token',
+      originalMessage: 'dale, procede con eso',
+      resolution: { resolvedMessage: 'dale, procede con eso' },
+    });
+
+    assert.ok(capturedToken, 'preview debe generar un token real');
+    assert.ok(confirmToolOutput, 'la ronda de confirmacion debe producir un resultado de tool');
+    assert.equal(
+      confirmToolOutput.error,
+      undefined,
+      `no deberia fallar con token incorrecto cuando hay una unica mutacion pendiente sin ambiguedad: ${JSON.stringify(confirmToolOutput)}`
+    );
+    assert.equal(
+      applyCalls,
+      1,
+      'debe aplicar la mutacion via fallback por contexto aunque el token no matchee exacto'
+    );
+  });
+
+  tests.push(async () => {
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([
       responseWithFunctionCall('record_user_bet', {
