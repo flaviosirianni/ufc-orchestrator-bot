@@ -6368,75 +6368,17 @@ export function createBettingWizard({
       };
     }
 
-    if (newsAlertsIntent && userStore?.getUserIntelPrefs) {
-      if (!userId) {
-        return {
-          reply:
-            'No pude resolver el usuario para esta accion. Reintenta desde tu chat personal para configurar alertas.',
-          metadata: {
-            resolvedFight: runtimeState.resolvedFight,
-            eventCard: runtimeState.eventCard,
-          },
-        };
-      }
-
-      const currentPrefs = userStore.getUserIntelPrefs(userId) || {
-        newsAlertsEnabled: true,
-        alertMinImpact: 'high',
-      };
-      let nextPrefs = currentPrefs;
-      let headline = '🔔 Estado de alertas de noticias.';
-
-      if (newsAlertsIntent.type === 'toggle' && userStore?.updateUserIntelPrefs) {
-        const nextEnabled = !Boolean(currentPrefs.newsAlertsEnabled);
-        nextPrefs =
-          userStore.updateUserIntelPrefs(userId, {
-            newsAlertsEnabled: nextEnabled,
-          }) || { ...currentPrefs, newsAlertsEnabled: nextEnabled };
-        headline = nextEnabled
-          ? '✅ Alertas de noticias activadas.'
-          : '✅ Alertas de noticias desactivadas.';
-      } else if (newsAlertsIntent.type === 'set' && userStore?.updateUserIntelPrefs) {
-        const desired = Boolean(newsAlertsIntent.enabled);
-        nextPrefs =
-          userStore.updateUserIntelPrefs(userId, {
-            newsAlertsEnabled: desired,
-          }) || { ...currentPrefs, newsAlertsEnabled: desired };
-        headline = desired
-          ? '✅ Alertas de noticias activadas.'
-          : '✅ Alertas de noticias desactivadas.';
-      }
-
-      const eventState = userStore?.getEventWatchState?.('next_event');
-      const lines = [
-        headline,
-        `- Estado: ${nextPrefs.newsAlertsEnabled ? 'ACTIVAS' : 'DESACTIVADAS'}`,
-        `- Umbral de impacto: ${formatImpactBadge(nextPrefs.alertMinImpact)} (${String(
-          nextPrefs.alertMinImpact || 'high'
-        ).toUpperCase()})`,
-      ];
-
-      if (eventState?.eventName) {
-        lines.push(
-          `- Evento monitoreado: ${eventState.eventName} (${formatEventDateLabel(
-            eventState.eventDateUtc,
-            temporalContext.timezone
-          )})`
-        );
-      }
-      if (nextPrefs?.updatedAt) {
-        lines.push(
-          `- Actualizado: ${formatIsoForUser(nextPrefs.updatedAt, temporalContext.timezone)}`
-        );
-      }
-
-      lines.push(
-        '',
-        'Comandos utiles: `activar alertas noticias`, `desactivar alertas noticias`, `estado alertas noticias`.'
-      );
-
+    if (newsAlertsIntent) {
+      // 2026-08-14: el envio automatico de alertas todavia no esta conectado
+      // a ningun mecanismo real (el toggle solo guardaba una preferencia que
+      // nada leia para mandar avisos) — sacado del front, en desarrollo.
+      // Ver WISHLIST.md. No tocar userStore prefs mientras tanto.
       return {
-        reply: lines.join('\n'),
+        reply: [
+          '🔔 Alertas de noticias todavía no está disponible.',
+          'Esta función está en desarrollo — por ahora no hay envío automático de avisos.',
+          'Podés seguir consultando novedades a demanda desde 📰 Evento → Últimas novedades.',
+        ].join('\n'),
         metadata: {
           resolvedFight: runtimeState.resolvedFight,
           eventCard: runtimeState.eventCard,

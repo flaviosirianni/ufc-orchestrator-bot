@@ -4794,6 +4794,11 @@ export async function runBettingWizardTests() {
   });
 
   tests.push(async () => {
+    // 2026-08-14: la feature de alertas de noticias se saco del front (boton
+    // removido) porque el toggle nunca estuvo conectado a un envio real de
+    // avisos (quedo en WISHLIST para implementacion completa). El intent de
+    // texto libre ahora responde honesto en vez de fingir que activo algo,
+    // y no debe tocar prefs en absoluto.
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
     const updatePayloads = [];
@@ -4808,23 +4813,11 @@ export async function runBettingWizardTests() {
       },
       userStore: {
         getUserIntelPrefs() {
-          return {
-            telegramUserId: 'u-alert-1',
-            newsAlertsEnabled: true,
-            alertMinImpact: 'high',
-            confidenceDeltaThreshold: 8,
-            updatedAt: null,
-          };
+          throw new Error('no deberia consultarse: la feature esta deshabilitada del front');
         },
         updateUserIntelPrefs(_userId, updates) {
           updatePayloads.push(updates);
-          return {
-            telegramUserId: 'u-alert-1',
-            newsAlertsEnabled: false,
-            alertMinImpact: 'high',
-            confidenceDeltaThreshold: 8,
-            updatedAt: '2026-03-07T12:00:00.000Z',
-          };
+          throw new Error('no deberia tocar prefs: la feature esta deshabilitada del front');
         },
         getEventWatchState() {
           return {
@@ -4845,10 +4838,8 @@ export async function runBettingWizardTests() {
       },
     });
 
-    assert.equal(updatePayloads.length, 1);
-    assert.deepEqual(updatePayloads[0], { newsAlertsEnabled: false });
-    assert.match(result.reply, /desactivadas/i);
-    assert.match(result.reply, /Estado:\s*DESACTIVADAS/i);
+    assert.equal(updatePayloads.length, 0);
+    assert.match(result.reply, /todav[ií]a no est[aá] disponible/i);
     assert.equal(fakeClient.calls.length, 0);
   });
 

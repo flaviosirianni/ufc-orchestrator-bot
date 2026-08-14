@@ -665,7 +665,8 @@ export async function runTelegramBotTests() {
       .filter(Boolean);
     assert.ok(flatCallbacks.includes('qa:event_projections'));
     assert.ok(flatCallbacks.includes('qa:latest_news'));
-    assert.ok(flatCallbacks.includes('act:cfg_news_alerts_toggle'));
+    // 2026-08-14: boton sacado del front, feature en desarrollo (ver WISHLIST.md).
+    assert.ok(!flatCallbacks.includes('act:cfg_news_alerts_toggle'));
     assert.ok(flatCallbacks.includes('menu:main'));
   });
 

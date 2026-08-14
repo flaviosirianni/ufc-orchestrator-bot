@@ -127,7 +127,6 @@ const GUIDED_EVENT_MENU_ROWS = [
     { text: '📊 Proyecciones', callback_data: 'qa:event_projections' },
     { text: '📰 Últimas novedades', callback_data: 'qa:latest_news' },
   ],
-  [{ text: '🔔 Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' }],
   [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
@@ -334,10 +333,7 @@ const EVENT_MENU_ROWS = [
     { text: '📊 Proyecciones', callback_data: 'qa:event_projections' },
     { text: '📰 Últimas novedades', callback_data: 'qa:latest_news' },
   ],
-  [
-    { text: '🔔 Alertas noticias', callback_data: 'act:cfg_news_alerts_toggle' },
-    { text: '⬅ Volver al menú', callback_data: 'menu:main' },
-  ],
+  [{ text: '⬅ Volver al menú', callback_data: 'menu:main' }],
 ];
 
 const CONFIG_MENU_ROWS = [
@@ -462,14 +458,6 @@ const QUICK_ACTION_HINTS = {
     '- `mi stake minimo es $3000 y minimo 4u por pick`',
     '- `utilizacion objetivo 35%`',
   ].join('\n'),
-  config_news_alerts_toggle: [
-    '🔔 Alertas de noticias',
-    'Activa o desactiva avisos automáticos de cambios relevantes del evento.',
-    'Ejemplos:',
-    '- `activar alertas noticias`',
-    '- `desactivar alertas noticias`',
-    '- `estado alertas noticias`',
-  ].join('\n'),
   help: [
     '🆘 Ayuda de botones',
     '',
@@ -493,7 +481,6 @@ const QUICK_ACTION_HINTS = {
     '🧠 Evento',
     '- `Proyecciones`: lectura actual pelea por pelea + confianza.',
     '- `Ultimas novedades`: resumen de noticias relevantes recientes.',
-    '- `Alertas noticias`: activa/desactiva avisos automáticos de novedades relevantes.',
     '',
     'Tip: podés seguir usando chat libre; los botones son atajos.',
   ].join('\n'),
@@ -746,7 +733,6 @@ const GUIDED_ALLOWED_CALLBACKS = new Set([
   'qa:list_history',
   'qa:event_projections',
   'qa:latest_news',
-  'act:cfg_news_alerts_toggle',
   'qa:view_config',
   'qa:help',
   'qa:view_credits',
@@ -3141,14 +3127,6 @@ export function startTelegramBot(router, options = {}) {
         return;
       }
 
-      if (data === 'act:cfg_news_alerts_toggle') {
-        const routed = await routeSyntheticAction(query, 'toggle alertas noticias');
-        await sendBotMessage(chatId, routed || 'No pude actualizar alertas ahora mismo.', {
-          menuScope: 'ufc_event',
-        });
-        return;
-      }
-
       if (data === 'qa:view_config') {
         const routed = await routeSyntheticAction(
           query,
@@ -3406,7 +3384,6 @@ export function startTelegramBot(router, options = {}) {
       'qa:view_credits': 'decime cuantos creditos tengo y mis ultimos movimientos',
       'qa:event_projections': 'mostrame proyecciones para el proximo evento',
       'qa:latest_news': 'mostrame ultimas novedades relevantes del proximo evento',
-      'act:cfg_news_alerts_toggle': 'toggle alertas noticias',
     };
 
     const syntheticMessage = syntheticByAction[data];
@@ -3423,7 +3400,6 @@ export function startTelegramBot(router, options = {}) {
       'qa:view_credits': 'config',
       'qa:event_projections': 'event',
       'qa:latest_news': 'event',
-      'act:cfg_news_alerts_toggle': 'config',
     };
     const menuScope = menuScopeByAction[data] || getMenuScope(chatId);
     await sendBotMessage(chatId, routed || 'No pude completar esa accion ahora mismo.', {
