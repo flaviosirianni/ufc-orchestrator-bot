@@ -1402,57 +1402,24 @@ Revision de estado: `2026-07-18` (inicio del track integral de estabilizacion UF
    - **Prioridad:** alta.
    - **Estado:** pendiente.
 
-41. **[PRIORIDAD CRITICA] `Analizar Cuotas` con selector de peleas del evento y modo continuo de screenshots**
-   - **Objetivo de negocio/UX:** reducir friccion en el flujo principal de apuestas permitiendo seleccionar pelea desde lista y seguir cargando screenshots en modo continuo sin perder contexto.
-   - **Problema observado (ejemplo real):**
-     - En `Analizar Cuotas` hoy no aparece un listado guiado de peleas del evento live/proximo para elegir rapido.
-     - El usuario quiere analizar por seleccion directa de pelea y continuar subiendo screenshots durante la sesion de analisis.
-   - **Comportamiento deseado para el usuario final:**
-     - Al entrar en `📸 Analizar cuotas`, el bot muestra lista de peleas del evento relevante (live si existe, sino proximo).
-     - El usuario elige pelea y recibe analisis inmediato orientado a esa pelea.
-     - Mientras siga en modo analisis, puede mandar mas screenshots y el bot:
-       - asocia automaticamente la pelea cuando es clara,
-       - o pide desambiguacion minima cuando hay conflicto.
-   - **Diseno tecnico sugerido (componentes, reglas, guardrails, estados):**
-     - `AnalysisSessionState` por chat:
-       - `event_id`,
-       - `fight_id`,
-       - `fighterA/fighterB`,
-       - `mode=analyze_quotes`,
-       - `last_snapshot_at`.
-     - Nuevos callbacks:
-       - `qa:analyze_quotes_card`,
-       - `qa:analyze_quotes_fight:<event_id>:<fight_id>`,
-       - `qa:analyze_quotes_change_fight`.
-     - Resolver evento objetivo:
-       - prioridad `current_event` live,
-       - fallback `next_event`.
-     - Ingesta continua:
-       - cada screenshot actualiza `store_user_odds` para la pelea activa,
-       - extractor OCR/vision intenta inferir pelea; si coincide con sesion, auto-merge,
-       - si detecta pelea distinta con alta confianza, pedir confirmacion de switch.
-     - Guardrails:
-       - bloquear recomendaciones si cuota detectada es ambigua para multiples peleas,
-       - mantener compatibilidad con texto estructurado actual,
-       - expirar sesion de analisis por inactividad (ej. 20-30 min).
-     - Estados sugeridos:
-       - `analysis_waiting_fight_selection`,
-       - `analysis_active_fight_selected`,
-       - `analysis_waiting_disambiguation`,
-       - `analysis_expired`.
+41. **Guard de mismatch pelea-screenshot en `Analizar Cuotas` (alcance reducido 2026-08-14, ver nota)**
+   - **Objetivo de negocio/UX:** cuando hay una pelea activa en la sesion de analisis, que el bot nunca mezcle odds de un screenshot que en realidad es de otra pelea.
+   - **Nota de alcance (2026-08-14, revision contra `guided-menu-unification` Task 9)**: el pedido original de este item tenia dos partes. La primera — selector de pelea + "modo continuo" de screenshots sin perder contexto — **ya esta resuelta** por los botones `qa:analyze_quotes_for:<fightId>` de Task 9 (entrando via `📰 Evento → 📊 Proyecciones`): el `fightContext` persiste en `guidedActionByChat` entre screenshots consecutivos sin resetearse, y cualquier mensaje con imagen se trata como sesion "fresh" sin limite de inactividad. La segunda parte — que el boton directo "📸 Analizar cuotas" (fuera de Evento) tambien muestre el listado de peleas — se decidio **no hacerla**: no aporta lo suficiente para el esfuerzo, la via por Evento ya cubre el caso real. Lo unico que queda pendiente de verdad es el guardrail de abajo.
+   - **Problema observado:** el `fightContext` resuelto por boton se inyecta al system prompt como "esta pelea YA esta resuelta" — el LLM asume que cualquier screenshot que llegue es de esa pelea. Si el usuario manda un screenshot de una pelea distinta durante la misma sesion, no hay ninguna verificacion de codigo que lo detecte y pare: depende enteramente del criterio del LLM, sin guardrail deterministico.
+   - **Comportamiento deseado para el usuario final:** si el screenshot analizado parece corresponder a una pelea distinta a la del `fightContext` activo (nombres de peleadores extraidos no matchean), el bot pide confirmacion explicita de cambio de pelea en vez de aplicar los datos extraidos silenciosamente sobre el contexto viejo.
+   - **Diseno tecnico sugerido:**
+     - Despues de la extraccion de odds/fighters del screenshot (ya existente en el flujo de `analyze_quotes`), comparar los nombres extraidos contra `fightContext.fighterA/fighterB` (mismo tipo de matching por apellido que ya usa `webCorroboratesOddsMainEvent` en `eventIntel.js`).
+     - Si no matchean y la extraccion tiene confianza razonable, no aplicar los datos: responder pidiendo confirmacion explicita de cambio de pelea (similar al patron ya usado en mutaciones de ledger: no ejecutar en silencio, pedir confirmacion).
+     - Si el screenshot es ambiguo/ilegible, mantener el comportamiento actual (asumir la pelea activa).
    - **Criterios de aceptacion verificables:**
-     - `Analizar Cuotas` siempre muestra listado de peleas del evento live/proximo (si hay datos).
-     - Con pelea seleccionada, screenshots consecutivos mantienen contexto sin pedir pelea cada vez.
-     - Cuando una imagen apunta a otra pelea, el bot no mezcla odds: pide confirmacion de cambio.
+     - Sesion activa para pelea A, screenshot claro de pelea B -> el bot pide confirmacion de cambio, no mezcla odds de B bajo el contexto de A.
+     - Sesion activa para pelea A, screenshot de pelea A (o ambiguo) -> comportamiento actual sin cambios, no pide confirmacion de mas.
    - **Pruebas de regresion necesarias:**
-     - Flujo completo: `menu -> seleccionar pelea -> screenshot 1 -> screenshot 2` con mismo fight.
-     - Screenshot ambiguo (dos peleas posibles) -> desambiguacion obligatoria.
-     - Cambio manual de pelea en medio de sesion conserva consistencia de snapshots.
-     - Fallback sin live event: usa proximo evento automaticamente.
+     - Test con `fightContext` seteado + extraccion de odds de una pelea distinta -> assert que no se persiste nada y que la respuesta pide confirmacion.
+     - Test con `fightContext` seteado + extraccion de la misma pelea -> assert que aplica normal, sin pedir nada de mas.
    - **Riesgos y decisiones abiertas:**
-     - Decision abierta: definir limite de snapshots por sesion antes de compactar/rotar contexto.
-     - Decision abierta: definir criterio final de "alta confianza" para auto-switch de pelea.
-   - **Prioridad:** critico.
+     - Definir el umbral de "confianza razonable" para no pedir confirmacion de mas ante extracciones ruidosas/parciales (falsos positivos de mismatch serian mas molestos que el problema que resuelve).
+   - **Prioridad:** media (el riesgo real — mezclar odds silenciosamente — es acotado porque el usuario ve el analisis y puede corregir en el momento; no es un bug de "dice que si pero no lo hizo" como los de mutacion de ledger).
    - **Estado:** pendiente.
 
 42. **[PRIORIDAD CRITICA] Estabilizacion integral del UFC Betting Bot**
