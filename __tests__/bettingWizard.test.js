@@ -4308,8 +4308,9 @@ export async function runBettingWizardTests() {
   tests.push(async () => {
     // No stored current/next event at all, so odds-derived live reconciliation takes over
     // (shouldPreferOddsEventForIntel short-circuits true on empty fallback). Single-source
-    // (odds only, no web corroboration) must persist a verification that stays degraded/not
-    // consumable, same EventTruthGate contract as the wantsLiveEventStatus write site.
+    // (odds only, no web corroboration) is sourced from 'odds_scores_live' (trusted structured
+    // source since 2026-08-14's quorum-bypass fix) -> verified/consumable, same EventTruthGate
+    // contract as the wantsLiveEventStatus write site.
     const conversationStore = createConversationStore();
     const fakeClient = createSequentialFakeClient([responseWithText('no deberia ejecutarse')]);
     const nowMs = Date.now();
@@ -4396,8 +4397,8 @@ export async function runBettingWizardTests() {
     assert.equal(writes[0].snapshot.eventName, 'UFC 330');
     assert.equal(writes[0].snapshot.verification?.evidence?.structuredCardSource, true);
     assert.equal(writes[0].snapshot.verification?.compatibleSourceCount, 1);
-    assert.equal(writes[0].snapshot.verification?.confidence, 'degraded');
-    assert.equal(writes[0].snapshot.verification?.consumerAllowed, false);
+    assert.equal(writes[0].snapshot.verification?.confidence, 'verified');
+    assert.equal(writes[0].snapshot.verification?.consumerAllowed, true);
   });
 
   tests.push(async () => {

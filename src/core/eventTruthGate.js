@@ -19,6 +19,7 @@ export const EVENT_TRUTH_VERSION = 'event-truth/v1';
 const VALID_STATUSES = new Set(Object.values(EVENT_STATUS));
 const TITLE_LIKE_FIGHTER_PATTERN =
   /\b(preview|fight card|full card|main card|prelims?|live updates?|results?|analysis|predictions?)\b/i;
+const TRUSTED_STRUCTURED_SOURCES = new Set(['odds_api', 'odds_scores_live']);
 
 /**
  * Normaliza texto deportivo para validaciones conservadoras sin depender de acentos o casing.
@@ -224,7 +225,10 @@ export function evaluateEventTruth({
   if (verification.structuredCardSource !== true) {
     invalidReasons.push('structured_card_source_missing');
   }
-  if (compatibleSourceCount < 2) {
+  const isTrustedStructuredSource =
+    verification.structuredCardSource === true &&
+    TRUSTED_STRUCTURED_SOURCES.has(normalizeText(candidate.sourcePrimary));
+  if (compatibleSourceCount < 2 && !isTrustedStructuredSource) {
     degradedReasons.push('source_quorum_failed');
   }
   if (verifiedAtMs === null) {

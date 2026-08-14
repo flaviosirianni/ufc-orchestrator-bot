@@ -88,8 +88,11 @@ export async function runEventIntelTests() {
   }
 
   {
-    // Odds API gives a structured card but web news has nothing matching it (no corroboration) ->
-    // single-source structured data stays `degraded`, not `verified`, not consumable.
+    // Odds API gives a structured card but web news has nothing matching it (no
+    // corroboration, e.g. a smaller Fight Night card with no press coverage the
+    // day before). Since 2026-08-14, a single Odds API source is trusted on its
+    // own (paid structured source, not the unstructured-editorial-guess pattern
+    // the quorum rule was built to catch) -> `verified`/consumable, not blocked.
     const writes = [];
     const result = await discoverNextEvent({
       listUpcomingOddsEvents: () => [
@@ -104,9 +107,9 @@ export async function runEventIntelTests() {
     });
 
     assert.equal(result.ok, true);
-    assert.equal(writes[0]?.verification?.confidence, 'degraded');
-    assert.equal(writes[0]?.verification?.consumerAllowed, false);
-    assert.deepEqual(writes[0]?.verification?.reasons, ['source_quorum_failed']);
+    assert.equal(writes[0]?.verification?.confidence, 'verified');
+    assert.equal(writes[0]?.verification?.consumerAllowed, true);
+    assert.ok(!writes[0]?.verification?.reasons?.includes('source_quorum_failed'));
   }
 
   {
