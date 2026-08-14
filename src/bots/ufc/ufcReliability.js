@@ -45,6 +45,16 @@ function toPositiveInt(value, fallback) {
   return Math.round(parsed);
 }
 
+function toPositiveIntList(value, fallback = []) {
+  const raw = String(value || '').trim();
+  if (!raw) return [...fallback];
+  const parsed = raw
+    .split(',')
+    .map((item) => toPositiveInt(item.trim(), 0))
+    .filter((item) => item > 0);
+  return parsed.length ? parsed : [...fallback];
+}
+
 function readQuickCheckMessages(db) {
   const rows = db.prepare('PRAGMA quick_check').all();
   return rows
@@ -67,18 +77,60 @@ function readMissingTables(db, requiredTables = []) {
   return missing;
 }
 
-function pruneOldBackups(backupDir, retentionDays) {
-  const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const pruned = [];
+/**
+ * Poda backups con retención escalonada tipo grandfather-father-son: conserva
+ * todo dentro de `recentDays` (para rollback rápido), y de lo más viejo que
+ * eso guarda a lo sumo un snapshot por cada antigüedad objetivo en
+ * `milestoneDays` (el más cercano disponible a esa antigüedad), borrando el
+ * resto.
+ *
+ * @returns {string[]} Paths absolutos de los backups eliminados.
+ * @sideEffects Elimina archivos `ufc-backup-*.sqlite` del directorio dado.
+ */
+export function pruneOldBackups(backupDir, { recentDays, milestoneDays = [] } = {}) {
+  const nowMs = Date.now();
+  const recentCutoffMs = nowMs - recentDays * 24 * 60 * 60 * 1000;
   const items = fs.readdirSync(backupDir, { withFileTypes: true });
+  const backups = [];
   for (const item of items) {
     if (!item.isFile()) continue;
     if (!item.name.startsWith('ufc-backup-') || !item.name.endsWith('.sqlite')) continue;
     const fullPath = path.join(backupDir, item.name);
     const stat = fs.statSync(fullPath);
-    if (stat.mtimeMs < cutoffMs) {
-      fs.rmSync(fullPath, { force: true });
-      pruned.push(fullPath);
+    backups.push({ fullPath, mtimeMs: stat.mtimeMs });
+  }
+
+  const keep = new Set();
+  const older = [];
+  for (const backup of backups) {
+    if (backup.mtimeMs >= recentCutoffMs) {
+      keep.add(backup.fullPath);
+    } else {
+      older.push(backup);
+    }
+  }
+
+  for (const daysAgo of milestoneDays) {
+    const targetMs = nowMs - Number(daysAgo) * 24 * 60 * 60 * 1000;
+    let closest = null;
+    let closestDeltaMs = Infinity;
+    for (const backup of older) {
+      const deltaMs = Math.abs(backup.mtimeMs - targetMs);
+      if (deltaMs < closestDeltaMs) {
+        closestDeltaMs = deltaMs;
+        closest = backup;
+      }
+    }
+    if (closest) {
+      keep.add(closest.fullPath);
+    }
+  }
+
+  const pruned = [];
+  for (const backup of backups) {
+    if (!keep.has(backup.fullPath)) {
+      fs.rmSync(backup.fullPath, { force: true });
+      pruned.push(backup.fullPath);
     }
   }
   return pruned;
@@ -141,7 +193,8 @@ export function verifyUfcDb({
 export async function createUfcDbBackup({
   dbPath = process.env.DB_PATH || '',
   backupDir = process.env.UFC_DB_BACKUP_DIR || '',
-  retentionDays = toPositiveInt(process.env.UFC_DB_BACKUP_RETENTION_DAYS, 14),
+  recentDays = toPositiveInt(process.env.UFC_DB_BACKUP_RECENT_DAYS, 5),
+  milestoneDays = toPositiveIntList(process.env.UFC_DB_BACKUP_MILESTONE_DAYS, [15, 30, 60, 90]),
   verifyBackup = isFeatureEnabled(process.env.UFC_DB_BACKUP_VERIFY_RESTORE, true),
 } = {}) {
   const normalizedDbPath = String(dbPath || '').trim();
@@ -181,7 +234,10 @@ export async function createUfcDbBackup({
       createdAt: new Date().toISOString(),
     };
   }
-  const pruned = pruneOldBackups(resolvedBackupDir, toPositiveInt(retentionDays, 14));
+  const pruned = pruneOldBackups(resolvedBackupDir, {
+    recentDays: toPositiveInt(recentDays, 5),
+    milestoneDays,
+  });
   const stat = fs.statSync(finalFile);
 
   return {
@@ -208,7 +264,8 @@ export function startUfcDbReliabilityLoop({
   dbPath = process.env.DB_PATH || '',
   backupDir = process.env.UFC_DB_BACKUP_DIR || '',
   intervalMs = toPositiveInt(process.env.UFC_DB_BACKUP_INTERVAL_MS, 6 * 60 * 60 * 1000),
-  retentionDays = toPositiveInt(process.env.UFC_DB_BACKUP_RETENTION_DAYS, 14),
+  recentDays = toPositiveInt(process.env.UFC_DB_BACKUP_RECENT_DAYS, 5),
+  milestoneDays = toPositiveIntList(process.env.UFC_DB_BACKUP_MILESTONE_DAYS, [15, 30, 60, 90]),
   verifyBackup = isFeatureEnabled(process.env.UFC_DB_BACKUP_VERIFY_RESTORE, true),
   logger = console,
 } = {}) {
@@ -247,7 +304,8 @@ export function startUfcDbReliabilityLoop({
       const backupResult = await createUfcDbBackup({
         dbPath,
         backupDir,
-        retentionDays,
+        recentDays,
+        milestoneDays,
         verifyBackup,
       });
       if (!backupResult.ok) {

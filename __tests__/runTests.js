@@ -27,6 +27,7 @@ const SUITES = [
   },
   { modulePath: './snapshotDedupe.test.js', exportName: 'runSnapshotDedupeTests' },
   { modulePath: './ufcHealthStatus.test.js', exportName: 'runUfcHealthStatusTests' },
+  { modulePath: './ufcReliability.test.js', exportName: 'runUfcReliabilityTests' },
   { modulePath: './ufcStatsTool.test.js', exportName: 'runUfcStatsToolTests' },
   { modulePath: './sqliteStoreComposite.test.js', exportName: 'runSqliteStoreCompositeTests' },
   { modulePath: './bettingWizard.test.js', exportName: 'runBettingWizardTests' },

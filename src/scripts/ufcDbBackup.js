@@ -24,14 +24,28 @@ function toPositiveInt(value, fallback) {
   return Math.round(parsed);
 }
 
+function toPositiveIntList(value, fallback = []) {
+  const raw = String(value || '').trim();
+  if (!raw) return [...fallback];
+  const parsed = raw
+    .split(',')
+    .map((item) => toPositiveInt(item.trim(), 0))
+    .filter((item) => item > 0);
+  return parsed.length ? parsed : [...fallback];
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const result = await createUfcDbBackup({
     dbPath: args.db || process.env.DB_PATH || '',
     backupDir: args.backup_dir || process.env.UFC_DB_BACKUP_DIR || '',
-    retentionDays: toPositiveInt(
-      args.retention_days || process.env.UFC_DB_BACKUP_RETENTION_DAYS,
-      14
+    recentDays: toPositiveInt(
+      args.recent_days || process.env.UFC_DB_BACKUP_RECENT_DAYS,
+      5
+    ),
+    milestoneDays: toPositiveIntList(
+      args.milestone_days || process.env.UFC_DB_BACKUP_MILESTONE_DAYS,
+      [15, 30, 60, 90]
     ),
   });
   console.log(JSON.stringify(result, null, 2));

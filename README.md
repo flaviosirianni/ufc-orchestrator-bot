@@ -182,7 +182,8 @@ NUTRITION_DB_PATH=
 UFC_DB_BACKUP_ENABLED=true
 UFC_DB_BACKUP_DIR=/home/ubuntu/bot-data/ufc/backups
 UFC_DB_BACKUP_INTERVAL_MS=21600000
-UFC_DB_BACKUP_RETENTION_DAYS=14
+UFC_DB_BACKUP_RECENT_DAYS=5
+UFC_DB_BACKUP_MILESTONE_DAYS=15,30,60,90
 UFC_DB_BACKUP_VERIFY_RESTORE=true
 NUTRITION_DB_BACKUP_ENABLED=true
 NUTRITION_DB_BACKUP_DIR=/home/ubuntu/bot-data/nutrition/backups
@@ -399,11 +400,12 @@ Podés seguir usando `npm run start` para lanzar el bot default (`BOT_ID=ufc`).
 
 #### UFC DB Reliability
 
-- Backup automático rotativo para UFC DB (configurable por env):
+- Backup automático rotativo para UFC DB (configurable por env), con retención escalonada tipo grandfather-father-son:
   - `UFC_DB_BACKUP_ENABLED=true|false`
   - `UFC_DB_BACKUP_DIR=/home/ubuntu/bot-data/ufc/backups`
   - `UFC_DB_BACKUP_INTERVAL_MS=21600000` (default 6h)
-  - `UFC_DB_BACKUP_RETENTION_DAYS=14`
+  - `UFC_DB_BACKUP_RECENT_DAYS=5` — se conservan **todos** los backups dentro de esta ventana (rollback rápido de deploys).
+  - `UFC_DB_BACKUP_MILESTONE_DAYS=15,30,60,90` — de lo más viejo que `RECENT_DAYS`, se conserva sólo el backup más cercano a cada antigüedad objetivo (no hace falta que caiga exacto; si no hay nada cerca de un hito lejano, se autocorrige solo con el tiempo).
 - En cada ciclo: verificación `PRAGMA quick_check` + validación de tablas críticas + backup `.sqlite`.
 - Post-backup verification (default on): `UFC_DB_BACKUP_VERIFY_RESTORE=true|false`.
   - Si el backup no pasa `quick_check`/tablas críticas, se descarta y el ciclo falla explícitamente.
